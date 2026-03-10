@@ -1,0 +1,68 @@
+---
+- name: UFW installieren
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: UFW — Default Policy incoming deny
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: UFW — Default Policy outgoing allow
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: UFW — LAN-Ports öffnen
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    src: "{{ hardening_lan_subnet }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ hardening_ufw_lan_ports }}"
+
+- name: UFW aktivieren (logging on)
+  community.general.ufw:
+    state: enabled
+    logging: "on"
+
+- name: Fail2ban installieren
+  ansible.builtin.apt:
+    name: fail2ban
+    state: present
+
+- name: Fail2ban — SSH jail aktivieren
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.conf
+    content: |
+      [sshd]
+      enabled = true
+      port    = ssh
+      filter  = sshd
+      maxretry = 5
+      bantime  = 3600
+      findtime = 600
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Fail2ban aktivieren und starten
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+
+- name: SSH-Hardening Drop-in anlegen
+  ansible.builtin.template:
+    src: sshd_hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-hardening.conf
+    owner: root
+    group: root
+    mode: "0600"
+    validate: /usr/sbin/sshd -t -f /dev/null
+  notify: Reload sshd

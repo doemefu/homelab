@@ -1,0 +1,71 @@
+---
+# Bootstrap-Playbook: initialer Zugang via ubuntu-User (vor ansible-User-Anlage)
+# Läuft einmalig pro Node; danach übernimmt ansible-User.
+# Ausführen mit: ansible-playbook infra/playbooks/00_bootstrap.yml \
+#                -u ubuntu --ask-become-pass -l <node>
+- name: Bootstrap — Python, ansible-User, SSH-Key, sudo
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars:
+    bootstrap_user: ubuntu
+    operator_pubkey_file: "{{ ansible_ssh_private_key_file }}.pub"
+
+  tasks:
+    - name: Python3 sicherstellen (raw — vor gather_facts)
+      ansible.builtin.raw: |
+        test -e /usr/bin/python3 || (apt-get update -qq && apt-get install -y python3)
+      changed_when: false
+
+    - name: Facts sammeln (nach Python3-Setup)
+      ansible.builtin.setup:
+
+    - name: Ansible-Gruppe anlegen
+      ansible.builtin.group:
+        name: ansible
+        state: present
+        system: true
+
+    - name: Ansible-User anlegen
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        group: ansible
+        groups: sudo
+        shell: /bin/bash
+        create_home: true
+        state: present
+        system: false
+
+    - name: .ssh-Verzeichnis für ansible-User anlegen
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.ssh"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: ansible
+        mode: "0700"
+
+    - name: SSH-Public-Key für ansible-User hinterlegen
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ lookup('file', operator_pubkey_file) }}"
+
+    - name: Passwordless sudo für ansible-User konfigurieren
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/ansible
+        content: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Apt-Cache aktualisieren
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: System-Packages auf neuesten Stand bringen
+      ansible.builtin.apt:
+        upgrade: safe
+        autoremove: true

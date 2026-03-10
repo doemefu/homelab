@@ -1,0 +1,40 @@
+---
+# Gemeinsame Variablen für alle Nodes
+# Secrets (Cloudflare Token, k3s-Join-Token, Restic-Passwort) kommen in M2/M4
+# via SOPS verschlüsselt in jeweils passende group_vars
+
+ansible_user: ansible
+ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+ansible_python_interpreter: /usr/bin/python3
+
+# Timezone & NTP
+base_timezone: "Europe/Zurich"
+base_ntp_servers:
+  - "0.ch.pool.ntp.org"
+  - "1.ch.pool.ntp.org"
+  - "2.ch.pool.ntp.org"
+  - "3.ch.pool.ntp.org"
+
+# System-Packages (auf allen Nodes)
+base_packages:
+  - curl
+  - git
+  - htop
+  - jq
+  - vim
+  - wget
+  - unzip
+  - ca-certificates
+  - gnupg
+  - lsb-release
+
+# Heimnetz-Subnetz (für UFW-Regeln)
+lan_subnet: "192.168.1.0/24"
+
+# Backup-Mount (pi5: externer USB/SSD; andere: lokales Verzeichnis)
+storage_backup_dir: "/var/lib/backup"
+storage_backup_mount: "/mnt/backup"
+
+# ha_host: Node auf dem Docker + Home Assistant läuft (ausserhalb k3s)
+# Gesetzt auf mba1 — kann bei Bedarf auf anderen Node geändert werden
+ha_host: "mba1"

@@ -1,0 +1,8 @@
+---
+# Ansible Collection Dependencies
+# Installieren mit: ansible-galaxy collection install -r infra/requirements.yml
+collections:
+  - name: ansible.posix
+    version: ">=2.0.0"
+  - name: community.general
+    version: ">=10.0.0"

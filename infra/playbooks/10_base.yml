@@ -1,0 +1,28 @@
+---
+# Basis-Provisionierung: OS, Hardening, Storage, MBA-Tweaks
+# Voraussetzung: 00_bootstrap.yml wurde bereits ausgeführt
+# Ausführen mit: ansible-playbook infra/playbooks/10_base.yml
+#                oder für einzelnen Node: -l pi5
+- name: Base — OS, NTP, Packages, Unattended-Upgrades
+  hosts: all
+  become: true
+  roles:
+    - role: base
+
+- name: Hardening — UFW, fail2ban, SSH
+  hosts: all
+  become: true
+  roles:
+    - role: hardening
+
+- name: Storage — Restic, Backup-Verzeichnisse, externer Mount (pi5)
+  hosts: all
+  become: true
+  roles:
+    - role: storage
+
+- name: Mac-Tweaks — Lid-close, T2-Kernel-Module (nur x86_64)
+  hosts: mac
+  become: true
+  roles:
+    - role: mac_tweaks

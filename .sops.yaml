@@ -1,0 +1,5 @@
+creation_rules:
+  - path_regex: infra/inventory/group_vars/.*\.yml$
+    age: age1hemf3e85hjhvsv8r5wx5s844uemug5jtaqpjfx8sefsu0kng0vwsyv5xlf
+  - path_regex: infra/inventory/host_vars/.*\.yml$
+    age: age1hemf3e85hjhvsv8r5wx5s844uemug5jtaqpjfx8sefsu0kng0vwsyv5xlf

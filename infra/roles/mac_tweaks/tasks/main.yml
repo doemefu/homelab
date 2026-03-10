@@ -1,0 +1,41 @@
+---
+# Diese Role läuft nur auf x86_64 Nodes (mba1, mba2)
+# Die when-Bedingung wird im Playbook gesetzt, nicht hier —
+# so bleibt die Role testbar und wiederverwendbar.
+
+- name: Logind-Konfigurationsverzeichnis anlegen
+  ansible.builtin.file:
+    path: /etc/systemd/logind.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Lid-close-Handling konfigurieren (kein Sleep/Reboot beim Zuklappen)
+  ansible.builtin.template:
+    src: logind-lid.conf.j2
+    dest: /etc/systemd/logind.conf.d/lid.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart systemd-logind
+
+- name: Verzeichnis für Kernel-Module-Konfiguration sicherstellen
+  ansible.builtin.file:
+    path: /etc/modules-load.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: T2-Kernel-Module beim Boot laden
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/apple-t2.conf
+    content: |
+      # Managed by Ansible — T2-Chip Module für MacBook Air
+      {% for module in mac_tweaks_kernel_modules %}
+      {{ module }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"

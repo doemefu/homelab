@@ -1,0 +1,60 @@
+---
+- name: Restic installieren
+  ansible.builtin.apt:
+    name: restic
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Lokales Backup-Verzeichnis anlegen
+  ansible.builtin.file:
+    path: "{{ storage_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# --- Externer Backup-Mount (nur pi5) ---
+
+- name: Backup-Mountpoint anlegen (externer USB/SSD)
+  ansible.builtin.file:
+    path: "{{ storage_backup_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: storage_has_external_backup
+
+- name: Prüfen ob externes Backup-Device konfiguriert ist
+  ansible.builtin.assert:
+    that:
+      - storage_backup_device | length > 0
+    fail_msg: >
+      storage_backup_device ist leer. Bitte den Gerätepfad in
+      group_vars/k3s_server.yml setzen (z.B. /dev/disk/by-uuid/XXXX).
+    success_msg: "Backup-Device konfiguriert: {{ storage_backup_device }}"
+  when: storage_has_external_backup
+  ignore_errors: true
+  register: storage_device_check
+
+- name: Warnung ausgeben wenn Backup-Device fehlt
+  ansible.builtin.debug:
+    msg: >
+      WARNUNG: storage_backup_device ist nicht gesetzt.
+      USB/SSD-Mount wird übersprungen. Bitte später in
+      group_vars/k3s_server.yml konfigurieren.
+  when:
+    - storage_has_external_backup
+    - storage_device_check is failed
+
+- name: Externes Backup-Device mounten
+  ansible.posix.mount:
+    path: "{{ storage_backup_mount }}"
+    src: "{{ storage_backup_device }}"
+    fstype: "{{ storage_backup_fstype }}"
+    opts: defaults,nofail
+    state: mounted
+  when:
+    - storage_has_external_backup
+    - storage_device_check is succeeded
+    - storage_backup_device | length > 0

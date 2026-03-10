@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude Code — local-only settings (never share)
+.claude/settings.local.json
+
+# Ansible
+*.retry
+.ansible/
+__pycache__/
+*.pyc
+
+# Secrets — never commit plaintext
+*.age
+.env
+.env.*
+*_secret*
+*_token*
+*_key*
+
+# Encrypted SOPS files (tracked, but excluded from accidental plaintext commits)
+# .sops.yaml is intentionally tracked (contains only public age key)
+
+# Editor
+*.swp
+*.swo
+.idea/
+.vscode/

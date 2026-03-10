@@ -1,0 +1,11 @@
+---
+storage_backup_dir: "/var/lib/backup"
+storage_backup_mount: "/mnt/backup"
+
+# Ob dieser Node ein externes Backup-Device hat (pi5: true, alle anderen: false)
+storage_has_external_backup: false
+
+# Gerätepfad des externen Backup-Devices (nur relevant wenn storage_has_external_backup: true)
+# Beispiel: /dev/disk/by-uuid/XXXX-XXXX
+storage_backup_device: ""
+storage_backup_fstype: "ext4"

@@ -1,0 +1,5 @@
+---
+# Variablen spezifisch für k3s Worker Nodes (pi4, mba1, mba2)
+
+# k3s agent spezifische Flags werden in M2 (Role k3s) gesetzt
+storage_has_external_backup: false

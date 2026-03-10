@@ -1,0 +1,21 @@
+---
+base_timezone: "Europe/Zurich"
+base_ntp_servers:
+  - "0.ch.pool.ntp.org"
+  - "1.ch.pool.ntp.org"
+  - "2.ch.pool.ntp.org"
+  - "3.ch.pool.ntp.org"
+
+base_packages:
+  - curl
+  - git
+  - htop
+  - jq
+  - vim
+  - wget
+  - unzip
+  - ca-certificates
+  - gnupg
+  - lsb-release
+
+base_unattended_upgrades_enabled: true

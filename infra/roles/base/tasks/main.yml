@@ -1,0 +1,66 @@
+---
+- name: Hostname setzen
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+    use: systemd
+
+- name: /etc/hosts — lokaler Hostname-Eintrag
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1'
+    line: "127.0.1.1 {{ inventory_hostname }}"
+    state: present
+
+- name: Timezone setzen
+  community.general.timezone:
+    name: "{{ base_timezone }}"
+
+- name: Chrony installieren
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Chrony konfigurieren
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chrony
+
+- name: Chrony aktivieren und starten
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+
+- name: Standard-Packages installieren
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Unattended-Upgrades installieren
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - apt-listchanges
+    state: present
+  when: base_unattended_upgrades_enabled
+
+- name: Unattended-Upgrades aktivieren
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+    owner: root
+    group: root
+    mode: "0644"
+  when: base_unattended_upgrades_enabled
+  notify: Restart unattended-upgrades

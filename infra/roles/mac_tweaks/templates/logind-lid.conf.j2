@@ -1,0 +1,6 @@
+# Managed by Ansible — do not edit manually
+# Verhindert Reboot/Suspend beim Schliessen des MacBook-Deckels
+[Login]
+HandleLidSwitch={{ mac_tweaks_logind_handle_lid_switch }}
+HandleLidSwitchExternalPower={{ mac_tweaks_logind_handle_lid_switch_external_power }}
+HandleLidSwitchDocked=ignore

@@ -1,0 +1,7 @@
+---
+# Variablen spezifisch für den HA/Docker Node (ha_host, aktuell mba1)
+# Docker CE wird nur auf diesem Node installiert (Role docker, kommt in M1)
+
+# Docker-Konfiguration
+docker_users:
+  - "{{ ansible_user }}"

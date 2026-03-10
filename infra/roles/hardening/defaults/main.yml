@@ -1,0 +1,20 @@
+---
+hardening_lan_subnet: "{{ lan_subnet | default('192.168.1.0/24') }}"
+
+# UFW — Ports die intern geöffnet werden (nur vom LAN)
+hardening_ufw_lan_ports:
+  - { port: "22", proto: "tcp", comment: "SSH" }
+  - { port: "80", proto: "tcp", comment: "HTTP intern (Longhorn UI, etc.)" }
+  - { port: "443", proto: "tcp", comment: "HTTPS intern" }
+  - { port: "6443", proto: "tcp", comment: "k3s API server" }
+  - { port: "10250", proto: "tcp", comment: "kubelet" }
+  - { port: "8472", proto: "udp", comment: "Flannel VXLAN" }
+  - { port: "2379:2380", proto: "tcp", comment: "etcd" }
+  - { port: "9500:9502", proto: "tcp", comment: "Longhorn" }
+  - { port: "9100", proto: "tcp", comment: "Node Exporter" }
+
+# SSH Hardening
+hardening_ssh_max_auth_tries: 3
+hardening_ssh_permit_root_login: "no"
+hardening_ssh_password_auth: "no"
+hardening_ssh_x11_forwarding: "no"
