@@ -1,0 +1,27 @@
+---
+# Homelab Node Inventory — EXAMPLE FILE
+# Kopiere diese Datei nach hosts.yml und trage die echten IPs ein:
+#   cp infra/inventory/hosts.yml.example infra/inventory/hosts.yml
+#
+# hosts.yml ist gitignored (enthält echte IPs) — diese Datei ist das Template.
+all:
+  children:
+    k3s_server:
+      hosts:
+        pi5:
+          ansible_host: 192.168.1.XXX   # Raspberry Pi 5 — Control-Plane
+    k3s_agent:
+      hosts:
+        pi4:
+          ansible_host: 192.168.1.XXX   # Raspberry Pi 4 — Worker
+        mba1:
+          ansible_host: 192.168.1.XXX   # MacBook Air 2020 — Worker + HA host
+        mba2:
+          ansible_host: 192.168.1.XXX   # MacBook Air 2019 — Worker
+    mac:
+      hosts:
+        mba1:
+        mba2:
+    docker_hosts:
+      hosts:
+        mba1:
