@@ -1,15 +1,20 @@
 ---
-# Bootstrap-Playbook: initialer Zugang via ubuntu-User (vor ansible-User-Anlage)
-# Läuft einmalig pro Node; danach übernimmt ansible-User.
-# Ausführen mit: ansible-playbook infra/playbooks/00_bootstrap.yml \
-#                -u ubuntu --ask-become-pass -l <node>
+# Bootstrap-Playbook: initialer Zugang via initialem Node-User (vor ansible-User-Anlage)
+# Läuft einmalig pro Node; danach übernimmt ansible-User alle weiteren Playbooks.
+#
+# Ausführen mit:
+#   ansible-playbook infra/playbooks/00_bootstrap.yml \
+#     -e initial_user=<node-user> -l <node> --become
+#
+# initial_user = der bereits existierende User auf dem Node (z.B. ubuntu)
+#                Echte Usernames: siehe infra/inventory/local.yml (gitignored)
+# ansible_user bleibt immer "ansible" (aus group_vars) — das ist der User der angelegt wird.
 - name: Bootstrap — Python, ansible-User, SSH-Key, sudo
   hosts: all
   gather_facts: false
   become: true
-
   vars:
-    bootstrap_user: ubuntu
+    bootstrap_mgmt_user: "ansible"  # Fest — der User der angelegt wird, nie ändern
     operator_pubkey_file: "{{ ansible_ssh_private_key_file }}.pub"
 
   tasks:
@@ -23,14 +28,14 @@
 
     - name: Ansible-Gruppe anlegen
       ansible.builtin.group:
-        name: ansible
+        name: "{{ bootstrap_mgmt_user }}"
         state: present
         system: true
 
     - name: Ansible-User anlegen
       ansible.builtin.user:
-        name: "{{ ansible_user }}"
-        group: ansible
+        name: "{{ bootstrap_mgmt_user }}"
+        group: "{{ bootstrap_mgmt_user }}"
         groups: sudo
         shell: /bin/bash
         create_home: true
@@ -39,22 +44,22 @@
 
     - name: .ssh-Verzeichnis für ansible-User anlegen
       ansible.builtin.file:
-        path: "/home/{{ ansible_user }}/.ssh"
+        path: "/home/{{ bootstrap_mgmt_user }}/.ssh"
         state: directory
-        owner: "{{ ansible_user }}"
-        group: ansible
+        owner: "{{ bootstrap_mgmt_user }}"
+        group: "{{ bootstrap_mgmt_user }}"
         mode: "0700"
 
     - name: SSH-Public-Key für ansible-User hinterlegen
       ansible.posix.authorized_key:
-        user: "{{ ansible_user }}"
+        user: "{{ bootstrap_mgmt_user }}"
         state: present
         key: "{{ lookup('file', operator_pubkey_file) }}"
 
     - name: Passwordless sudo für ansible-User konfigurieren
       ansible.builtin.copy:
-        dest: /etc/sudoers.d/ansible
-        content: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        dest: "/etc/sudoers.d/{{ bootstrap_mgmt_user }}"
+        content: "{{ bootstrap_mgmt_user }} ALL=(ALL) NOPASSWD:ALL\n"
         owner: root
         group: root
         mode: "0440"

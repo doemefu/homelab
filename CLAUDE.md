@@ -11,6 +11,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Optional overrides: `CLAUDE.override.md` (same precedence layer, takes priority over `CLAUDE.md`).
 - Keep this file concise; prefer nested `CLAUDE.md` files for subprojects if you approach size limits.
 
+> **Session-Start:** Lies `.agent/memory.md` vollständig. Der oberste Eintrag zeigt den aktuellen
+> Stand. Gibt es einen Eintrag mit `status: in_progress`, lies das verlinkte Worklog und frage den
+> User: *"Ich sehe dass wir bei [SLUG] unterbrochen haben. Weitermachen?"* — bevor du eigenständig
+> etwas tust.
+
 > **Nach jedem abgeschlossenen Change:** Einen neuen Block **oben** in `.agent/memory.md` einfügen (Format siehe dort). Die Datei wächst von unten nach oben — neueste Einträge immer zuerst sichtbar.
 
 ---

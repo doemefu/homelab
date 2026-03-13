@@ -4,13 +4,21 @@
 .LSOverride
 
 # Claude Code — local-only settings (never share)
-.claude/settings.local.json
+.claude/
 
 # Ansible
 *.retry
 .ansible/
 __pycache__/
 *.pyc
+
+# Inventory — echte IPs und lokale Node-Infos nie ins öffentliche Repo
+infra/inventory/hosts.yml
+infra/inventory/local.yml
+
+# Agent-Worklogs — lokale Implementierungsdetails, nicht für öffentliches Repo
+# memory.md wird getrackt (Entscheidungshistorie), Worklogs bleiben lokal
+.agent/
 
 # Secrets — never commit plaintext
 *.age

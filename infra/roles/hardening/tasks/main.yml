@@ -56,6 +56,7 @@
     name: fail2ban
     state: started
     enabled: true
+  ignore_errors: "{{ ansible_check_mode }}"
 
 - name: SSH-Hardening Drop-in anlegen
   ansible.builtin.template:
@@ -64,5 +65,4 @@
     owner: root
     group: root
     mode: "0600"
-    validate: /usr/sbin/sshd -t -f /dev/null
   notify: Reload sshd

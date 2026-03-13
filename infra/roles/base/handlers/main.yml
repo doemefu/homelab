@@ -3,6 +3,7 @@
   ansible.builtin.service:
     name: chrony
     state: restarted
+  ignore_errors: "{{ ansible_check_mode }}"
 
 - name: Restart unattended-upgrades
   ansible.builtin.service:

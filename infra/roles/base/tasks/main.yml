@@ -36,6 +36,7 @@
     name: chrony
     state: started
     enabled: true
+  ignore_errors: "{{ ansible_check_mode }}"
 
 - name: Standard-Packages installieren
   ansible.builtin.apt:

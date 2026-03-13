@@ -8,6 +8,7 @@
   ansible.builtin.service:
     name: fail2ban
     state: restarted
+  ignore_errors: "{{ ansible_check_mode }}"
 
 - name: Reload ufw
   community.general.ufw:
