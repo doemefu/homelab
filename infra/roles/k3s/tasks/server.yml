@@ -1,0 +1,33 @@
+---
+- name: K3s Konfigurationsverzeichnis anlegen
+  ansible.builtin.file:
+    path: "{{ k3s_kubeconfig_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: K3s Server Systemd-Service anlegen
+  ansible.builtin.template:
+    src: k3s-server.service.j2
+    dest: /etc/systemd/system/k3s.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart k3s
+
+- name: K3s Server aktivieren und starten
+  ansible.builtin.service:
+    name: k3s
+    state: started
+    enabled: true
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Warten bis k3s API-Server bereit ist
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: 6443
+    timeout: 120
+  when: not ansible_check_mode

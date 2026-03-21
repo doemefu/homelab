@@ -1,0 +1,42 @@
+---
+# k3s Cluster installieren
+# Voraussetzung: 10_base.yml wurde auf allen Nodes ausgeführt
+# Voraussetzung: infra/inventory/group_vars/secrets.yml existiert und ist befüllt
+#
+# Ausführen mit: ansible-playbook infra/playbooks/20_k3s.yml
+#                oder für einzelnen Node: -l raspi5
+# M3-Vorbereitung: Longhorn-Prerequisites werden hier bereits auf allen Nodes installiert,
+# damit 30_longhorn.yml in M3 direkt auf einer sauberen Basis aufsetzen kann.
+- name: Longhorn Prerequisites — open-iscsi, nfs-common, iscsi_tcp (M3-Vorbereitung)
+  hosts: all
+  become: true
+  roles:
+    - role: longhorn_prereqs
+
+- name: K3s Server installieren
+  hosts: k3s_server
+  become: true
+  roles:
+    - role: k3s
+
+- name: Kubeconfig lokal hinterlegen
+  hosts: k3s_server
+  tasks:
+    - name: Kubeconfig lesen
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: k3s_kubeconfig
+
+    - name: Kubeconfig lokal unter ~/.kube/homelab.yaml speichern
+      ansible.builtin.copy:
+        content: "{{ k3s_kubeconfig['content'] | b64decode | replace('127.0.0.1', ansible_host) }}"
+        dest: "~/.kube/homelab.yaml"
+        mode: "0600"
+      delegate_to: localhost
+
+- name: K3s Agent installieren und Cluster joinen
+  hosts: k3s_agent
+  become: true
+  serial: 1
+  roles:
+    - role: k3s

@@ -1,0 +1,25 @@
+---
+- name: K3s installierte Version prüfen
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_installed_version
+  changed_when: false
+  failed_when: false
+
+- name: K3s Binary herunterladen
+  ansible.builtin.get_url:
+    url: "https://github.com/rancher/k3s/releases/download/{{ k3s_version | replace('+', '%2B') }}/{{ k3s_binary_name }}"
+    dest: /usr/local/bin/k3s
+    mode: "0755"
+    owner: root
+    group: root
+    force: true
+  when: k3s_version not in (k3s_installed_version.stdout | default(''))
+  notify: Restart k3s
+
+- name: Server-Tasks ausführen
+  ansible.builtin.include_tasks: server.yml
+  when: k3s_role == "server"
+
+- name: Agent-Tasks ausführen
+  ansible.builtin.include_tasks: agent.yml
+  when: k3s_role == "agent"

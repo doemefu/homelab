@@ -1,0 +1,5 @@
+---
+longhorn_prereqs_packages:
+  - open-iscsi
+  - nfs-common
+  - util-linux

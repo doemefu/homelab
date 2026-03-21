@@ -1,0 +1,10 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart k3s
+  ansible.builtin.service:
+    name: "k3s{{ '' if k3s_role == 'server' else '-agent' }}"
+    state: restarted
+  ignore_errors: "{{ ansible_check_mode }}"

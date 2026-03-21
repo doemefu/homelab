@@ -1,0 +1,50 @@
+---
+- name: Longhorn Prereq Packages installieren
+  ansible.builtin.apt:
+    name: "{{ longhorn_prereqs_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Iscsid Service aktivieren und starten
+  ansible.builtin.service:
+    name: iscsid
+    state: started
+    enabled: true
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Iscsi_tcp Kernel-Modul laden
+  community.general.modprobe:
+    name: iscsi_tcp
+    state: present
+
+- name: Iscsi_tcp Kernel-Modul persistent machen
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/iscsi.conf
+    content: "iscsi_tcp\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Multipath — Longhorn-Devices blacklisten (verhindert Attaching-Deadlock)
+  ansible.builtin.copy:
+    dest: /etc/multipath.conf
+    content: |
+      defaults {
+        user_friendly_names yes
+      }
+      blacklist {
+        devnode "^sd[a-z0-9]+"
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart multipathd
+
+- name: Multipathd Service-Status prüfen (nur restarten wenn aktiv)
+  ansible.builtin.service:
+    name: multipathd
+    state: started
+    enabled: true
+  failed_when: false
+  register: longhorn_prereqs_multipathd_status

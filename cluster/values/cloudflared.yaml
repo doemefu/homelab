@@ -1,0 +1,27 @@
+---
+# cloudflared Helm Values
+# Chart: cloudflare/cloudflared 2025.2.1
+# Repo:  https://cloudflare.github.io/helm-charts
+#
+# tunnelToken: wird von 40_platform.yml aus secrets.sops.yml injiziert — nicht hier hinterlegen
+#
+# Ingress-Regeln: KEIN Wildcard-Routing. Nur explizit definierte Subdomains werden exponiert.
+# Neue Services hier als weiteren Eintrag vor dem http_status:404 Fallback eintragen.
+# Beispiel:
+#   - hostname: grafana.furchert.ch
+#     service: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
+#
+# Sicherheitsprinzip: alles was nicht explizit gelistet ist → 404, nie → Traefik
+
+ingress:
+  - service: http_status:404
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi

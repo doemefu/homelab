@@ -1,0 +1,8 @@
+---
+k3s_version: "v1.32.2+k3s1"
+k3s_role: "agent"  # Überschreiben mit "server" in k3s_server group_vars
+k3s_server_host: "{{ hostvars[groups['k3s_server'][0]]['ansible_host'] }}"
+k3s_binary_name: "{{ 'k3s-arm64' if ansible_facts['architecture'] == 'aarch64' else 'k3s' }}"
+k3s_kubeconfig_dir: /etc/rancher/k3s
+k3s_data_dir: /var/lib/rancher/k3s
+# k3s_token: muss in infra/inventory/group_vars/secrets.yml gesetzt sein
