@@ -31,14 +31,14 @@ Dieses Repository ist die **vollständige Infrastructure-as-Code Grundlage** fü
 
 | Hostname | Hardware            | Arch  | RAM  | k3s-Rolle             | Besonderheiten              |
 |----------|---------------------|-------|------|-----------------------|-----------------------------|
-| `pi5`    | Raspberry Pi 5      | arm64 | 8 GB | Control-Plane + Worker | Backup-Target (USB/SSD)    |
-| `pi4`    | Raspberry Pi 4      | arm64 | 4 GB | Worker                | —                           |
+| `raspi5` | Raspberry Pi 5      | arm64 | 8 GB | Control-Plane + Worker | Backup-Target (USB/SSD)    |
+| `raspi4` | Raspberry Pi 4      | arm64 | 4 GB | Worker                | —                           |
 | `mba1`   | MacBook Air 2020 i5 | amd64 | 8 GB | Worker                | T2-Chip, Lid-close-Fix, Quad-Core |
 | `mba2`   | MacBook Air 2019 i5 | amd64 | 8 GB | Worker                | T2-Chip, Lid-close-Fix, Dual-Core |
 
-> ⚠️ **Vor M1:** T2-Chip Ubuntu-Kompatibilität auf beiden MBAs testen (`apple-bce` Modul, USB-C Ethernet empfohlen).
+> ⚠️ **Vor M1 (MBAs):** T2-Chip Ubuntu-Kompatibilität auf beiden MBAs testen (`apple-bce` Modul, USB-C Ethernet empfohlen). Pi-Nodes sind bereits provisioniert.
 
-> ⚠️ **Vor M1 zu setzen:** `ha_host` Variable in `group_vars/all.yml` — bestimmt auf welchem Node Docker + Home Assistant läuft. Empfehlung: `pi4` (entlastet Control-Plane-Node Pi5). HA läuft bewusst ausserhalb von k3s (Docker), daher muss der physische Node einmalig konfiguriert werden.
+> **`ha_host` gesetzt:** `mba1` — MacBook Air 2020 (8 GB, Quad-Core). Home Assistant läuft bewusst ausserhalb von k3s (Docker). Entscheidung getroffen in M1, abweichend von ursprünglicher Empfehlung (pi4), da mba1 mehr Ressourcen bietet.
 
 **Netzwerk-Voraussetzungen:**
 - Statische IPs oder DHCP-Reservierungen für alle Nodes (k3s erfordert stabile IPs)
@@ -96,7 +96,7 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 | Storage        | Longhorn (Replication Factor 2)              |
 | Backup-Ziel    | Externer USB/SSD am Pi5, Restic              |
 | Host-Detection | Ansible Facts (Arch, RAM) + Rolle via Gruppe |
-| Home Assistant | Docker (nicht in k3s), Node noch offen       |
+| Home Assistant | Docker (nicht in k3s), `ha_host=mba1`        |
 | DNS            | `furchert.ch` via Cloudflare DNS             |
 
 ---

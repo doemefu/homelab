@@ -13,6 +13,11 @@ hardening_ufw_lan_ports:
   - { port: "9500:9502", proto: "tcp", comment: "Longhorn" }
   - { port: "9100", proto: "tcp", comment: "Node Exporter" }
 
+# k3s CNI Subnetze (Pod CIDR + Service CIDR) — müssen für cross-node Traffic freigegeben werden
+# Flannel entpackt Pakete mit Pod-Quell-IPs; UFW kennt diese ohne explizite Regel nicht
+hardening_k3s_pod_cidr: "10.42.0.0/16"
+hardening_k3s_service_cidr: "10.43.0.0/16"
+
 # SSH Hardening
 hardening_ssh_max_auth_tries: 3
 hardening_ssh_permit_root_login: "no"

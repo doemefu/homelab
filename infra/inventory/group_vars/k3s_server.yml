@@ -1,8 +1,8 @@
 ---
 # Variablen spezifisch für den k3s Control-Plane Node (pi5)
 
-# k3s server spezifische Flags werden in M2 (Role k3s) gesetzt
-# Hier nur Node-spezifische Eigenschaften
+# k3s Rolle für diese Gruppe
+k3s_role: "server"
 
 # pi5 ist der Backup-Target — hat USB/SSD für Restic
 storage_has_external_backup: true

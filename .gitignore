@@ -27,6 +27,8 @@ infra/inventory/local.yml
 *_secret*
 *_token*
 *_key*
+# secrets.sops.yml (verschlüsselt) wird getrackt — nur Klartext-Zwischenstand schützen
+infra/inventory/group_vars/secrets.sops.yml.plaintext
 
 # Encrypted SOPS files (tracked, but excluded from accidental plaintext commits)
 # .sops.yaml is intentionally tracked (contains only public age key)

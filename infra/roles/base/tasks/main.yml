@@ -45,6 +45,27 @@
     update_cache: true
     cache_valid_time: 3600
 
+- name: Rfkill installieren (Pi only)
+  ansible.builtin.apt:
+    name: rfkill
+    state: present
+  when: ansible_facts["architecture"] == "aarch64"
+
+- name: WiFi via dtoverlay deaktivieren (Pi only)
+  ansible.builtin.lineinfile:
+    path: /boot/firmware/config.txt
+    line: "dtoverlay=disable-wifi"
+    state: present
+    owner: root
+    group: root
+    mode: "0755"
+  when: ansible_facts["architecture"] == "aarch64"
+
+- name: WiFi sofort blockieren via rfkill (Pi only)
+  ansible.builtin.command: rfkill block wifi
+  changed_when: false
+  when: ansible_facts["architecture"] == "aarch64"
+
 - name: Unattended-Upgrades installieren
   ansible.builtin.apt:
     name:

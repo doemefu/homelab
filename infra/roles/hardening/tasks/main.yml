@@ -25,6 +25,18 @@
     comment: "{{ item.comment }}"
   loop: "{{ hardening_ufw_lan_ports }}"
 
+- name: UFW — Pod CIDR freigeben (k3s cross-node Traffic)
+  community.general.ufw:
+    rule: allow
+    src: "{{ hardening_k3s_pod_cidr }}"
+    comment: "k3s Pod CIDR (Flannel)"
+
+- name: UFW — Service CIDR freigeben (k3s cross-node Traffic)
+  community.general.ufw:
+    rule: allow
+    src: "{{ hardening_k3s_service_cidr }}"
+    comment: "k3s Service CIDR"
+
 - name: UFW aktivieren (logging on)
   community.general.ufw:
     state: enabled
