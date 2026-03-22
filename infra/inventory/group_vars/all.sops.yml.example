@@ -2,16 +2,17 @@
 # Secrets Template
 #
 # Setup (einmalig pro Maschine):
-#   1. cp infra/inventory/group_vars/secrets.sops.yml.example \
-#         infra/inventory/group_vars/secrets.sops.yml
+#   1. cp infra/inventory/group_vars/all.sops.yml.example \
+#         infra/inventory/group_vars/all.sops.yml
 #   2. Werte eintragen (siehe unten)
-#   3. sops -e -i infra/inventory/group_vars/secrets.sops.yml
+#   3. sops -e -i infra/inventory/group_vars/all.sops.yml
 #   4. Verschlüsselte Datei committen (sicher — nur mit age-Key lesbar)
 #
 # Entschlüsseln zum Bearbeiten:
-#   sops infra/inventory/group_vars/secrets.sops.yml
+#   sops infra/inventory/group_vars/all.sops.yml
 #
 # Voraussetzung: age-Key unter ~/.config/age/homelab.key
+# Voraussetzung: export SOPS_AGE_KEY_FILE=~/.config/age/homelab.key
 
 # k3s Cluster-Token — identisch auf Server und allen Agents
 # Generieren: openssl rand -hex 32

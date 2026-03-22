@@ -1,9 +1,9 @@
 ---
 # cloudflared Helm Values
-# Chart: cloudflare/cloudflared 2025.2.1
+# Chart: cloudflare/cloudflare-tunnel-remote 0.1.2
 # Repo:  https://cloudflare.github.io/helm-charts
 #
-# tunnelToken: wird von 40_platform.yml aus secrets.sops.yml injiziert — nicht hier hinterlegen
+# tunnelToken: wird von 40_platform.yml aus all.sops.yml injiziert — nicht hier hinterlegen
 #
 # Ingress-Regeln: KEIN Wildcard-Routing. Nur explizit definierte Subdomains werden exponiert.
 # Neue Services hier als weiteren Eintrag vor dem http_status:404 Fallback eintragen.
@@ -13,8 +13,8 @@
 #
 # Sicherheitsprinzip: alles was nicht explizit gelistet ist → 404, nie → Traefik
 
-ingress:
-  - service: http_status:404
+image:
+  tag: "2025.2.1"  # gepinnt — nie latest
 
 replicaCount: 1
 

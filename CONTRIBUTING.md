@@ -10,20 +10,38 @@ pip install ansible ansible-lint --break-system-packages
 ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collections
 
 # Kubernetes tooling (for M2+)
-brew install helm kubectl
+# Note: kubernetes.core.helm requires Helm <4.0.0 — install helm@3 explicitly
+brew install helm@3 kubectl
 
 # Secrets
 brew install sops age
 ```
 
+> **Helm 4 Hinweis:** `brew install helm` installiert aktuell Helm 4.x, welches von
+> `kubernetes.core.helm` (Constraint `<4.0.0`) noch nicht unterstützt wird.
+> `helm@3` wird keg-only installiert — `40_platform.yml` referenziert den Pfad explizit:
+> - Intel-Mac: `/usr/local/opt/helm@3/bin/helm`
+> - Apple Silicon: `/opt/homebrew/opt/helm@3/bin/helm`
+
 age key (once, stored outside the repo):
 ```bash
 mkdir -p ~/.config/age
 age-keygen -o ~/.config/age/homelab.key
-export SOPS_AGE_KEY_FILE=~/.config/age/homelab.key
+
+# Dauerhaft in ~/.zshrc eintragen — wird von sops und dem Ansible vars plugin benötigt:
+echo 'export SOPS_AGE_KEY_FILE=~/.config/age/homelab.key' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 The public key for this repo is in `.sops.yaml`. Contact the repo owner for access.
+
+Secrets anlegen (einmalig nach Clone):
+```bash
+cp infra/inventory/group_vars/all.sops.yml.example \
+   infra/inventory/group_vars/all.sops.yml
+# Werte eintragen, dann verschlüsseln:
+sops -e -i infra/inventory/group_vars/all.sops.yml
+```
 
 ---
 
