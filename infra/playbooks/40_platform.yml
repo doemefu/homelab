@@ -15,11 +15,7 @@
   vars:
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
     platform_namespace: platform
-    # kubernetes.core.helm unterstützt nur Helm <4.0.0 — Helm 3 explizit angeben
-    # Installieren: brew install helm@3
-    # Intel-Mac: /usr/local/opt/helm@3/bin/helm  (aktuelle Konfiguration)
-    # Apple Silicon: /opt/homebrew/opt/helm@3/bin/helm
-    helm_binary: "/usr/local/opt/helm@3/bin/helm"
+    # helm_binary kommt aus group_vars/all.yml (zentralisiert, arch-kommentiert)
 
   tasks:
     # --- Namespace ---

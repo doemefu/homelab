@@ -1,0 +1,22 @@
+---
+# Longhorn Helm Values
+# Chart: longhorn/longhorn v1.7.2
+# Repo:  https://charts.longhorn.io
+# Namespace: longhorn-system (Helm-Chart-Konvention)
+#
+# Storage-Pfad: /var/lib/longhorn (Root-Disk, bewusst akzeptiertes Risiko für M3).
+# Empfehlung post-M3: Externe SSDs für Longhorn-Volumes konfigurieren (Longhorn Node Storage).
+#
+# RF=2: Beide Keys sind nötig:
+#   defaultSettings.defaultReplicaCount — für Volumes die manuell im UI erstellt werden (String)
+#   persistence.defaultClassReplicaCount — für Volumes via StorageClass/PVC (Integer)
+
+defaultSettings:
+  defaultReplicaCount: "2"
+
+persistence:
+  defaultClass: true
+  defaultClassReplicaCount: 2
+
+ingress:
+  enabled: false  # Longhorn UI nur intern: kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80

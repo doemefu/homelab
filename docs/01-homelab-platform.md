@@ -135,11 +135,11 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 
 | Komponente            | Version |
 |-----------------------|---------|
-| k3s                   | vX.Y.Z  |
-| Longhorn              | X.Y.Z   |
-| cert-manager          | vX.Y.Z  |
-| kube-prometheus-stack | X.Y.Z   |
-| cloudflared           | X.Y.Z   |
+| k3s                   | v1.32.2+k3s1 |
+| Longhorn              | 1.7.2        |
+| cert-manager          | v1.17.1      |
+| kube-prometheus-stack | 69.3.1       |
+| cloudflared           | 2025.2.1     |
 
 ---
 
@@ -149,7 +149,8 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 LAN
  ├─ pi5 (arm64, 8GB) — k3s Control-Plane + Worker
  │   ├─ k3s API Server, etcd, scheduler
- │   ├─ ns/platform: traefik, cert-manager, longhorn, cloudflared
+ │   ├─ ns/platform: traefik, cert-manager, cloudflared
+ │   ├─ ns/longhorn-system: longhorn (Helm-Chart-Konvention)
  │   ├─ ns/monitoring: prometheus, grafana, alertmanager
  │   ├─ ns/apps: Workloads (via Longhorn frei migrierbar)
  │   └─ Backup-Target: USB/SSD (Restic)
@@ -262,8 +263,9 @@ Jeder Meilenstein hat ein konkretes Dokumentations-Deliverable — Runbooks ents
 ## Betrieb (→ Details in OPERATIONS.md)
 
 - **Pinned Versions**: k3s, Helm Charts — alle in Git, kein `latest` in Betrieb
-- **Upgrade-Prozess**: Monitoring grün → Node drainieren → upgrade → rejoin → weiter
+- **Upgrade-Prozess**: Monitoring grün → Node drainieren → upgrade → rejoin → weiter (manuell, siehe OPERATIONS.md)
 - **Rollback**: `helm rollback <release>` für Charts; k3s via gepinnter Ansible-Version
+- **Geplant (post-M5)**: Automatisiertes Update-Skript mit Integrationstests und automatischem Rollback — siehe "Erweiterungen" unten
 - **Runbooks vorhanden für:**
   - Node reboot / Drain & Upgrade
   - Longhorn Volume voll / Replica degraded
@@ -319,3 +321,36 @@ Jeder Meilenstein hat ein konkretes Dokumentations-Deliverable — Runbooks ents
 - [ ] `README.md`, `OPERATIONS.md`, `CONTRIBUTING.md`, `APPS.md` vollständig
 - [ ] `examples/` enthält mindestens 3 funktionierende Referenz-Manifeste
 - [ ] Monitoring zeigt alle 4 Nodes grün, Alerting konfiguriert
+
+---
+
+## Erweiterungen (post-M5)
+
+Ideen und geplante Verbesserungen die bewusst aus dem M1–M5-Scope ausgeschlossen sind.
+Erst angehen wenn die Definition of Done vollständig erfüllt ist.
+
+### Automatisiertes Update-Skript mit Integrationstests + Rollback
+
+**Ziel:** Ein einzelnes Skript (`scripts/update.sh` o.ä.) das alle Komponenten (k3s, Helm Charts)
+in der richtigen Reihenfolge aktualisiert, danach Integrationstests ausführt und bei Fehler
+automatisch rollback auslöst.
+
+**Ablauf (Entwurf):**
+1. Pre-flight: alle Nodes Ready, Longhorn-Volumes healthy, Monitoring grün
+2. k3s upgrade: CP zuerst → Worker nacheinander (drain → upgrade → uncordon → wait Ready)
+3. Helm Chart upgrades: version bump in `cluster/values/`, `helm upgrade`, wait rollout
+4. Integrationstests:
+   - `kubectl get nodes` — alle Ready
+   - `kubectl get pods -A` — kein CrashLoopBackOff, kein Pending
+   - Longhorn: alle Volumes healthy, RF=2
+   - cert-manager: ClusterIssuer Ready, kein abgelaufenes Zertifikat
+   - Cloudflare Tunnel: Pod Running, DNS-Auflösung für eine bekannte Subdomain
+   - Smoke-Test: HTTP-Request gegen eine bekannte URL → HTTP 200
+5. Bei Test-Fehler: automatischer Rollback (Helm: `helm rollback`, k3s: `k3s_version` zurücksetzen + Playbook)
+6. Benachrichtigung (optional): Webhook / E-Mail bei Erfolg oder Fehler
+
+**Anforderungen:**
+- Idempotent: mehrfach ausführbar ohne Seiteneffekte
+- Dry-run Modus: zeigt was getan würde ohne Änderungen
+- Jede Phase explizit loggbar (Worklog-kompatibel)
+- Kein externes CI/CD erforderlich — läuft lokal auf dem Betreiber-Mac

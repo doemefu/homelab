@@ -19,9 +19,10 @@ brew install sops age
 
 > **Helm 4 Hinweis:** `brew install helm` installiert aktuell Helm 4.x, welches von
 > `kubernetes.core.helm` (Constraint `<4.0.0`) noch nicht unterstützt wird.
-> `helm@3` wird keg-only installiert — `40_platform.yml` referenziert den Pfad explizit:
+> `helm@3` wird keg-only installiert — der Pfad ist in `group_vars/all.yml` als `helm_binary`
+> zentralisiert (kein Hardcode in einzelnen Playbooks):
 > - Intel-Mac: `/usr/local/opt/helm@3/bin/helm`
-> - Apple Silicon: `/opt/homebrew/opt/helm@3/bin/helm`
+> - Apple Silicon: `/opt/homebrew/opt/helm@3/bin/helm` → `helm_binary` in inventory überschreiben
 
 age key (once, stored outside the repo):
 ```bash
@@ -97,7 +98,8 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 ### Kubernetes / Helm
 - All Helm values in `cluster/values/<chart-name>.yaml` — nothing inline in playbooks
 - Pinned versions only — no `latest` for images, charts, or k3s
-- Namespaces: `platform`, `monitoring`, `apps`
+- Namespaces: `platform`, `longhorn-system`, `monitoring`, `apps`
+  (Exception: `longhorn-system` ist Helm-Chart-Konvention und wird nicht durch dieses Repo gewählt)
 - Resource limits required for all workloads in `apps` namespace
 
 ### Secrets
