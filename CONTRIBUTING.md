@@ -111,13 +111,13 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 
 ## Known Lint Rules (ansible-lint production profile)
 
-| Issue | Fix |
-|-------|-----|
-| Task name starts lowercase | Capitalise: `"Fail2ban..."` not `"fail2ban..."` |
-| `var-naming[no-role-prefix]` | Prefix vars with role name: `mac_tweaks_*` |
-| `args[module]` on loop with template value | Use explicit tasks instead of loop for static choices |
-| `stdout_callback = yaml` | Use `stdout_callback = ansible.builtin.default` + `result_format = yaml` |
-| `validate:` on SSH drop-in | Don't use `validate:` for `/etc/ssh/sshd_config.d/*.conf` — `sshd -t` needs a full config file, not a drop-in |
+| Issue                                      | Fix                                                                                                           |
+|--------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| Task name starts lowercase                 | Capitalise: `"Fail2ban..."` not `"fail2ban..."`                                                               |
+| `var-naming[no-role-prefix]`               | Prefix vars with role name: `mac_tweaks_*`                                                                    |
+| `args[module]` on loop with template value | Use explicit tasks instead of loop for static choices                                                         |
+| `stdout_callback = yaml`                   | Use `stdout_callback = ansible.builtin.default` + `result_format = yaml`                                      |
+| `validate:` on SSH drop-in                 | Don't use `validate:` for `/etc/ssh/sshd_config.d/*.conf` — `sshd -t` needs a full config file, not a drop-in |
 
 ---
 
