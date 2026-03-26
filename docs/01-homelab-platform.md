@@ -329,6 +329,21 @@ Jeder Meilenstein hat ein konkretes Dokumentations-Deliverable — Runbooks ents
 Ideen und geplante Verbesserungen die bewusst aus dem M1–M5-Scope ausgeschlossen sind.
 Erst angehen wenn die Definition of Done vollständig erfüllt ist.
 
+### Cloudflare Access Policy für SSH (Zero Trust)
+
+**Aktuell:** SSH via Cloudflare Tunnel ist eingerichtet (`ssh://` Protokoll + `cloudflared access ssh` ProxyCommand).
+Schutz: Cloudflare Tunnel-Token + SSH Key Auth.
+
+**Ziel post-M5:** Cloudflare Zero Trust Access Policy als zweite Authentifizierungsschicht:
+- Nur autorisierte E-Mail-Adressen / Identity Provider erhalten Zugang
+- Policy über Cloudflare Dashboard oder Terraform (cloudflare/cloudflare Provider) automatisiert
+- Kurzlebige SSH-Zertifikate (Cloudflare-signiert) statt statischer Keys möglich
+
+**Minimal-Umsetzung:**
+1. Zero Trust → Access → Applications → SSH-App für `ssh.furchert.ch` anlegen
+2. Policy: Email `*@furchert.ch` oder spezifische Adresse
+3. `cloudflare_access_application` Terraform-Resource für Automatisierung
+
 ### Automatisiertes Update-Skript mit Integrationstests + Rollback
 
 **Ziel:** Ein einzelnes Skript (`scripts/update.sh` o.ä.) das alle Komponenten (k3s, Helm Charts)

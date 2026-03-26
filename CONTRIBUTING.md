@@ -13,6 +13,10 @@ ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collec
 # Note: kubernetes.core.helm requires Helm <4.0.0 — install helm@3 explicitly
 brew install helm@3 kubectl
 
+# helm-diff plugin (eliminates idempotency warnings in Helm tasks)
+/usr/local/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff
+# Apple Silicon: /opt/homebrew/opt/helm@3/bin/helm plugin install ...
+
 # Secrets
 brew install sops age
 ```

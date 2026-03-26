@@ -180,6 +180,63 @@ kubectl get secret cloudflare-api-token -n platform -o yaml
 
 ---
 
+## SSH-Zugriff (remote, via Cloudflare Tunnel)
+
+SSH auf die Nodes ist von ausserhalb des LANs via Cloudflare Tunnel möglich.
+Der Zugriff läuft über `cloudflared access ssh` als ProxyCommand — kein direkter Port-Forward, kein öffentlicher SSH-Port.
+
+### Einmaliges Setup (Client)
+
+```bash
+# cloudflared lokal installieren (falls noch nicht vorhanden)
+brew install cloudflared
+```
+
+SSH-Config (`~/.ssh/config`) ergänzen:
+
+```
+Host raspi5
+  HostName ssh.furchert.ch
+  User ubuntu
+  IdentityFile ~/.ssh/new_home
+  ProxyCommand cloudflared access ssh --hostname %h
+
+Host raspi4
+  HostName ssh-raspi4.furchert.ch
+  User ubuntu
+  IdentityFile ~/.ssh/new_home
+  ProxyCommand cloudflared access ssh --hostname %h
+```
+
+### Tunnel-Ingress einrichten (Ansible, einmalig oder bei Änderung)
+
+Ingress-Regeln werden via Cloudflare API gesetzt — kein manuelles Dashboard-Klicken.
+Single Source of Truth: `infra/playbooks/40_platform.yml` (uri-Task, PUT-Request).
+
+```bash
+ansible-playbook infra/playbooks/40_platform.yml
+```
+
+Der Task ist idempotent: ein zweiter Lauf erzeugt keine Änderung.
+Neue Services ergänzen: Ingress-Liste im Playbook erweitern, dann Playbook erneut ausführen.
+
+### Verbinden
+
+```bash
+ssh raspi5             # via ~/.ssh/config
+ssh raspi4             # via ~/.ssh/config
+
+# Oder direkt:
+ssh -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" ubuntu@ssh.furchert.ch
+```
+
+### Hinweis: Cloudflare Access Policy (post-M5)
+
+Aktuell schützt nur der SSH-Key den Zugriff. Eine Cloudflare Zero Trust Access Policy
+(E-Mail-Verifizierung o.ä. als zweite Schicht) ist als post-M5 Erweiterung geplant.
+
+---
+
 ## Cloudflare Tunnel
 
 ### Tunnel-Status prüfen
@@ -194,10 +251,12 @@ kubectl -n platform logs -l app=cloudflared --tail=50
 
 ### Neuen Service exponieren
 
-1. Eintrag in `cluster/values/cloudflared.yaml` vor dem `http_status:404`-Fallback ergänzen:
+1. Ingress-Eintrag in `infra/playbooks/40_platform.yml` (uri-Task) vor dem `http_status:404`-Fallback ergänzen:
 
 ```yaml
 ingress:
+  - hostname: ssh.furchert.ch
+    service: ssh://192.168.1.61:22
   - hostname: grafana.furchert.ch
     service: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
   - service: http_status:404  # immer zuletzt
@@ -208,6 +267,16 @@ ingress:
 ```bash
 ansible-playbook infra/playbooks/40_platform.yml
 ```
+
+3. cloudflared Pod neustarten (liest Ingress-Config nur beim Start):
+
+```bash
+kubectl -n platform rollout restart deployment/cloudflared-cloudflare-tunnel-remote
+kubectl -n platform rollout status deployment/cloudflared-cloudflare-tunnel-remote
+```
+
+4. Falls neue Subdomain: DNS CNAME anlegen (Cloudflare Dashboard → DNS):
+   - Type: `CNAME`, Name: `<subdomain>`, Target: `<tunnel-id>.cfargotunnel.com`, Proxy: enabled
 
 ### Tunnel neu erstellen (Notfall)
 

@@ -138,6 +138,39 @@
         wait_timeout: "3m"
       delegate_to: localhost
 
+    - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cloudflare_tunnel_id }}/configurations"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ cloudflare_tunnel_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          config:
+            ingress:
+              - hostname: "ssh.furchert.ch"
+                service: "ssh://192.168.1.61:22"
+              - service: "http_status:404"
+        status_code: 200
+      delegate_to: localhost
+      no_log: true
+      register: cf_ingress_result
+
+    - name: Cloudflared Pod neustarten (liest Ingress-Config nur beim Start)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        name: cloudflared-cloudflare-tunnel-remote
+        namespace: "{{ platform_namespace }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/restartedAt: "{{ ansible_date_time.iso8601 }}"
+      delegate_to: localhost
+
     # --- Traefik: HTTP → HTTPS Redirect ---
     - name: Traefik HelmChartConfig — HTTP zu HTTPS Redirect
       kubernetes.core.k8s:
