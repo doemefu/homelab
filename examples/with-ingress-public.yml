@@ -28,7 +28,7 @@
 #
 # Prerequisites:
 #   kubectl create namespace apps   (one-time)
-#   alertmanager_irm_webhook_url in all.sops.yml (if running 40_platform.yml for the first time)
+#   alertmanager_discord_webhook_url in all.sops.yml (if running 40_platform.yml for the first time)
 #
 # Deploy the Kubernetes resources:
 #   kubectl apply -f examples/with-ingress-public.yml

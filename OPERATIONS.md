@@ -462,23 +462,22 @@ kubectl patch pvc kube-prometheus-stack-grafana \
   -p '{"spec":{"resources":{"requests":{"storage":"5Gi"}}}}'
 ```
 
-### Alertmanager — Grafana IRM Receiver
+### Alertmanager — Discord Receiver
 
-Alertmanager leitet Alerts via Webhook an Grafana IRM (OnCall) weiter.
+Alertmanager sendet Alerts direkt an einen Discord-Kanal via nativen `discord_configs` Receiver.
 
 **Ersteinrichtung (einmalig):**
 
-1. Grafana IRM öffnen: https://grafana.com/products/irm/ (Grafana Cloud)
-   > **Hinweis:** Grafana OnCall ist nicht im Cluster installiert — diese Integration verwendet Grafana Cloud IRM als externen Webhook-Empfänger.
-2. Integrations → New Integration → **Alertmanager** wählen
-3. Generierten Webhook-URL kopieren (Format: `https://oncall-prod-us-central-0.grafana.net/integrations/v1/alertmanager/XXXXX/`)
-4. URL in SOPS eintragen:
+1. Discord öffnen → Ziel-Server → Kanal-Einstellungen (⚙️) → Integrationen → Webhooks
+2. **Neuer Webhook** → Name vergeben (z.B. `Alertmanager`) → URL kopieren
+   Format: `https://discord.com/api/webhooks/XXXXXXXXXX/YYYYYYYY`
+3. URL in SOPS eintragen:
    ```bash
    sops infra/inventory/group_vars/all.sops.yml
    # Zeile einfügen:
-   # alertmanager_irm_webhook_url: "https://..."
+   # alertmanager_discord_webhook_url: "https://discord.com/api/webhooks/..."
    ```
-5. Playbook erneut ausführen (nur über LAN, nicht via SSH-Tunnel — bekanntes Timeout-Risiko):
+4. Playbook ausführen (nur über LAN, nicht via SSH-Tunnel — bekanntes Timeout-Risiko):
    ```bash
    ansible-playbook infra/playbooks/40_platform.yml
    ```
@@ -489,9 +488,9 @@ Alertmanager leitet Alerts via Webhook an Grafana IRM (OnCall) weiter.
 # Alertmanager-Konfiguration anzeigen
 kubectl port-forward -n monitoring svc/alertmanager-operated 9093:9093 &
 curl -s http://localhost:9093/api/v2/status | python3 -m json.tool
-# "receivers" sollte "grafana-irm" enthalten
+# "receivers" sollte "discord" enthalten
 
-# Test-Alert senden (löst Grafana IRM Notification aus)
+# Test-Alert senden (erscheint im Discord-Kanal)
 curl -s -X POST http://localhost:9093/api/v2/alerts \
   -H 'Content-Type: application/json' \
   -d '[{"labels":{"alertname":"TestAlert","severity":"info"},"annotations":{"summary":"M5 test"}}]'
@@ -504,7 +503,7 @@ curl -s -X POST http://localhost:9093/api/v2/alerts \
 
 **Alertmanager-Konfigurationsstruktur** (in `infra/playbooks/40_platform.yml`):
 - Route: `group_by: [alertname, namespace]`, `repeat_interval: 12h`
-- Receiver: `grafana-irm` (webhook, `send_resolved: true`)
+- Receiver: `discord` (discord_configs, `send_resolved: true`)
 - Inhibit-Rules: Standard kube-prometheus-stack (critical suppresst warning/info bei gleichem alertname+namespace)
 
 ### Upgrade kube-prometheus-stack

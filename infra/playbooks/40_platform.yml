@@ -198,15 +198,15 @@
       delegate_to: localhost
 
     # --- Monitoring ---
-    - name: Prüfen dass alertmanager_irm_webhook_url gesetzt ist
+    - name: Prüfen dass alertmanager_discord_webhook_url gesetzt ist
       ansible.builtin.assert:
         that:
-          - alertmanager_irm_webhook_url is defined
-          - alertmanager_irm_webhook_url | length > 0
+          - alertmanager_discord_webhook_url is defined
+          - alertmanager_discord_webhook_url | length > 0
         fail_msg: >-
-          alertmanager_irm_webhook_url ist nicht gesetzt.
+          alertmanager_discord_webhook_url ist nicht gesetzt.
           Bitte in infra/inventory/group_vars/all.sops.yml eintragen
-          (Grafana IRM → Integrations → Alertmanager → Webhook URL).
+          (Discord Server → Kanal-Einstellungen → Integrationen → Webhooks → URL kopieren).
       delegate_to: localhost
 
     - name: Monitoring Namespace anlegen
@@ -248,11 +248,11 @@
                 group_wait: 30s
                 group_interval: 5m
                 repeat_interval: 12h
-                receiver: 'grafana-irm'
+                receiver: 'discord'
               receivers:
-                - name: 'grafana-irm'
-                  webhook_configs:
-                    - url: "{{ alertmanager_irm_webhook_url }}"
+                - name: 'discord'
+                  discord_configs:
+                    - api_url: "{{ alertmanager_discord_webhook_url }}"
                       send_resolved: true
               # Preserve kube-prometheus-stack default inhibit rules to avoid alert storms
               # during node failures (e.g. suppress symptom alerts when cause alert fires).

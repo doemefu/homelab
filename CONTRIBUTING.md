@@ -48,9 +48,9 @@ cp infra/inventory/group_vars/all.sops.yml.example \
 sops -e -i infra/inventory/group_vars/all.sops.yml
 ```
 
-> **Pflichtfeld für `40_platform.yml`:** `alertmanager_irm_webhook_url` muss gesetzt sein —
+> **Pflichtfeld für `40_platform.yml`:** `alertmanager_discord_webhook_url` muss gesetzt sein —
 > das Playbook enthält eine `assert`-Guard und schlägt ohne diesen Wert fehl.
-> URL erhalten: Grafana IRM → Integrations → New Integration → Alertmanager.
+> URL erhalten: Discord → Kanal-Einstellungen → Integrationen → Webhooks → URL kopieren.
 
 ---
 

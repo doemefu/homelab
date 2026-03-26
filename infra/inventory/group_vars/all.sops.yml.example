@@ -50,7 +50,7 @@ grafana_admin_password: "CHANGE_ME_grafana_admin_password"
 # WICHTIG: Verlust bedeutet kein Zugriff auf Backups — sicher aufbewahren
 restic_password: "CHANGE_ME_restic_password"
 
-# Alertmanager Grafana IRM Webhook URL
-# Erstellen: Grafana IRM → Integrations → New Integration → Alertmanager → Webhook URL kopieren
-# Grafana IRM: https://grafana.com/products/irm/ (Cloud) oder lokales OnCall-Plugin
-alertmanager_irm_webhook_url: "CHANGE_ME_https://oncall-prod-us-central-0.grafana.net/integrations/v1/alertmanager/XXXXX/"
+# Alertmanager Discord Webhook URL
+# Erstellen: Discord Server → Kanal-Einstellungen → Integrationen → Webhooks → Neuer Webhook → URL kopieren
+# Format: https://discord.com/api/webhooks/XXXXXXXXXX/YYYYYYYY
+alertmanager_discord_webhook_url: "CHANGE_ME_https://discord.com/api/webhooks/XXXXXXXXXX/YYYYYYYY"
