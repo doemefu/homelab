@@ -329,6 +329,24 @@ Jeder Meilenstein hat ein konkretes Dokumentations-Deliverable — Runbooks ents
 Ideen und geplante Verbesserungen die bewusst aus dem M1–M5-Scope ausgeschlossen sind.
 Erst angehen wenn die Definition of Done vollständig erfüllt ist.
 
+### Automatisierte Node-Reboots nach Kernel-Updates (kured)
+
+**Aktuell:** `unattended-upgrades` läuft täglich und installiert Sicherheitsupdates automatisch.
+Reboots (z.B. nach Kernel-Updates) sind manuell — erfordern drain → reboot → uncordon pro Node.
+
+**Ziel post-M5:** [kured](https://github.com/kubereboot/kured) (Kubernetes Reboot Daemon) als DaemonSet im Cluster:
+- Erkennt `/var/run/reboot-required` auf jedem Node automatisch
+- Koordiniert Reboots: drain → reboot → uncordon, ein Node nach dem anderen
+- Respektiert PodDisruptionBudgets und Longhorn-Replikation
+- Konfigurierbar: Reboot-Zeitfenster (z.B. nur nachts), Slack-Notification bei Reboot
+
+**Minimale Umsetzung:**
+1. kured als Helm Chart deployen (`kubereboot/kured`, Namespace `kube-system`)
+2. Reboot-Zeitfenster konfigurieren (`--reboot-days`, `--start-time`, `--end-time`)
+3. Ansible-Task in `40_platform.yml` ergänzen
+
+---
+
 ### Cloudflare Access Policy für SSH (Zero Trust)
 
 **Aktuell:** SSH via Cloudflare Tunnel ist eingerichtet (`ssh://` Protokoll + `cloudflared access ssh` ProxyCommand).

@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M3 (k3s + Cloudflare + Longhorn) — wird mit jedem Milestone ergänzt.
+> **Stand:** M4 (k3s + Cloudflare + Longhorn + Monitoring + Backup) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -21,11 +21,14 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 ## Inhaltsverzeichnis
 
 - [Cluster Health](#cluster-health)
+- [Ports & Firewall](#ports--firewall)
 - [k3s Upgrade](#k3s-upgrade)
 - [Node Drain & Reboot](#node-drain--reboot)
 - [cert-manager / TLS](#cert-manager--tls)
 - [Cloudflare Tunnel](#cloudflare-tunnel)
 - [Longhorn Storage](#longhorn-storage)
+- [Monitoring (Prometheus + Grafana)](#monitoring-prometheus--grafana)
+- [Backup (Restic)](#backup-restic)
 
 ---
 
@@ -47,13 +50,32 @@ kubectl get events -A --sort-by='.lastTimestamp' | tail -30
 kubectl get ns
 ```
 
-Erwartete Pods pro Namespace nach M3:
+Erwartete Pods pro Namespace nach M4:
 
 | Namespace        | Pods |
 |------------------|------|
 | `kube-system`    | traefik, coredns, metrics-server, svclb-* |
 | `platform`       | cert-manager (3x), cloudflared |
 | `longhorn-system`| longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager |
+| `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
+
+---
+
+## Ports & Firewall
+
+UFW-Regeln werden von der `hardening`-Rolle gesetzt. Alle eingehenden Verbindungen sind standardmässig blockiert; folgende Ports sind explizit geöffnet:
+
+| Port(s)     | Protokoll | Zweck                              | Scope    |
+|-------------|-----------|-------------------------------------|----------|
+| 22          | TCP       | SSH                                 | LAN only |
+| 6443        | TCP       | k3s API Server                      | LAN only |
+| 10250       | TCP       | kubelet metrics                     | LAN only |
+| 8472        | UDP       | Flannel VXLAN Overlay               | LAN only |
+| 2379–2380   | TCP       | etcd (nur Control-Plane)            | LAN only |
+| 9500–9502   | TCP       | Longhorn Replikation                | LAN only |
+| 9100        | TCP       | Node Exporter (Prometheus Scrape)   | LAN only |
+
+> Port-Forward-Befehle (z.B. `kubectl port-forward ... 9090:9090`) laufen lokal und erfordern keine UFW-Änderungen.
 
 ---
 
@@ -368,3 +390,155 @@ kubectl get volumes -n longhorn-system -o wide
 # Alternativ: PVC patchen
 kubectl patch pvc <name> -n <namespace> -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
 ```
+
+---
+
+## Monitoring (Prometheus + Grafana)
+
+kube-prometheus-stack v69.3.1 läuft im `monitoring` Namespace.
+Grafana: https://grafana.furchert.ch (Login: admin / Passwort aus `all.sops.yml: grafana_admin_password`)
+
+> `grafana_admin_password` ist in `infra/inventory/group_vars/all.sops.yml` (SOPS-verschlüsselt).
+
+> **Hinweis:** Node Exporter wird als DaemonSet via kube-prometheus-stack ausgerollt
+> (`nodeExporter` subchart in `cluster/values/kube-prometheus-stack.yaml`).
+> Die Ansible-Rolle `observability_agent/` ist Platzhalter für standalone Node Exporter auf Nodes
+> ausserhalb des Clusters (post-M5).
+
+### Status prüfen
+
+```bash
+kubectl get pods -n monitoring
+
+# Erwartete Pods nach M4:
+# kube-prometheus-stack-grafana-*                      1/1 Running
+# kube-prometheus-stack-kube-state-metrics-*           1/1 Running
+# kube-prometheus-stack-operator-*                     1/1 Running
+# kube-prometheus-stack-prometheus-node-exporter-*     1/1 Running  (DaemonSet, alle Nodes)
+# alertmanager-kube-prometheus-stack-alertmanager-0    2/2 Running
+# prometheus-kube-prometheus-stack-prometheus-0        2/2 Running
+
+kubectl get pvc -n monitoring
+# prometheus-kube-prometheus-stack-prometheus-db-... → Bound (10Gi, Longhorn)
+```
+
+### Grafana aufrufen
+
+```bash
+# Öffentlich via Cloudflare Tunnel (nach DNS CNAME gesetzt):
+open https://grafana.furchert.ch
+
+# Intern via Port-Forward:
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+# → http://localhost:3000 | Login: admin / <grafana_admin_password>
+```
+
+### Prometheus + Alertmanager intern
+
+```bash
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+# → http://localhost:9090
+
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
+# → http://localhost:9093
+```
+
+### Prometheus PVC Kapazität erweitern
+
+```bash
+kubectl patch pvc \
+  prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0 \
+  -n monitoring \
+  -p '{"spec":{"resources":{"requests":{"storage":"20Gi"}}}}'
+```
+
+### Alertmanager Receiver konfigurieren (Follow-up M4)
+
+Alertmanager ist deployed aber ohne Receiver. Konfiguration:
+
+1. `alertmanager.config.receivers` in `cluster/values/kube-prometheus-stack.yaml` ergänzen
+2. `ansible-playbook infra/playbooks/40_platform.yml`
+
+### Upgrade kube-prometheus-stack
+
+```bash
+# chart_version in 40_platform.yml aktualisieren, dann:
+ansible-playbook infra/playbooks/40_platform.yml
+```
+
+---
+
+## Backup (Restic)
+
+Täglich 03:00 auf raspi5. Repository: `/var/lib/backup/restic-repo` (interim auf Root-SD-Karte).
+
+> **Hinweis:** Backup-Repository liegt interim auf der Root-SD-Karte (`/var/lib/backup`).
+> Follow-up: Nach Anschluss der externen SSD das Repository auf `/mnt/backup/restic-repo` umziehen (Prozess unten).
+
+### Backup-Status prüfen
+
+```bash
+# Letzter Lauf (systemd journal)
+ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"
+
+# Snapshots auflisten
+ssh raspi5 "sudo restic snapshots \
+  --repo /var/lib/backup/restic-repo \
+  --password-file /etc/restic-password"
+
+# Integrität prüfen
+ssh raspi5 "sudo restic check \
+  --repo /var/lib/backup/restic-repo \
+  --password-file /etc/restic-password"
+```
+
+### Manueller Backup-Lauf
+
+```bash
+ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"
+```
+
+### Restore (Follow-up M4 — Restore-Test ausstehend)
+
+> **M5 Vorbedingung:** Restore-Test ist Teil der M5 Definition of Done — einmalig durchführen und
+> Ergebnis im Worklog dokumentieren bevor M5 abgeschlossen wird.
+
+```bash
+# Snapshots anzeigen
+ssh raspi5 "sudo restic snapshots \
+  --repo /var/lib/backup/restic-repo \
+  --password-file /etc/restic-password"
+
+# Einzelne Datei/Verzeichnis wiederherstellen
+ssh raspi5 "sudo restic restore <snapshot-id> \
+  --repo /var/lib/backup/restic-repo \
+  --password-file /etc/restic-password \
+  --target /tmp/restore \
+  --include /etc/rancher/k3s/k3s.yaml"
+
+# Vollständigen Snapshot wiederherstellen (Vorsicht: überschreibt existierende Dateien)
+ssh raspi5 "sudo restic restore <snapshot-id> \
+  --repo /var/lib/backup/restic-repo \
+  --password-file /etc/restic-password \
+  --target /"
+```
+
+### Repository auf externe SSD umziehen (nach SSD-Anschluss)
+
+1. UUID der SSD ermitteln: `ssh raspi5 "lsblk -o NAME,UUID,FSTYPE,SIZE"` oder `sudo blkid`
+2. `storage_backup_device` in `infra/inventory/group_vars/k3s_server.yml` setzen
+3. `ansible-playbook infra/playbooks/10_base.yml -l raspi5` (mounted die SSD)
+4. Repository migrieren:
+   ```bash
+   ssh raspi5 "sudo restic copy \
+     --from-repo /var/lib/backup/restic-repo \
+     --from-password-file /etc/restic-password \
+     --repo /mnt/backup/restic-repo \
+     --password-file /etc/restic-password"
+   ```
+5. `storage_restic_repo` in `k3s_server.yml` auf `/mnt/backup/restic-repo` ändern
+6. `ansible-playbook infra/playbooks/10_base.yml -l raspi5` (aktualisiert Skript + Cron)
+7. Nach Verifikation (restic snapshots → alle vorhanden):
+   ```bash
+   ssh raspi5 "sudo rm -rf /var/lib/backup/restic-repo"
+   ```

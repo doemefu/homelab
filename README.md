@@ -35,7 +35,7 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | Storage     | Longhorn (RF=2, default StorageClass)       |
 | Ingress/TLS | Traefik + cert-manager (Let's Encrypt)      |
 | External    | Cloudflare Tunnel                           |
-| Observability | kube-prometheus-stack (Prometheus + Grafana) |
+| Observability | kube-prometheus-stack (Prometheus + Grafana + Alertmanager) |
 | Backups     | Restic → USB/SSD (pi5)                      |
 
 ### Pinned Versions
@@ -108,10 +108,10 @@ export KUBECONFIG=~/.kube/homelab.yaml
 | Playbook          | Purpose                                          | When to run         |
 |-------------------|--------------------------------------------------|---------------------|
 | `00_bootstrap.yml` | Create `ansible` user, SSH key, passwordless sudo | Once per new node  |
-| `10_base.yml`     | OS baseline + hardening + storage               | M1, then on changes |
+| `10_base.yml`     | OS baseline + hardening + storage + Restic cron (raspi5) | M1, then on changes |
 | `20_k3s.yml`      | k3s server + agents + Longhorn prereqs          | M2                  |
 | `30_longhorn.yml` | Longhorn Helm deploy + Default StorageClass     | M3                  |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config | M2                  |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config, Monitoring | M2, M4              |
 
 Run a playbook against all nodes:
 ```bash
@@ -137,7 +137,7 @@ ansible-playbook infra/playbooks/10_base.yml --check --diff -l raspi5
 | M1 | ✅ done (Pi nodes) | Ansible baseline + hardening — raspi5 + raspi4; mba1/mba2 deferred |
 | M2 | ✅ done | k3s + Traefik + cert-manager + Cloudflare Tunnel |
 | M3 | ✅ done | Longhorn v1.7.2 + RF=2 + Worker-Failover test |
-| M4 | ⬜ | Monitoring + backups + restore test |
+| M4 | ✅ done | Monitoring (kube-prometheus-stack v69.3.1 + Grafana) + Restic Backups |
 | M5 | ⬜ | Production-ready + all docs complete |
 
 ---
@@ -225,6 +225,8 @@ kubectl get ingress -A                             # All Ingress resources
 kubectl get svc -A                                 # All Services
 kubectl -n platform get pods                       # cert-manager, cloudflared pods
 kubectl -n platform logs -l app=cloudflared --tail=50  # Cloudflare Tunnel logs
+kubectl -n monitoring get pods                     # prometheus, grafana, alertmanager
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80  # Grafana UI → http://localhost:3000
 ```
 
 ### Debugging

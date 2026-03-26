@@ -141,6 +141,10 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 3. All values in `cluster/values/<name>.yaml` with pinned `version:`
 4. Validate: `helm lint cluster/platform/<name>/ -f cluster/values/<name>.yaml`
 
+> **Remote-only charts** (z.B. kube-prometheus-stack): Chart-Repo und Version werden direkt im
+> Playbook referenziert — kein lokales `cluster/platform/<name>/` Verzeichnis. `helm lint` entfällt.
+> Validierung: `helm template <name> <repo>/<chart> --version <ver> -f cluster/values/<name>.yaml`
+
 ---
 
 ## Repository Conventions
@@ -149,3 +153,4 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 - **Secrets**: use SOPS, age key is at `~/.config/age/homelab.key` (not in repo)
 - **IPs**: static or DHCP-reserved — k3s requires stable node IPs
 - **No `latest`**: all versions pinned in inventory or Helm values
+- **group_vars/k3s_server.yml**: overrides `storage_*` defaults for raspi5 (Restic enabled, repo path, backup paths). When adding new backup paths, edit this file — not `storage/defaults/main.yml`.
