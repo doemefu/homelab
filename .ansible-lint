@@ -1,0 +1,10 @@
+---
+# ansible-lint configuration
+# https://ansible.readthedocs.io/projects/lint/configuring/
+
+profile: production
+
+# Exclude the encrypted SOPS secrets file — it's gitignored, binary-like content,
+# and cannot be reformatted without breaking the encryption.
+exclude_paths:
+  - infra/inventory/group_vars/all.sops.yml

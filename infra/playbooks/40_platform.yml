@@ -198,6 +198,17 @@
       delegate_to: localhost
 
     # --- Monitoring ---
+    - name: Prüfen dass alertmanager_irm_webhook_url gesetzt ist
+      ansible.builtin.assert:
+        that:
+          - alertmanager_irm_webhook_url is defined
+          - alertmanager_irm_webhook_url | length > 0
+        fail_msg: >-
+          alertmanager_irm_webhook_url ist nicht gesetzt.
+          Bitte in infra/inventory/group_vars/all.sops.yml eintragen
+          (Grafana IRM → Integrations → Alertmanager → Webhook URL).
+      delegate_to: localhost
+
     - name: Monitoring Namespace anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -228,6 +239,44 @@
         values:
           grafana:
             adminPassword: "{{ grafana_admin_password }}"
+          alertmanager:
+            config:
+              global:
+                resolve_timeout: 5m
+              route:
+                group_by: ['alertname', 'namespace']
+                group_wait: 30s
+                group_interval: 5m
+                repeat_interval: 12h
+                receiver: 'grafana-irm'
+              receivers:
+                - name: 'grafana-irm'
+                  webhook_configs:
+                    - url: "{{ alertmanager_irm_webhook_url }}"
+                      send_resolved: true
+              # Preserve kube-prometheus-stack default inhibit rules to avoid alert storms
+              # during node failures (e.g. suppress symptom alerts when cause alert fires).
+              inhibit_rules:
+                - source_matchers:
+                    - 'severity = critical'
+                  target_matchers:
+                    - 'severity =~ warning|info'
+                  equal:
+                    - 'namespace'
+                    - 'alertname'
+                - source_matchers:
+                    - 'severity = warning'
+                  target_matchers:
+                    - 'severity = info'
+                  equal:
+                    - 'namespace'
+                    - 'alertname'
+                - source_matchers:
+                    - 'alertname = InfoInhibitor'
+                  target_matchers:
+                    - 'severity = info'
+                  equal:
+                    - 'namespace'
         wait: true
         wait_timeout: "10m"
       delegate_to: localhost

@@ -44,9 +44,13 @@ Secrets anlegen (einmalig nach Clone):
 ```bash
 cp infra/inventory/group_vars/all.sops.yml.example \
    infra/inventory/group_vars/all.sops.yml
-# Werte eintragen, dann verschlüsseln:
+# Alle CHANGE_ME-Einträge ersetzen, dann verschlüsseln:
 sops -e -i infra/inventory/group_vars/all.sops.yml
 ```
+
+> **Pflichtfeld für `40_platform.yml`:** `alertmanager_irm_webhook_url` muss gesetzt sein —
+> das Playbook enthält eine `assert`-Guard und schlägt ohne diesen Wert fehl.
+> URL erhalten: Grafana IRM → Integrations → New Integration → Alertmanager.
 
 ---
 

@@ -111,7 +111,7 @@ export KUBECONFIG=~/.kube/homelab.yaml
 | `10_base.yml`     | OS baseline + hardening + storage + Restic cron (raspi5) | M1, then on changes |
 | `20_k3s.yml`      | k3s server + agents + Longhorn prereqs          | M2                  |
 | `30_longhorn.yml` | Longhorn Helm deploy + Default StorageClass     | M3                  |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config, Monitoring | M2, M4              |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config, Monitoring, Alertmanager | M2, M4, M5+         |
 
 Run a playbook against all nodes:
 ```bash
@@ -138,7 +138,7 @@ ansible-playbook infra/playbooks/10_base.yml --check --diff -l raspi5
 | M2 | ✅ done | k3s + Traefik + cert-manager + Cloudflare Tunnel |
 | M3 | ✅ done | Longhorn v1.7.2 + RF=2 + Worker-Failover test |
 | M4 | ✅ done | Monitoring (kube-prometheus-stack v69.3.1 + Grafana) + Restic Backups |
-| M5 | ⬜ | Production-ready + all docs complete |
+| M5 | ✅ done | Production-ready: APPS.md complete, examples/ created, Grafana PVC, Alertmanager IRM |
 
 ---
 
@@ -173,7 +173,8 @@ infra/
 cluster/
   platform/                 # Helm chart references
   values/                   # Pinned Helm values
-examples/                   # Reference manifests for app deployments (M5)
+examples/                   # Reference manifests for app deployments (see APPS.md)
+                            #   simple-deployment, with-postgres, with-ingress-public, helm-values-template
 docs/
   01-homelab-platform.md    # Full platform specification
 ```

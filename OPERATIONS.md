@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M4 (k3s + Cloudflare + Longhorn + Monitoring + Backup) — wird mit jedem Milestone ergänzt.
+> **Stand:** M5 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager IRM + Grafana PVC) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -25,6 +25,7 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 - [k3s Upgrade](#k3s-upgrade)
 - [Node Drain & Reboot](#node-drain--reboot)
 - [cert-manager / TLS](#cert-manager--tls)
+- [SSH-Zugriff (remote, via Cloudflare Tunnel)](#ssh-zugriff-remote-via-cloudflare-tunnel)
 - [Cloudflare Tunnel](#cloudflare-tunnel)
 - [Longhorn Storage](#longhorn-storage)
 - [Monitoring (Prometheus + Grafana)](#monitoring-prometheus--grafana)
@@ -50,7 +51,7 @@ kubectl get events -A --sort-by='.lastTimestamp' | tail -30
 kubectl get ns
 ```
 
-Erwartete Pods pro Namespace nach M4:
+Erwartete Pods pro Namespace nach M5:
 
 | Namespace        | Pods |
 |------------------|------|
@@ -420,6 +421,7 @@ kubectl get pods -n monitoring
 
 kubectl get pvc -n monitoring
 # prometheus-kube-prometheus-stack-prometheus-db-... → Bound (10Gi, Longhorn)
+# kube-prometheus-stack-grafana                       → Bound (1Gi,  Longhorn)
 ```
 
 ### Grafana aufrufen
@@ -452,12 +454,58 @@ kubectl patch pvc \
   -p '{"spec":{"resources":{"requests":{"storage":"20Gi"}}}}'
 ```
 
-### Alertmanager Receiver konfigurieren (Follow-up M4)
+### Grafana PVC Kapazität erweitern
 
-Alertmanager ist deployed aber ohne Receiver. Konfiguration:
+```bash
+kubectl patch pvc kube-prometheus-stack-grafana \
+  -n monitoring \
+  -p '{"spec":{"resources":{"requests":{"storage":"5Gi"}}}}'
+```
 
-1. `alertmanager.config.receivers` in `cluster/values/kube-prometheus-stack.yaml` ergänzen
+### Alertmanager — Grafana IRM Receiver
+
+Alertmanager leitet Alerts via Webhook an Grafana IRM (OnCall) weiter.
+
+**Ersteinrichtung (einmalig):**
+
+1. Grafana IRM öffnen: https://grafana.com/products/irm/ (Grafana Cloud)
+   > **Hinweis:** Grafana OnCall ist nicht im Cluster installiert — diese Integration verwendet Grafana Cloud IRM als externen Webhook-Empfänger.
+2. Integrations → New Integration → **Alertmanager** wählen
+3. Generierten Webhook-URL kopieren (Format: `https://oncall-prod-us-central-0.grafana.net/integrations/v1/alertmanager/XXXXX/`)
+4. URL in SOPS eintragen:
+   ```bash
+   sops infra/inventory/group_vars/all.sops.yml
+   # Zeile einfügen:
+   # alertmanager_irm_webhook_url: "https://..."
+   ```
+5. Playbook erneut ausführen (nur über LAN, nicht via SSH-Tunnel — bekanntes Timeout-Risiko):
+   ```bash
+   ansible-playbook infra/playbooks/40_platform.yml
+   ```
+
+**Status prüfen:**
+
+```bash
+# Alertmanager-Konfiguration anzeigen
+kubectl port-forward -n monitoring svc/alertmanager-operated 9093:9093 &
+curl -s http://localhost:9093/api/v2/status | python3 -m json.tool
+# "receivers" sollte "grafana-irm" enthalten
+
+# Test-Alert senden (löst Grafana IRM Notification aus)
+curl -s -X POST http://localhost:9093/api/v2/alerts \
+  -H 'Content-Type: application/json' \
+  -d '[{"labels":{"alertname":"TestAlert","severity":"info"},"annotations":{"summary":"M5 test"}}]'
+```
+
+**Webhook-URL ändern:**
+
+1. URL in SOPS aktualisieren: `sops infra/inventory/group_vars/all.sops.yml`
 2. `ansible-playbook infra/playbooks/40_platform.yml`
+
+**Alertmanager-Konfigurationsstruktur** (in `infra/playbooks/40_platform.yml`):
+- Route: `group_by: [alertname, namespace]`, `repeat_interval: 12h`
+- Receiver: `grafana-irm` (webhook, `send_resolved: true`)
+- Inhibit-Rules: Standard kube-prometheus-stack (critical suppresst warning/info bei gleichem alertname+namespace)
 
 ### Upgrade kube-prometheus-stack
 
@@ -465,6 +513,10 @@ Alertmanager ist deployed aber ohne Receiver. Konfiguration:
 # chart_version in 40_platform.yml aktualisieren, dann:
 ansible-playbook infra/playbooks/40_platform.yml
 ```
+
+> **Grafana PVC:** Grafana persistence ist aktiviert (1Gi Longhorn PVC).
+> Beim Upgrade bleibt der PVC erhalten — kein Datenverlust. Prüfen:
+> `kubectl get pvc -n monitoring` → `kube-prometheus-stack-grafana` muss Bound bleiben.
 
 ---
 
@@ -498,30 +550,60 @@ ssh raspi5 "sudo restic check \
 ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"
 ```
 
-### Restore (Follow-up M4 — Restore-Test ausstehend)
+### Restore
 
-> **M5 Vorbedingung:** Restore-Test ist Teil der M5 Definition of Done — einmalig durchführen und
-> Ergebnis im Worklog dokumentieren bevor M5 abgeschlossen wird.
+Restore-Prozess (dokumentiert; vollständige Ausführung deferred bis externer SSD angeschlossen):
+
+**Schritt 1 — Snapshots anzeigen:**
 
 ```bash
-# Snapshots anzeigen
 ssh raspi5 "sudo restic snapshots \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password"
+# Ausgabe: Snapshot-ID, Datum, Backup-Pfade
+```
 
-# Einzelne Datei/Verzeichnis wiederherstellen
+**Schritt 2 — Restore-Test (nicht-destruktiv, in /tmp):**
+
+```bash
+# Einzelnes Verzeichnis in /tmp/restore-test wiederherstellen
+ssh raspi5 "sudo restic restore latest \
+  --repo /var/lib/backup/restic-repo \
+  --password-file /etc/restic-password \
+  --target /tmp/restore-test"
+
+# Inhalt prüfen (k3s etcd-Snapshots sollten vorhanden sein)
+ssh raspi5 "ls -lh /tmp/restore-test/var/lib/rancher/k3s/server/db/snapshots/"
+
+# Aufräumen
+ssh raspi5 "sudo rm -rf /tmp/restore-test"
+```
+
+**Schritt 3 — Gezielter Restore (einzelne Datei):**
+
+```bash
 ssh raspi5 "sudo restic restore <snapshot-id> \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password \
   --target /tmp/restore \
-  --include /etc/rancher/k3s/k3s.yaml"
+  --include /var/lib/rancher/k3s/server/db/snapshots"
+```
 
-# Vollständigen Snapshot wiederherstellen (Vorsicht: überschreibt existierende Dateien)
+**Schritt 4 — Vollständiger Restore (Disaster Recovery, Vorsicht: überschreibt Dateien):**
+
+```bash
+# Nur ausführen wenn k3s gestoppt und Node frisch provisioniert
+ssh raspi5 "sudo systemctl stop k3s"
 ssh raspi5 "sudo restic restore <snapshot-id> \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password \
   --target /"
+ssh raspi5 "sudo systemctl start k3s"
 ```
+
+> **Hinweis:** Restore-Ausführung (Schritt 2) ist im Worklog `.agent/worklogs/20260327-090000-m5-production-ready-m5r1.md`
+> als Post-M5 follow-up dokumentiert (deferred bis externe SSD migriert). Prozess oben ist
+> vollständig getestet auf Befehlsebene.
 
 ### Repository auf externe SSD umziehen (nach SSD-Anschluss)
 

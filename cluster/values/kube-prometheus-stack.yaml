@@ -10,10 +10,10 @@
 #   http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
 # Vorteil: kein cert-manager Zertifikat nötig, keine Traefik-Konfiguration.
 #
-# Alertmanager: deployed ohne Receiver-Konfiguration (M4).
-# Follow-up: Receiver (z.B. Pushover/Discord) nach M4 konfigurieren.
-# Konfiguration: alertmanager.config.receivers in dieser Datei ergänzen,
-# dann ansible-playbook infra/playbooks/40_platform.yml erneut ausführen.
+# Alertmanager: Receiver-Konfiguration via Grafana IRM (webhook).
+# Die alertmanager.config (route + receiver + inhibit_rules) wird von 40_platform.yml
+# als values-Override injiziert (alertmanager_irm_webhook_url aus all.sops.yml).
+# Vorbedingung: alertmanager_irm_webhook_url in all.sops.yml gesetzt.
 #
 # Prometheus Storage: 10Gi Longhorn PVC, 14 Tage Retention.
 # Longhorn ist Default StorageClass — kein storageClassName Key nötig.
@@ -51,8 +51,10 @@ grafana:
       cpu: 200m
       memory: 256Mi
   persistence:
-    enabled: false  # Ephemer für M4 — Dashboards gehen bei Pod-Restart verloren
-                    # Follow-up: enabled: true + 1Gi PVC falls Dashboards persistent nötig
+    enabled: true
+    type: pvc       # Explizit: verhindert silent emptyDir-Fallback
+    size: 1Gi
+    # storageClassName omitted → verwendet Longhorn (Default StorageClass)
 
 alertmanager:
   alertmanagerSpec:

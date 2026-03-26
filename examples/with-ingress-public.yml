@@ -1,0 +1,86 @@
+# with-ingress-public.yml
+#
+# Public exposure via Cloudflare Tunnel — no Kubernetes Ingress, no TLS cert needed.
+# TLS is terminated at the Cloudflare edge.
+#
+# HOW PUBLIC EXPOSURE WORKS in this cluster:
+#   The cloudflared Pod (ns/platform) forwards traffic from Cloudflare to any
+#   ClusterIP service, cross-namespace, via the cluster-internal FQDN:
+#
+#     http://<service-name>.<namespace>.svc.cluster.local:<port>
+#
+#   To expose this app at myapp.furchert.ch:
+#
+#   1. Add an entry to infra/playbooks/40_platform.yml in the cloudflared ingress list
+#      (BEFORE the http_status:404 fallback entry):
+#
+#        - hostname: myapp.furchert.ch
+#          service: http://myapp.apps.svc.cluster.local:80
+#
+#   2. Re-run the platform playbook:
+#        ansible-playbook infra/playbooks/40_platform.yml
+#      (This replaces the full ingress list and restarts cloudflared automatically.)
+#
+#   3. Add a DNS CNAME in the Cloudflare Dashboard:
+#        Name:    myapp
+#        Target:  <tunnel-id>.cfargotunnel.com
+#        Proxy:   enabled (orange cloud)
+#
+# Prerequisites:
+#   kubectl create namespace apps   (one-time)
+#   alertmanager_irm_webhook_url in all.sops.yml (if running 40_platform.yml for the first time)
+#
+# Deploy the Kubernetes resources:
+#   kubectl apply -f examples/with-ingress-public.yml
+#
+# Verify:
+#   kubectl get pods -n apps
+#   # After DNS propagates (~1-5 min):
+#   curl https://myapp.furchert.ch
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: apps
+  labels:
+    app: myapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          # Multi-arch image required (linux/arm64 + linux/amd64).
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+---
+# ClusterIP Service — reachable from cloudflared (platform ns) via cross-namespace FQDN.
+# No NodePort or LoadBalancer needed; Cloudflare Tunnel does not require external IP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  namespace: apps
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 8080
