@@ -8,3 +8,10 @@ k3s_role: "server"
 storage_has_external_backup: true
 storage_backup_device: ""  # TODO: Gerätepfad eintragen wenn SSD angeschlossen
                             # Beispiel: /dev/disk/by-uuid/XXXX-XXXX
+
+# Restic Backup-Automatisierung (M4) — aktiv auf pi5
+storage_run_restic_backup: true
+storage_restic_repo: "/var/lib/backup/restic-repo"  # interim; nach SSD-Anschluss auf /mnt/backup/restic-repo ändern
+storage_backup_paths:
+  - /etc/rancher/k3s
+  - /var/lib/rancher/k3s/server/db/snapshots  # k3s etcd-Snapshots (konsistent, auto-erstellt)

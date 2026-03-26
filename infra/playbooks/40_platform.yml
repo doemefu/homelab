@@ -151,6 +151,8 @@
             ingress:
               - hostname: "ssh.furchert.ch"
                 service: "ssh://192.168.1.61:22"
+              - hostname: "grafana.furchert.ch"
+                service: "http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80"
               - service: "http_status:404"
         status_code: 200
       delegate_to: localhost
@@ -168,7 +170,7 @@
             template:
               metadata:
                 annotations:
-                  kubectl.kubernetes.io/restartedAt: "{{ ansible_date_time.iso8601 }}"
+                  kubectl.kubernetes.io/restartedAt: "{{ now(utc=True, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
       delegate_to: localhost
 
     # --- Traefik: HTTP → HTTPS Redirect ---
@@ -194,3 +196,39 @@
                 general:
                   level: INFO
       delegate_to: localhost
+
+    # --- Monitoring ---
+    - name: Monitoring Namespace anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: monitoring
+      delegate_to: localhost
+
+    - name: Prometheus-Community Helm Repo hinzufügen
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+        binary_path: "{{ helm_binary }}"
+      delegate_to: localhost
+
+    - name: Kube-Prometheus-Stack deployen
+      kubernetes.core.helm:
+        name: kube-prometheus-stack
+        chart_ref: prometheus-community/kube-prometheus-stack
+        chart_version: "69.3.1"
+        release_namespace: monitoring
+        kubeconfig: "{{ kubeconfig }}"
+        binary_path: "{{ helm_binary }}"
+        values_files:
+          - "{{ playbook_dir }}/../../cluster/values/kube-prometheus-stack.yaml"
+        values:
+          grafana:
+            adminPassword: "{{ grafana_admin_password }}"
+        wait: true
+        wait_timeout: "10m"
+      delegate_to: localhost
+      no_log: true

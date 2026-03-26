@@ -9,3 +9,16 @@ storage_has_external_backup: false
 # Beispiel: /dev/disk/by-uuid/XXXX-XXXX
 storage_backup_device: ""
 storage_backup_fstype: "ext4"
+
+# Restic Backup-Automatisierung (M4)
+# storage_run_restic_backup: true aktiviert Repo-Init, Passwort-Datei, Skript + Cron auf diesem Node
+# Nur auf pi5 aktiviert (k3s_server.yml) — alle anderen Nodes: false
+storage_run_restic_backup: false
+
+# Restic Repository-Pfad (lokales Verzeichnis, interim bis externe SSD angeschlossen)
+# Follow-up: /mnt/backup/restic-repo nach SSD-Anschluss (Prozess in OPERATIONS.md)
+storage_restic_repo: "{{ storage_backup_dir }}/restic-repo"
+
+# Pfade die gesichert werden — safe default (leer; wird in k3s_server.yml überschrieben)
+# Nicht k3s-spezifische Pfade im Default, um Fehler auf Nicht-k3s-Nodes zu vermeiden
+storage_backup_paths: []
