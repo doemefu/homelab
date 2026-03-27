@@ -252,8 +252,9 @@
               receivers:
                 - name: 'discord'
                   discord_configs:
-                    - api_url: "{{ alertmanager_discord_webhook_url }}"
+                    - webhook_url: "{{ alertmanager_discord_webhook_url }}"
                       send_resolved: true
+                - name: 'null'
               # Preserve kube-prometheus-stack default inhibit rules to avoid alert storms
               # during node failures (e.g. suppress symptom alerts when cause alert fires).
               inhibit_rules:

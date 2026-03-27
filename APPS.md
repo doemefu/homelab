@@ -193,6 +193,101 @@ All examples use:
 
 ---
 
+## Deploying Your App
+
+### Prerequisites
+
+Ensure `kubectl` is configured to talk to the homelab cluster:
+
+```bash
+export KUBECONFIG=~/.kube/homelab.yaml
+kubectl get nodes  # should show raspi5 + raspi4 as Ready
+```
+
+> Add `export KUBECONFIG=~/.kube/homelab.yaml` to your `~/.zshrc` to make it permanent.
+
+### Create the namespace (once)
+
+```bash
+kubectl create namespace apps
+```
+
+### kubectl apply workflow
+
+1. **Apply your manifest:**
+   ```bash
+   kubectl apply -f your-app.yml
+   ```
+
+2. **Wait for rollout:**
+   ```bash
+   kubectl rollout status deployment/<your-app> -n apps
+   ```
+
+3. **Verify pods are Running:**
+   ```bash
+   kubectl get pods -n apps
+   ```
+
+See `examples/simple-deployment.yml` for a complete manifest to start from.
+
+### Helm workflow
+
+If your app uses a Helm chart, store your values in `cluster/values/<your-app>.yaml` and always pin the chart version.
+
+1. **Add the chart repo (once):**
+   ```bash
+   helm repo add <repo-name> <repo-url>
+   helm repo update
+   ```
+
+2. **Install or upgrade (same command for both):**
+   ```bash
+   helm upgrade --install <release-name> <repo>/<chart> \
+     --namespace apps --create-namespace \
+     -f cluster/values/<your-app>.yaml \
+     --version <pinned-version>
+   ```
+
+3. **Verify:**
+   ```bash
+   helm list -n apps
+   kubectl get pods -n apps
+   ```
+
+See `examples/helm-values-template.yml` as a starting point for your values file.
+
+### Updating a running app
+
+**Manifest-based** — edit your manifest, then re-apply:
+```bash
+kubectl apply -f your-app.yml
+kubectl rollout status deployment/<your-app> -n apps
+```
+
+**Helm-based** — bump the version in your values file, then upgrade:
+```bash
+helm upgrade <release-name> <repo>/<chart> \
+  --namespace apps \
+  -f cluster/values/<your-app>.yaml \
+  --version <new-version>
+```
+
+### Rollback
+
+**Manifest-based:**
+```bash
+kubectl rollout undo deployment/<your-app> -n apps
+```
+
+**Helm-based:**
+```bash
+helm history <release-name> -n apps        # list revisions
+helm rollback <release-name> <revision> -n apps
+```
+
+---
+
 ## Post-Deploy Verification
 
 After deploying, verify:
