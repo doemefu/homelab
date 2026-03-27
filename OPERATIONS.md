@@ -225,7 +225,7 @@ Host raspi5
   ProxyCommand cloudflared access ssh --hostname %h
 
 Host raspi4
-  HostName ssh-raspi4.furchert.ch
+  HostName ssh-raspi4.furchert.ch          # post-M5: not yet configured
   User ubuntu
   IdentityFile ~/.ssh/new_home
   ProxyCommand cloudflared access ssh --hostname %h
@@ -247,7 +247,7 @@ Neue Services ergänzen: Ingress-Liste im Playbook erweitern, dann Playbook erne
 
 ```bash
 ssh raspi5             # via ~/.ssh/config
-ssh raspi4             # via ~/.ssh/config
+ssh raspi4             # post-M5: requires raspi4 tunnel setup first (see Open Items in README)
 
 # Oder direkt:
 ssh -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" ubuntu@ssh.furchert.ch
