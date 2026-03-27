@@ -206,7 +206,8 @@ homelab/                         ← GitHub Repo Root
 │       ├─ 10_base.yml           ← base + hardening + storage
 │       ├─ 20_k3s.yml            ← k3s server → agents joinen
 │       ├─ 30_longhorn.yml       ← Longhorn Helm Chart + Default StorageClass
-│       └─ 40_platform.yml       ← cert-manager, traefik, cloudflared, monitoring
+│       ├─ 40_platform.yml       ← cert-manager, traefik, cloudflared, monitoring
+│       └─ 50_apps_infra.yml     ← PostgreSQL 17, InfluxDB 2, Mosquitto 2 (apps namespace)
 │
 ├─ cluster/                      ← Helm / Kubernetes
 │   ├─ platform/
@@ -307,6 +308,7 @@ Jeder Meilenstein hat ein konkretes Dokumentations-Deliverable — Runbooks ents
 | M3 | Longhorn deployed + Replication + Failover getestet         | Node offline → PV bleibt verfügbar, dokumentierter Failover-Test     | OPERATIONS.md: Storage-Runbook         |
 | M4 | Monitoring + Backups + Restore-Test                         | Grafana zeigt alle 4 Nodes, Restore einer DB erfolgreich             | OPERATIONS.md: Backup/Restore-Runbook  |
 | M5 | Plattform produktionsreif + alle Dokumente vollständig      | `examples/` fertig, alle 4 Docs reviewed, APPS.md vollständig        | Alle Dokumente abgenommen              |
+| M6 | App-Infrastruktur: PostgreSQL 17, InfluxDB 2, Mosquitto 2   | Alle 3 Services in `apps` namespace; `mqtt.furchert.ch` WSS extern   | OPERATIONS.md: App-Infra-Runbooks; APPS.md aktualisiert |
 
 ---
 
