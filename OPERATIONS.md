@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M5 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager IRM + Grafana PVC) — wird mit jedem Milestone ergänzt.
+> **Stand:** M6 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -51,7 +51,7 @@ kubectl get events -A --sort-by='.lastTimestamp' | tail -30
 kubectl get ns
 ```
 
-Erwartete Pods pro Namespace nach M5:
+Erwartete Pods pro Namespace nach M6:
 
 | Namespace        | Pods |
 |------------------|------|
@@ -59,6 +59,8 @@ Erwartete Pods pro Namespace nach M5:
 | `platform`       | cert-manager (3x), cloudflared |
 | `longhorn-system`| longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager |
 | `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
+| `apps`           | postgresql-0, influxdb2-0, mosquitto-* |
+| `homeassistant`  | home-assistant-0 (hostNetwork, port 8123 on node IP) |
 
 ---
 
@@ -75,6 +77,7 @@ UFW-Regeln werden von der `hardening`-Rolle gesetzt. Alle eingehenden Verbindung
 | 2379–2380   | TCP       | etcd (nur Control-Plane)            | LAN only |
 | 9500–9502   | TCP       | Longhorn Replikation                | LAN only |
 | 9100        | TCP       | Node Exporter (Prometheus Scrape)   | LAN only |
+| 1883        | TCP       | Mosquitto MQTT (LAN only, anonym, kein Auth in M6) | LAN only |
 
 > Port-Forward-Befehle (z.B. `kubectl port-forward ... 9090:9090`) laufen lokal und erfordern keine UFW-Änderungen.
 
@@ -623,3 +626,72 @@ ssh raspi5 "sudo systemctl start k3s"
    ```bash
    ssh raspi5 "sudo rm -rf /var/lib/backup/restic-repo"
    ```
+
+---
+
+## App Infrastructure (PostgreSQL / InfluxDB 2 / Mosquitto)
+
+Deployed via `infra/playbooks/50_apps_infra.yml` in the `apps` Namespace.
+
+### Deploy / Neu deployen
+
+```bash
+ansible-playbook infra/playbooks/50_apps_infra.yml
+```
+
+Voraussetzungen in `all.sops.yml`: `postgresql_password`, `influxdb_admin_password`, `influxdb_admin_token`.
+
+### Interne FQDNs
+
+| Service       | FQDN                                        | Port |
+|---------------|---------------------------------------------|------|
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 |
+| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 |
+| Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 |
+
+Mosquitto ist zusätzlich im LAN über Port 1883 via LoadBalancer erreichbar (k3s ServiceLB).
+
+### Sicherheitshinweis Mosquitto
+
+Mosquitto läuft in M6 mit `allow_anonymous true` (LAN-only). Post-M6 Task: `password_file` + WSS-Endpunkt als Bundle aktivieren.
+
+### Upgrades
+
+- **PostgreSQL**: Image-Tag in `50_apps_infra.yml` anpassen (raw manifest). StatefulSet rollt automatisch neu.
+- **InfluxDB 2**: `chart_version` in `cluster/values/influxdb2.yaml` bumpen, Playbook erneut ausführen.
+- **Mosquitto**: Image-Tag in `50_apps_infra.yml` anpassen.
+
+---
+
+## Home Assistant
+
+Deployed via `infra/playbooks/51_homeassistant.yml` in the `homeassistant` Namespace.
+
+### Deploy / Neu deployen
+
+```bash
+ansible-playbook infra/playbooks/51_homeassistant.yml
+```
+
+### Zugriff
+
+```bash
+# Pod-Node ermitteln
+kubectl get pod -n homeassistant -o wide
+
+# Port 8123 tunneln (falls remote)
+ssh -fN -L 8123:<node-ip>:8123 raspi5
+
+# Browser (LAN oder Tunnel)
+http://<node-ip>:8123
+```
+
+Erster Start: HA-Onboarding-Wizard erscheint. HA verwaltet eigene Benutzer in `/config`.
+
+### MQTT-Integration
+
+MQTT-Broker in HA konfigurieren: Host `mosquitto.apps.svc.cluster.local`, Port `1883` (anonym, kein Passwort in M6).
+
+### Upgrade
+
+`chart_version` in `cluster/values/home-assistant.yaml` bumpen, Playbook erneut ausführen.

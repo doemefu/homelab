@@ -38,3 +38,4 @@ infra/inventory/group_vars/secrets.sops.yml.plaintext
 *.swo
 .idea/
 .vscode/
+/docs/superpowers/

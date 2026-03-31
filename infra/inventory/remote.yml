@@ -9,7 +9,7 @@ all:
     k3s_server:
       hosts:
         raspi5:
-          ansible_host: ssh.furchert.ch
+          ansible_host: raspi5
           ansible_ssh_common_args: '-o ProxyCommand="cloudflared access ssh --hostname %h"'
     k3s_agent:
       hosts:

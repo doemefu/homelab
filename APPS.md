@@ -9,7 +9,8 @@
 | `platform`       | Cluster infrastructure (cert-manager, cloudflared, Traefik) | No app workloads                           |
 | `longhorn-system`| Longhorn storage (Helm-Chart-Konvention)                    | No app workloads                           |
 | `monitoring`     | Prometheus, Grafana, Alertmanager                           | No app workloads                           |
-| `apps`           | All application workloads                                   | Resource limits required; no cluster-admin ServiceAccounts |
+| `apps`           | All application workloads + shared platform services (PostgreSQL 17, InfluxDB 2, Mosquitto 2) | Resource limits required; no cluster-admin ServiceAccounts |
+| `homeassistant`  | Home Assistant                                              | hostNetwork; port 8123 on node IP |
 
 Do not create namespaces outside this list without explicit discussion (CLAUDE.md non-negotiable).
 
@@ -18,6 +19,20 @@ Create the `apps` namespace once before your first deployment:
 ```bash
 kubectl create namespace apps
 ```
+
+---
+
+## Platform App Infrastructure
+
+Die folgenden Shared Services laufen im `apps` Namespace und können von App-Deployments cluster-intern genutzt werden.
+
+| Service       | Interner FQDN                               | Port | Hinweise |
+|---------------|---------------------------------------------|------|----------|
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 | Single Replica; Passwort aus SOPS `postgresql_password` |
+| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 | Org `homelab`, Bucket `default`, 30d Retention; Token aus SOPS `influxdb_admin_token` |
+| Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 | Auch LAN-seitig via LoadBalancer Port 1883; anonym in M6 |
+
+**Wichtig:** Mosquitto ist in M6 ohne Authentifizierung — nur LAN-seitiger Zugriff. Nicht extern exponieren ohne `password_file` (Post-M6).
 
 ---
 

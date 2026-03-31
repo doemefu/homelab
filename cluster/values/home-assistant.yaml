@@ -1,0 +1,37 @@
+---
+# Home Assistant Helm Values
+# Chart: pajikos/home-assistant 0.3.51  (Home Assistant 2026.3.4)
+#
+# hostNetwork: true — required for mDNS/multicast LAN device auto-discovery
+#   (Philips Hue, Shelly, Chromecast, etc.).
+# dnsPolicy must be ClusterFirstWithHostNet when hostNetwork is enabled.
+#
+# No Ingress — LAN access only via http://<node-ip>:8123
+# (hostNetwork binds port 8123 directly to the node IP)
+#
+# Storage: 5Gi Longhorn PVC for /config (HA config, automations, history).
+# No credentials in this file — HA manages its own users in /config at first launch.
+
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+
+env:
+  - name: TZ
+    value: "Europe/Zurich"
+
+persistence:
+  config:
+    enabled: true
+    size: 5Gi
+
+resources:
+  # Conservative for ARM64 pi4 (4GB RAM) + pi5 (8GB RAM).
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+ingress:
+  enabled: false

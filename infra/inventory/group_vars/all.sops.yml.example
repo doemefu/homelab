@@ -54,3 +54,8 @@ restic_password: "CHANGE_ME_restic_password"
 # Erstellen: Discord Server → Kanal-Einstellungen → Integrationen → Webhooks → Neuer Webhook → URL kopieren
 # Format: https://discord.com/api/webhooks/XXXXXXXXXX/YYYYYYYY
 alertmanager_discord_webhook_url: "CHANGE_ME_https://discord.com/api/webhooks/XXXXXXXXXX/YYYYYYYY"
+
+postgresql_password: "<generieren: openssl rand -base64 24>"
+postgresql_replication_password: "<generieren: openssl rand -base64 24>"
+influxdb_admin_password: "<min 8 Zeichen>"
+influxdb_admin_token: "<generieren: openssl rand -hex 32>"

@@ -1,0 +1,27 @@
+---
+# InfluxDB 2 Helm Values
+# Chart: influxdata/influxdb2 2.1.2  (InfluxDB 2.7.4)
+#
+# adminUser.password + adminUser.token:
+#   injected from 50_apps_infra.yml via all.sops.yml — not stored here.
+#
+# Storage: 10Gi Longhorn (default StorageClass — no storageClassName needed).
+# Organization + bucket configured for homelab time-series data.
+
+adminUser:
+  organization: "homelab"
+  bucket: "default"
+  retention_policy: "30d"
+
+persistence:
+  enabled: true
+  size: 10Gi
+
+resources:
+  # Conservative for ARM64 pi4 (4GB RAM) + pi5 (8GB RAM).
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

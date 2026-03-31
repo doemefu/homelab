@@ -52,6 +52,9 @@ sops -e -i infra/inventory/group_vars/all.sops.yml
 > das Playbook enthält eine `assert`-Guard und schlägt ohne diesen Wert fehl.
 > URL erhalten: Discord → Kanal-Einstellungen → Integrationen → Webhooks → URL kopieren.
 
+> **Pflichtfelder für `50_apps_infra.yml`:** `postgresql_password`, `influxdb_admin_password` und
+> `influxdb_admin_token` müssen in `all.sops.yml` gesetzt sein — das Playbook schlägt ohne diese Werte fehl.
+
 ---
 
 ## Ansible Development Workflow
@@ -106,7 +109,7 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 ### Kubernetes / Helm
 - All Helm values in `cluster/values/<chart-name>.yaml` — nothing inline in playbooks
 - Pinned versions only — no `latest` for images, charts, or k3s
-- Namespaces: `platform`, `longhorn-system`, `monitoring`, `apps`
+- Namespaces: `platform`, `longhorn-system`, `monitoring`, `apps`, `homeassistant`
   (Exception: `longhorn-system` ist Helm-Chart-Konvention und wird nicht durch dieses Repo gewählt)
 - Resource limits required for all workloads in `apps` namespace
 
