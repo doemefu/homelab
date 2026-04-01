@@ -47,6 +47,8 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | cert-manager          | v1.17.1        |
 | kube-prometheus-stack | 69.3.1         |
 | cloudflared           | 2025.2.1       |
+| postgres-exporter     | v0.15.0        |
+| mosquitto-exporter    | v0.6.3         |
 
 ---
 

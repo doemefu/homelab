@@ -35,3 +35,11 @@ resources:
 
 ingress:
   enabled: false
+
+# Prometheus metrics: not automated — requires manual HA configuration.
+# To enable:
+#   1. In HA: Settings → Add-ons → Studio Code Server (or kubectl exec -it <ha-pod> -n homeassistant -- sh)
+#   2. Edit /config/configuration.yaml and add:  prometheus:
+#   3. Restart Home Assistant
+# After enabling, create a ServiceMonitor targeting port 8123, path /api/prometheus
+# with a long_lived_access_token in the Authorization header.

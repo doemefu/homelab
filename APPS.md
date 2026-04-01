@@ -8,7 +8,7 @@
 |------------------|--------------------------------------------------------------|--------------------------------------------|
 | `platform`       | Cluster infrastructure (cert-manager, cloudflared, Traefik) | No app workloads                           |
 | `longhorn-system`| Longhorn storage (Helm-Chart-Konvention)                    | No app workloads                           |
-| `monitoring`     | Prometheus, Grafana, Alertmanager                           | No app workloads                           |
+| `monitoring`     | Prometheus, Grafana, Alertmanager                           | No app workloads. ServiceMonitors for all namespaces (including `apps`) live here. |
 | `apps`           | All application workloads + shared platform services (PostgreSQL 17, InfluxDB 2, Mosquitto 2) | Resource limits required; no cluster-admin ServiceAccounts |
 | `homeassistant`  | Home Assistant                                              | hostNetwork; port 8123 on node IP |
 
@@ -26,11 +26,11 @@ kubectl create namespace apps
 
 Die folgenden Shared Services laufen im `apps` Namespace und können von App-Deployments cluster-intern genutzt werden.
 
-| Service       | Interner FQDN                               | Port | Hinweise |
-|---------------|---------------------------------------------|------|----------|
-| PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 | Single Replica; Passwort aus SOPS `postgresql_password` |
-| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 | Org `homelab`, Bucket `default`, 30d Retention; Token aus SOPS `influxdb_admin_token` |
-| Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 | Auch LAN-seitig via LoadBalancer Port 1883; anonym in M6 |
+| Service       | Interner FQDN                               | Port | Metrics Endpoint | Hinweise |
+|---------------|---------------------------------------------|------|------------------|----------|
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 | `:9187/metrics` (postgres-exporter sidecar) | Single Replica; Passwort aus SOPS `postgresql_password` |
+| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 | `:80/metrics` (native) | Org `homelab`, Bucket `default`, 30d Retention; Token aus SOPS `influxdb_admin_token` |
+| Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 | `mosquitto-metrics.apps:9234/metrics` (exporter) | Auch LAN-seitig via LoadBalancer Port 1883; anonym in M6 |
 
 **Wichtig:** Mosquitto ist in M6 ohne Authentifizierung — nur LAN-seitiger Zugriff. Nicht extern exponieren ohne `password_file` (Post-M6).
 
@@ -186,6 +186,41 @@ env:
 ```
 
 > **Never** put secret values directly in `cluster/values/*.yaml` or `examples/` files.
+
+---
+
+## Prometheus Observability for Apps
+
+To wire a new app into Prometheus, create a ServiceMonitor in the `monitoring` namespace. The ServiceMonitor must carry label `release: kube-prometheus-stack` for the Prometheus Operator to discover it.
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: myapp
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - apps
+  selector:
+    matchLabels:
+      app: myapp
+  endpoints:
+    - port: metrics      # named port on the Service pointing at the exporter / native /metrics
+      path: /metrics
+      interval: 30s
+```
+
+The targeted Service must expose a named port `metrics`. If the app has no native `/metrics` endpoint, add a sidecar exporter container (see `infra/playbooks/50_apps_infra.yml` postgres-exporter sidecar for an example) or a separate exporter Deployment.
+
+Verify targets are UP in Prometheus:
+```bash
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+# → http://localhost:9090/targets
+```
 
 ---
 

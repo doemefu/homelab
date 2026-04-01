@@ -92,6 +92,27 @@
                       limits:
                         cpu: 500m
                         memory: 512Mi
+                  - name: postgres-exporter
+                    image: prometheuscommunity/postgres-exporter:v0.15.0
+                    env:
+                      - name: DATA_SOURCE_URI
+                        value: "localhost:5432/postgres?sslmode=disable"
+                      - name: DATA_SOURCE_USER
+                        value: "postgres"
+                      - name: DATA_SOURCE_PASS
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgresql-secret
+                            key: POSTGRES_PASSWORD
+                    ports:
+                      - containerPort: 9187
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 32Mi
+                      limits:
+                        cpu: 100m
+                        memory: 64Mi
             volumeClaimTemplates:
               - metadata:
                   name: data
@@ -112,6 +133,8 @@
           metadata:
             name: postgresql
             namespace: "{{ apps_namespace }}"
+            labels:
+              app: postgresql
           spec:
             type: ClusterIP
             selector:
@@ -120,6 +143,9 @@
               - name: postgresql
                 port: 5432
                 targetPort: 5432
+              - name: metrics
+                port: 9187
+                targetPort: 9187
       delegate_to: localhost
 
     # --- InfluxDB 2 ---
@@ -163,7 +189,7 @@
             mosquitto.conf: |
               listener 1883
               # SECURITY: Anonymous access intentionally enabled for homelab M6 setup.
-              # Post-M6 task: add password_file + auth config (see memory/project_m6_wss_mqtt.md).
+              # Post-M6 task: add password_file + auth config (see .claude/memory/project_post_m6_items.md).
               # Do NOT expose port 1883 externally without authentication.
               allow_anonymous true
               persistence true
@@ -254,4 +280,133 @@
                 port: 1883
                 targetPort: 1883
                 protocol: TCP
+      delegate_to: localhost
+
+    # --- Mosquitto Exporter ---
+    - name: Mosquitto Exporter Deployment anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: mosquitto-exporter
+            namespace: "{{ apps_namespace }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: mosquitto-exporter
+            template:
+              metadata:
+                labels:
+                  app: mosquitto-exporter
+              spec:
+                containers:
+                  - name: mosquitto-exporter
+                    image: "nolte/mosquitto-exporter:v0.6.3"
+                    args:
+                      - "--endpoint"
+                      - "tcp://mosquitto.{{ apps_namespace }}.svc.cluster.local:1883"
+                    ports:
+                      - containerPort: 9234
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 16Mi
+                      limits:
+                        cpu: 50m
+                        memory: 32Mi
+      delegate_to: localhost
+
+    - name: Mosquitto Exporter Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mosquitto-metrics
+            namespace: "{{ apps_namespace }}"
+            labels:
+              app: mosquitto-exporter
+          spec:
+            type: ClusterIP
+            selector:
+              app: mosquitto-exporter
+            ports:
+              - name: metrics
+                port: 9234
+                targetPort: 9234
+      delegate_to: localhost
+
+    # --- Prometheus ServiceMonitors ---
+    - name: PostgreSQL ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: postgresql
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - "{{ apps_namespace }}"
+            selector:
+              matchLabels:
+                app: postgresql
+      delegate_to: localhost
+
+    - name: InfluxDB ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: influxdb2
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: http
+                path: /metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - "{{ apps_namespace }}"
+            selector:
+              matchLabels:
+                app.kubernetes.io/instance: influxdb2
+      delegate_to: localhost
+
+    - name: Mosquitto ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: mosquitto
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - "{{ apps_namespace }}"
+            selector:
+              matchLabels:
+                app: mosquitto-exporter
       delegate_to: localhost

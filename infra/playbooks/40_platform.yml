@@ -5,6 +5,7 @@
 # Voraussetzung: Cloudflare Zone ist aktiv, Tunnel wurde mit 'cloudflared tunnel create homelab' erstellt
 #
 # Ausführen mit: ansible-playbook infra/playbooks/40_platform.yml
+# Monitoring (kube-prometheus-stack): → 41_monitoring.yml (ausgelagert wegen langer Helm-Wartezeit)
 #
 # Hinweis: Tasks laufen via delegate_to: localhost (Helm/kubectl auf Mac).
 #          hosts: k3s_server stellt sicher dass group_vars (inkl. Secrets) geladen werden.
@@ -173,8 +174,8 @@
                   kubectl.kubernetes.io/restartedAt: "{{ now(utc=True, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
       delegate_to: localhost
 
-    # --- Traefik: HTTP → HTTPS Redirect ---
-    - name: Traefik HelmChartConfig — HTTP zu HTTPS Redirect
+    # --- Traefik: HTTP → HTTPS Redirect + Prometheus Metrics ---
+    - name: Traefik HelmChartConfig — HTTP zu HTTPS Redirect + Metrics
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -192,93 +193,20 @@
                       to: websecure
                       scheme: https
                       permanent: true
+                metrics:
+                  port: 9101
+                  expose:
+                    default: true
               logs:
                 general:
                   level: INFO
+              metrics:
+                prometheus:
+                  entryPoint: metrics
+                  addEntryPointsLabels: true
+                  addRoutersLabels: true
+                  addServicesLabels: true
       delegate_to: localhost
 
-    # --- Monitoring ---
-    - name: Prüfen dass alertmanager_discord_webhook_url gesetzt ist
-      ansible.builtin.assert:
-        that:
-          - alertmanager_discord_webhook_url is defined
-          - alertmanager_discord_webhook_url | length > 0
-        fail_msg: >-
-          alertmanager_discord_webhook_url ist nicht gesetzt.
-          Bitte in infra/inventory/group_vars/all.sops.yml eintragen
-          (Discord Server → Kanal-Einstellungen → Integrationen → Webhooks → URL kopieren).
-      delegate_to: localhost
-
-    - name: Monitoring Namespace anlegen
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        definition:
-          apiVersion: v1
-          kind: Namespace
-          metadata:
-            name: monitoring
-      delegate_to: localhost
-
-    - name: Prometheus-Community Helm Repo hinzufügen
-      kubernetes.core.helm_repository:
-        name: prometheus-community
-        repo_url: https://prometheus-community.github.io/helm-charts
-        binary_path: "{{ helm_binary }}"
-      delegate_to: localhost
-
-    - name: Kube-Prometheus-Stack deployen
-      kubernetes.core.helm:
-        name: kube-prometheus-stack
-        chart_ref: prometheus-community/kube-prometheus-stack
-        chart_version: "69.3.1"
-        release_namespace: monitoring
-        kubeconfig: "{{ kubeconfig }}"
-        binary_path: "{{ helm_binary }}"
-        values_files:
-          - "{{ playbook_dir }}/../../cluster/values/kube-prometheus-stack.yaml"
-        values:
-          grafana:
-            adminPassword: "{{ grafana_admin_password }}"
-          alertmanager:
-            config:
-              global:
-                resolve_timeout: 5m
-              route:
-                group_by: ['alertname', 'namespace']
-                group_wait: 30s
-                group_interval: 5m
-                repeat_interval: 12h
-                receiver: 'discord'
-              receivers:
-                - name: 'discord'
-                  discord_configs:
-                    - webhook_url: "{{ alertmanager_discord_webhook_url }}"
-                      send_resolved: true
-                - name: 'null'
-              # Preserve kube-prometheus-stack default inhibit rules to avoid alert storms
-              # during node failures (e.g. suppress symptom alerts when cause alert fires).
-              inhibit_rules:
-                - source_matchers:
-                    - 'severity = critical'
-                  target_matchers:
-                    - 'severity =~ warning|info'
-                  equal:
-                    - 'namespace'
-                    - 'alertname'
-                - source_matchers:
-                    - 'severity = warning'
-                  target_matchers:
-                    - 'severity = info'
-                  equal:
-                    - 'namespace'
-                    - 'alertname'
-                - source_matchers:
-                    - 'alertname = InfoInhibitor'
-                  target_matchers:
-                    - 'severity = info'
-                  equal:
-                    - 'namespace'
-        wait: true
-        wait_timeout: "10m"
-      delegate_to: localhost
-      no_log: true
+    # ServiceMonitors + kube-prometheus-stack → 41_monitoring.yml
+    # (ausgelagert wegen wait_timeout: 10m — SSH-Tunnel bricht sonst ab)

@@ -59,7 +59,7 @@ Erwartete Pods pro Namespace nach M6:
 | `platform`       | cert-manager (3x), cloudflared |
 | `longhorn-system`| longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager |
 | `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
-| `apps`           | postgresql-0, influxdb2-0, mosquitto-* |
+| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-* |
 | `homeassistant`  | home-assistant-0 (hostNetwork, port 8123 on node IP) |
 
 ---
@@ -77,6 +77,9 @@ UFW-Regeln werden von der `hardening`-Rolle gesetzt. Alle eingehenden Verbindung
 | 2379–2380   | TCP       | etcd (nur Control-Plane)            | LAN only |
 | 9500–9502   | TCP       | Longhorn Replikation                | LAN only |
 | 9100        | TCP       | Node Exporter (Prometheus Scrape)   | LAN only |
+| 9101        | TCP       | Traefik Metrics (Prometheus Scrape) | LAN only |
+| 9187        | TCP       | postgres-exporter Sidecar (Prometheus Scrape) | LAN only |
+| 9234        | TCP       | mosquitto-exporter (Prometheus Scrape) | LAN only |
 | 1883        | TCP       | Mosquitto MQTT (LAN only, anonym, kein Auth in M6) | LAN only |
 
 > Port-Forward-Befehle (z.B. `kubectl port-forward ... 9090:9090`) laufen lokal und erfordern keine UFW-Änderungen.
@@ -448,6 +451,48 @@ kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9
 # → http://localhost:9093
 ```
 
+### Prometheus Scrape-Targets prüfen
+
+Alle ServiceMonitors werden automatisch von Prometheus entdeckt (Label `release: kube-prometheus-stack`).
+
+```bash
+# Targets-Übersicht im Browser:
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+# → http://localhost:9090/targets
+# Erwartete Targets (Status UP):
+#   serviceMonitor/monitoring/traefik      → kube-system / Traefik :9101/metrics
+#   serviceMonitor/monitoring/postgresql   → apps / postgresql-0 :9187/metrics
+#   serviceMonitor/monitoring/influxdb2    → apps / influxdb2 :80/metrics
+#   serviceMonitor/monitoring/mosquitto    → apps / mosquitto-metrics :9234/metrics
+
+# ServiceMonitors anzeigen
+kubectl get servicemonitor -n monitoring
+```
+
+### Grafana-Dashboards
+
+| Dashboard-ID | Name | Import |
+|---|---|---|
+| 17347 | Traefik Official Kubernetes Dashboard | Grafana UI → Dashboards → Import → ID 17347 |
+| (integriert) | Kubernetes / Compute Resources | Vorinstalliert via kube-prometheus-stack |
+| (integriert) | Node Exporter Full | Vorinstalliert via kube-prometheus-stack |
+
+**Dashboard importieren:**
+1. https://grafana.furchert.ch → Dashboards → New → Import
+2. ID eingeben → Load → Datasource: Prometheus → Import
+
+### Home Assistant Prometheus (manuell)
+
+HA Prometheus-Integration erfordert manuelle Konfiguration:
+
+1. HA Studio Code Server Add-on installieren (oder `kubectl exec`)
+2. `/config/configuration.yaml` bearbeiten, Zeile hinzufügen:
+   ```yaml
+   prometheus:
+   ```
+3. Home Assistant neu starten
+4. Metrics erreichbar unter: `http://<node-ip>:8123/api/prometheus` (Long-Lived Token im Header)
+
 ### Prometheus PVC Kapazität erweitern
 
 ```bash
@@ -480,9 +525,9 @@ Alertmanager sendet Alerts direkt an einen Discord-Kanal via nativen `discord_co
    # Zeile einfügen:
    # alertmanager_discord_webhook_url: "https://discord.com/api/webhooks/..."
    ```
-4. Playbook ausführen (nur über LAN, nicht via SSH-Tunnel — bekanntes Timeout-Risiko):
+4. Playbook ausführen (SSH-Tunnel mit Keep-Alive oder LAN empfohlen):
    ```bash
-   ansible-playbook infra/playbooks/40_platform.yml
+   ansible-playbook infra/playbooks/41_monitoring.yml
    ```
 
 **Status prüfen:**
@@ -502,9 +547,9 @@ curl -s -X POST http://localhost:9093/api/v2/alerts \
 **Webhook-URL ändern:**
 
 1. URL in SOPS aktualisieren: `sops infra/inventory/group_vars/all.sops.yml`
-2. `ansible-playbook infra/playbooks/40_platform.yml`
+2. `ansible-playbook infra/playbooks/41_monitoring.yml`
 
-**Alertmanager-Konfigurationsstruktur** (in `infra/playbooks/40_platform.yml`):
+**Alertmanager-Konfigurationsstruktur** (in `infra/playbooks/41_monitoring.yml`):
 - Route: `group_by: [alertname, namespace]`, `repeat_interval: 12h`
 - Receiver: `discord` (discord_configs, `send_resolved: true`)
 - Inhibit-Rules: Standard kube-prometheus-stack (critical suppresst warning/info bei gleichem alertname+namespace)
@@ -512,9 +557,22 @@ curl -s -X POST http://localhost:9093/api/v2/alerts \
 ### Upgrade kube-prometheus-stack
 
 ```bash
-# chart_version in 40_platform.yml aktualisieren, dann:
-ansible-playbook infra/playbooks/40_platform.yml
+# chart_version in 41_monitoring.yml aktualisieren, dann:
+ansible-playbook infra/playbooks/41_monitoring.yml
 ```
+
+> ⚠️ **SSH-Tunnel bei Remote-Ausführung:** Der Helm-Deploy wartet bis zu 10 Minuten.
+> SSH-Tunnel bricht bei langer Inaktivität ab → `connection refused` Fehler.
+> Keep-Alive aktivieren:
+> ```bash
+> ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -fN -L 6443:192.168.1.61:6443 raspi5
+> ```
+> Bei einem fehlgeschlagenen Upgrade (Tunnel-Abbruch) prüfen ob Helm automatisch zurückgerollt hat:
+> ```bash
+> helm -n monitoring list
+> helm -n monitoring history kube-prometheus-stack
+> # Wenn Status "failed": helm -n monitoring rollback kube-prometheus-stack
+> ```
 
 > **Grafana PVC:** Grafana persistence ist aktiviert (1Gi Longhorn PVC).
 > Beim Upgrade bleibt der PVC erhalten — kein Datenverlust. Prüfen:

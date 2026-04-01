@@ -111,6 +111,7 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 - Pinned versions only — no `latest` for images, charts, or k3s
 - Namespaces: `platform`, `longhorn-system`, `monitoring`, `apps`, `homeassistant`
   (Exception: `longhorn-system` ist Helm-Chart-Konvention und wird nicht durch dieses Repo gewählt)
+- ServiceMonitors targeting app-namespace services are placed in the `monitoring` namespace with label `release: kube-prometheus-stack` — do not place them in `apps`
 - Resource limits required for all workloads in `apps` namespace
 
 ### Secrets
