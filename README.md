@@ -138,7 +138,7 @@ ansible-playbook infra/playbooks/10_base.yml --check --diff -l raspi5
 
 | # | Status | Deliverable |
 |---|--------|-------------|
-| M1 | ✅ done (Pi nodes) | Ansible baseline + hardening — raspi5 + raspi4; mba1/mba2 deferred |
+| M1 | ✅ done | Ansible baseline + hardening — all 4 nodes (raspi5, raspi4, mba1, mba2); k3s cluster complete |
 | M2 | ✅ done | k3s + Traefik + cert-manager + Cloudflare Tunnel |
 | M3 | ✅ done | Longhorn v1.7.2 + RF=2 + Worker-Failover test |
 | M4 | ✅ done | Monitoring (kube-prometheus-stack v69.3.1 + Grafana) + Restic Backups |
@@ -153,7 +153,6 @@ Infrastructure work that is explicitly deferred — the cluster is fully operati
 
 | Item | Description |
 |------|-------------|
-| **mba1/mba2 join** | Bootstrap + k3s join for the two MacBook Air workers (T2-chip Ubuntu test required first) |
 | **raspi4 SSH tunnel** | Add `ssh-raspi4.furchert.ch → 192.168.1.163:22` to cloudflared ingress in `40_platform.yml` (same pattern as raspi5) |
 | **Restic restore test** | Run the documented restore procedure (`OPERATIONS.md → Backup → Restore`) after external SSD is attached to raspi5 |
 | **Grafana PVC** | Verify `kubectl get pvc -n monitoring` shows `kube-prometheus-stack-grafana` Bound at 1Gi |

@@ -489,7 +489,7 @@ sudo systemctl enable --now t2fanrd
 **Konfiguration anpassen:**
 
 ```bash
-sudo nano /etc/t2fand.conf
+sudo nano /etc/t2fanrd.conf
 ```
 
 Konfigurationsoptionen pro Lüfter:
@@ -624,93 +624,92 @@ ssh-copy-id benutzer@192.168.1.100
 
 ---
 
-## 12. k3s-Cluster einrichten
+## 12. k3s-Cluster: mba1/mba2 als Worker joinen
 
-### 12.1 Systemvorbereitung
+**mba1 und mba2 sind Worker-Nodes in einem bereits laufenden Cluster** — der Control-Plane läuft auf `raspi5` (192.168.1.61). Kein neuer Cluster wird aufgebaut.
 
-```bash
-# System aktualisieren:
-sudo apt update && sudo apt upgrade -y
+Die gesamte k3s-Installation und das Cluster-Join werden vollständig über Ansible gesteuert. Manuelle k3s-Befehle auf den Nodes sind nicht nötig.
 
-# Hostname setzen (eindeutig pro Knoten):
-sudo hostnamectl set-hostname mba-2020-node  # bzw. mba-2019-node
-
-# Hosts-Datei auf allen Knoten aktualisieren:
-echo "192.168.1.100 mba-2020-node" | sudo tee -a /etc/hosts
-echo "192.168.1.101 mba-2019-node" | sudo tee -a /etc/hosts
-
-# Firewall deaktivieren (für Homelab einfachste Lösung):
-sudo ufw disable
-
-# Alternativ: Benötigte Ports öffnen:
-sudo ufw allow 6443/tcp       # K3s API Server
-sudo ufw allow 8472/udp       # Flannel VXLAN
-sudo ufw allow 10250/tcp      # Kubelet Metrics
-sudo ufw allow from 10.42.0.0/16  # Pod-Netzwerk
-sudo ufw allow from 10.43.0.0/16  # Service-Netzwerk
-```
-
-### 12.2 k3s installieren
-
-Die beiden MacBook Airs mit je **8 GB RAM** und Intel-i5-Prozessoren liegen deutlich über den k3s-Mindestanforderungen (Server: 2 Kerne, 2 GB RAM; Agent: 1 Kern, 512 MB RAM).
-
-**Server-Knoten (Control Plane) installieren:**
+### 12.1 Voraussetzungen vor dem Ansible-Run
 
 ```bash
-curl -sfL https://get.k3s.io | sh -s - server \
-  --write-kubeconfig-mode 644 \
-  --node-name mba-2020-node
+# Node in infra/inventory/hosts.yml in die Gruppe k3s_agent eintragen:
+# [k3s_agent]
+# mba1 ansible_host=192.168.1.XXX
+# mba2 ansible_host=192.168.1.XXX
+
+# Verbindung testen:
+ansible mba1 -m ping
+ansible mba2 -m ping
 ```
 
-**Node-Token auslesen (benötigt für Agent-Knoten):**
+**Wichtig:** Die Firewall (UFW) wird durch die Ansible-Rolle `hardening` verwaltet — **nicht manuell konfigurieren**. Die Rolle öffnet automatisch alle benötigten k3s-Ports (6443/TCP, 8472/UDP, 10250/TCP) sowie die Pod- und Service-CIDRs (10.42.0.0/16, 10.43.0.0/16).
+
+#### Bootstrap:
+```bash
+# Nodes einzeln wegen separaten passwörtern
+  ansible-playbook infra/playbooks/00_bootstrap.yml \
+    -l mba1 \
+    -e "ansible_user=ubuntu" \
+    --ask-pass \
+    --become \
+    --ask-become-pass
+```
+
+
+### 12.2 Longhorn-Voraussetzungen installieren (vor k3s-Join zwingend)
+
+Longhorn benötigt `open-iscsi` und weitere Kernel-Module. Diese müssen vor dem k3s-Join auf den Nodes vorhanden sein:
 
 ```bash
-sudo cat /var/lib/rancher/k3s/server/node-token
+ansible-playbook infra/playbooks/10_base.yml -l mba1,mba2 --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l mba1,mba2
+
+# Longhorn-Prereqs (open-iscsi, iscsi_tcp Modul, multipathd Blacklist):
+ansible-playbook infra/playbooks/30_longhorn.yml -l mba1,mba2 --tags longhorn_prereqs --check --diff
+ansible-playbook infra/playbooks/30_longhorn.yml -l mba1,mba2 --tags longhorn_prereqs
 ```
 
-**Agent-Knoten (Worker) installieren:**
+**Kritisch:** `multipathd` muss für iSCSI-Devices geblacklisted sein — ohne diese Konfiguration bleibt Longhorn bei „Attaching" hängen. Die `longhorn_prereqs`-Rolle erledigt dies automatisch.
+
+### 12.3 k3s Agent installieren und Cluster joinen
 
 ```bash
-curl -sfL https://get.k3s.io | K3S_URL=https://192.168.1.100:6443 \
-  K3S_TOKEN=<NODE_TOKEN> sh -s - \
-  --node-name mba-2019-node
+# Dry-run:
+ansible-playbook infra/playbooks/20_k3s.yml -l mba1,mba2 --check --diff
+
+# Ausführen:
+ansible-playbook infra/playbooks/20_k3s.yml -l mba1,mba2
 ```
 
-### 12.3 Cluster verifizieren
+Das Playbook:
+- Installiert k3s `v1.32.2+k3s1` als Agent
+- Übergibt das Token sicher als Umgebungsvariable im systemd-Service (nicht als CLI-Argument)
+- Joined sequenziell (`serial: 1`) gegen den Control-Plane auf `raspi5:6443`
+- Setzt den Node-Namen auf `mba1` bzw. `mba2` (aus dem Inventory)
+
+### 12.4 Cluster verifizieren
 
 ```bash
-# Vom Server-Knoten aus:
-sudo k3s kubectl get nodes -o wide
+# Vom lokalen Rechner mit bestehendem KUBECONFIG:
+kubectl get nodes -o wide
 
-# Erwartete Ausgabe:
-# NAME            STATUS   ROLES                  AGE   VERSION
-# mba-2020-node   Ready    control-plane,master   2m    v1.31.x+k3s1
-# mba-2019-node   Ready    <none>                 30s   v1.31.x+k3s1
+# Erwartete Ausgabe (alle 4 Nodes):
+# NAME     STATUS   ROLES                  AGE   VERSION
+# raspi5   Ready    control-plane,master   ...   v1.32.2+k3s1
+# raspi4   Ready    <none>                 ...   v1.32.2+k3s1
+# mba1     Ready    <none>                 ...   v1.32.2+k3s1
+# mba2     Ready    <none>                 ...   v1.32.2+k3s1
 
-# Alle System-Pods prüfen:
-sudo k3s kubectl get pods -A
-
-# kubectl-Zugang für normalen Benutzer konfigurieren:
-mkdir -p ~/.kube
-sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-sudo chown $USER:$USER ~/.kube/config
-chmod 600 ~/.kube/config
-echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
-source ~/.bashrc
+# Longhorn nach dem Join prüfen:
+kubectl get nodes -n longhorn-system
+# mba1/mba2 sollten als Storage-Nodes erscheinen (ggf. nach ~2 Minuten)
 ```
 
-**Test-Deployment:**
-
-```bash
-kubectl create deployment nginx-test --image=nginx --replicas=2
-kubectl expose deployment nginx-test --type=NodePort --port=80
-kubectl get svc nginx-test
-curl http://localhost:<NodePort>
-
-# Aufräumen:
-kubectl delete deployment nginx-test
-kubectl delete svc nginx-test
-```
+**Fehlerbehebung:**
+- *Node erscheint nicht in `kubectl get nodes`:* `journalctl -u k3s-agent -f` auf dem Node prüfen; häufig DNS-Auflösung des Control-Plane oder UFW-Block auf Port 6443
+- *Longhorn-Volume bleibt „Degraded":* Longhorn-Prereqs nicht gelaufen → `longhorn_prereqs`-Rolle nachziehen und `iscsid` neu starten
+- *`apple-bce` fehlt nach k3s-Start:* Kernel-Modul muss beim Boot geladen sein (Schritt 8 der Checkliste), sonst kann k3s-Agent nicht starten falls Tastatur/Trackpad als Abhängigkeit fehlen
 
 ---
 
@@ -734,7 +733,7 @@ Diese komprimierte Übersicht fasst alle Schritte zusammen:
 14. **TRIM:** `sudo systemctl enable fstrim.timer`
 15. **Statische IP:** Netplan-Konfiguration für USB-Ethernet
 16. **SSH:** Key-basierte Authentifizierung einrichten
-17. **k3s:** Server- oder Agent-Installation, Cluster-Verifizierung
+17. **k3s:** Node in `infra/inventory/hosts.yml` unter `k3s_agent` eintragen → `10_base.yml` → `30_longhorn.yml --tags longhorn_prereqs` → `20_k3s.yml -l mba1,mba2` → `kubectl get nodes` zeigt 4× Ready
 
 ---
 
