@@ -1,0 +1,139 @@
+---
+# Monitoring: kube-prometheus-stack (Prometheus + Grafana + Alertmanager) + ServiceMonitors
+# Namespace: monitoring
+#
+# Voraussetzung: 40_platform.yml ausgeführt (cert-manager, Traefik, Cloudflare Tunnel laufen)
+# Voraussetzung: all.sops.yml enthält grafana_admin_password + alertmanager_discord_webhook_url
+#
+# ⚠️  WICHTIG: Dieser Playbook beinhaltet einen Helm-Deploy mit wait_timeout: 10m.
+#    SSH-Tunnel-Verbindungen brechen bei langen Wartezeiten ab.
+#    → Entweder LAN-intern ausführen ODER SSH-Tunnel mit Keep-Alive starten:
+#      ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -fN -L 6443:192.168.1.61:6443 raspi5
+#
+# Ausführen: ansible-playbook infra/playbooks/41_monitoring.yml
+- name: Monitoring — kube-prometheus-stack + ServiceMonitors
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+
+  tasks:
+    - name: Prüfen dass alertmanager_discord_webhook_url gesetzt ist
+      ansible.builtin.assert:
+        that:
+          - alertmanager_discord_webhook_url is defined
+          - alertmanager_discord_webhook_url | length > 0
+        fail_msg: >-
+          alertmanager_discord_webhook_url ist nicht gesetzt.
+          Bitte in infra/inventory/group_vars/all.sops.yml eintragen
+          (Discord Server → Kanal-Einstellungen → Integrationen → Webhooks → URL kopieren).
+      delegate_to: localhost
+
+    - name: Monitoring Namespace anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: monitoring
+      delegate_to: localhost
+
+    - name: Prometheus-Community Helm Repo hinzufügen
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+        binary_path: "{{ helm_binary }}"
+      delegate_to: localhost
+
+    - name: API erreichbar?
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} get --raw=/readyz
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Kube-Prometheus-Stack deployen
+      kubernetes.core.helm:
+        name: kube-prometheus-stack
+        chart_ref: prometheus-community/kube-prometheus-stack
+        chart_version: "69.3.1"
+        release_namespace: monitoring
+        kubeconfig: "{{ kubeconfig }}"
+        binary_path: "{{ helm_binary }}"
+        values_files:
+          - "{{ playbook_dir }}/../../cluster/values/kube-prometheus-stack.yaml"
+        values:
+          grafana:
+            adminPassword: "{{ grafana_admin_password }}"
+          alertmanager:
+            config:
+              global:
+                resolve_timeout: 5m
+              route:
+                group_by: ['alertname', 'namespace']
+                group_wait: 30s
+                group_interval: 5m
+                repeat_interval: 12h
+                receiver: 'discord'
+              receivers:
+                - name: 'discord'
+                  discord_configs:
+                    - webhook_url: "{{ alertmanager_discord_webhook_url }}"
+                      send_resolved: true
+                - name: 'null'
+              # Preserve kube-prometheus-stack default inhibit rules to avoid alert storms
+              # during node failures (e.g. suppress symptom alerts when cause alert fires).
+              inhibit_rules:
+                - source_matchers:
+                    - 'severity = critical'
+                  target_matchers:
+                    - 'severity =~ warning|info'
+                  equal:
+                    - 'namespace'
+                    - 'alertname'
+                - source_matchers:
+                    - 'severity = warning'
+                  target_matchers:
+                    - 'severity = info'
+                  equal:
+                    - 'namespace'
+                    - 'alertname'
+                - source_matchers:
+                    - 'alertname = InfoInhibitor'
+                  target_matchers:
+                    - 'severity = info'
+                  equal:
+                    - 'namespace'
+        wait: true
+        wait_timeout: "10m"
+        atomic: true
+      no_log: true
+      delegate_to: localhost
+
+    # --- ServiceMonitors ---
+    # All ServiceMonitors live in the monitoring namespace with label release: kube-prometheus-stack
+    # so the Prometheus Operator discovers them automatically.
+
+    - name: Traefik ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: traefik
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - kube-system
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: traefik
+      delegate_to: localhost

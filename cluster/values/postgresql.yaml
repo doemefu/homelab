@@ -1,0 +1,40 @@
+---
+# PostgreSQL Helm Values (Referenz — wird aktuell NICHT verwendet)
+# Chart: bitnami/postgresql 16.7.27  (PostgreSQL 17.6.0)
+#
+# HINWEIS: PostgreSQL wird via Raw-Manifeste deployed (infra/playbooks/50_apps_infra.yml),
+# nicht via Bitnami Helm Chart (docker.io/bitnami/postgresql:17 nicht auf Docker Hub verfügbar
+# seit Bitnami Registry-Migration 2024). Diese Datei hat keinen Effekt auf den laufenden Cluster.
+#
+# Verwendung: Startpunkt falls PostgreSQL in Zukunft auf Helm migriert wird.
+#
+# auth.postgresPassword + auth.replicationPassword:
+#   would be injected from 50_apps_infra.yml via all.sops.yml — not stored here.
+#
+# Storage: 5Gi Longhorn (default StorageClass — no storageClassName needed).
+# Replicas: 0 read replicas (single primary, homelab workload).
+
+auth:
+  enablePostgresUser: true  # Keep postgres superuser enabled (needed for backups + admin tasks)
+  database: "postgres"       # Default DB; apps create their own databases via schema initialization
+  # auth.postgresPassword + auth.replicationPassword: injected from 50_apps_infra.yml via all.sops.yml
+
+primary:
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    # Conservative for ARM64 pi4 (4GB RAM) + pi5 (8GB RAM). Increase memory limit if
+    # workloads use heavy connection pooling or prepared statements.
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+metrics:
+  enabled: false  # PostgreSQL exporter disabled by default; enable + configure ServiceMonitor in OPERATIONS.md when needed
+
+readReplicas:
+  replicaCount: 0

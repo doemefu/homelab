@@ -1,0 +1,52 @@
+---
+# Home Assistant in k3s
+# Namespace: homeassistant
+#
+# Voraussetzung: 30_longhorn.yml ausgeführt (Longhorn Default StorageClass)
+# Voraussetzung: 50_apps_infra.yml ausgeführt (Mosquitto läuft in apps namespace)
+#
+# Zugriff: http://<node-ip>:8123 (LAN only, hostNetwork)
+# MQTT: mosquitto.apps.svc.cluster.local:1883 (anonym, in-cluster)
+#
+# Ausführen: ansible-playbook infra/playbooks/51_homeassistant.yml
+- name: Home Assistant
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    ha_namespace: homeassistant
+
+  tasks:
+    # --- Namespace ---
+    - name: Homeassistant Namespace anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ ha_namespace }}"
+      delegate_to: localhost
+
+    # --- Home Assistant ---
+    - name: Pajikos Helm Repo hinzufügen
+      kubernetes.core.helm_repository:
+        name: pajikos
+        repo_url: https://pajikos.github.io/home-assistant-helm-chart/
+        binary_path: "{{ helm_binary }}"
+      delegate_to: localhost
+
+    - name: Home Assistant deployen
+      kubernetes.core.helm:
+        name: home-assistant
+        chart_ref: pajikos/home-assistant
+        chart_version: "0.3.51"
+        release_namespace: "{{ ha_namespace }}"
+        kubeconfig: "{{ kubeconfig }}"
+        binary_path: "{{ helm_binary }}"
+        values_files:
+          - "{{ playbook_dir }}/../../cluster/values/home-assistant.yaml"
+        wait: true
+        wait_timeout: "5m"
+      delegate_to: localhost

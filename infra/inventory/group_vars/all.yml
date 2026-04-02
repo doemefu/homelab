@@ -35,9 +35,6 @@ lan_subnet: "192.168.1.0/24"
 storage_backup_dir: "/var/lib/backup"
 storage_backup_mount: "/mnt/backup"
 
-# ha_host: Node auf dem Docker + Home Assistant läuft (ausserhalb k3s)
-# Gesetzt auf mba1 — kann bei Bedarf auf anderen Node geändert werden
-ha_host: "mba1"
 
 # Helm 3 Binary — kubernetes.core.helm unterstützt nur Helm <4.0.0
 # brew install helm@3

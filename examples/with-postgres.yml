@@ -1,0 +1,169 @@
+# with-postgres.yml
+#
+# App + Postgres + Longhorn PVC + Secret.
+# Shows the pattern for a stateful app with a database.
+#
+# Secrets: The Secret below uses a placeholder value — in production,
+#   inject via SOPS (see APPS.md "Secrets for Apps").
+#   Add postgres_password to all.sops.yml, then create the Secret via
+#   a kubernetes.core.k8s task in your playbook (no_log: true).
+#   Do NOT commit real passwords in this file.
+#
+# Storage: Postgres PVC uses Longhorn (RF=2) — the default StorageClass.
+#   With 2 active nodes, one replica sits on raspi5, one on raspi4.
+#   If a node goes offline the volume degrades to RF=1 (Longhorn rebuilds on rejoin).
+#   See APPS.md "StorageClass" for details.
+#
+# Prerequisites:
+#   kubectl create namespace apps   (one-time)
+#
+# Deploy:
+#   kubectl apply -f examples/with-postgres.yml
+#
+# Verify:
+#   kubectl get pods -n apps
+#   kubectl get pvc -n apps
+
+---
+# Secret — illustrative only; use SOPS injection in production (see above).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: myapp-db-secret
+  namespace: apps
+stringData:
+  # Replace with SOPS-injected value. Never commit real passwords here.
+  postgres-password: "CHANGE_ME_use_sops"
+
+---
+# Postgres PersistentVolumeClaim — backed by Longhorn (default StorageClass).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: apps
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName omitted → uses Longhorn (default)
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: apps
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          # Multi-arch image (linux/arm64 + linux/amd64).
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_DB
+              value: myapp
+            - name: POSTGRES_USER
+              value: myapp
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: myapp-db-secret
+                  key: postgres-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: apps
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  # ClusterIP: only reachable from within the cluster (correct for a DB)
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: apps
+  labels:
+    app: myapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          # Replace with your actual multi-arch image.
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          env:
+            - name: DATABASE_URL
+              value: "postgres://myapp:$(POSTGRES_PASSWORD)@postgres.apps.svc.cluster.local:5432/myapp"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: myapp-db-secret
+                  key: postgres-password
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  namespace: apps
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 8080

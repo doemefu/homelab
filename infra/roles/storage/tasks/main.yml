@@ -58,3 +58,67 @@
     - storage_has_external_backup
     - storage_device_check is succeeded
     - storage_backup_device | length > 0
+
+# --- Restic Backup-Automatisierung (nur wenn storage_run_restic_backup: true) ---
+
+- name: Sicherstellen dass storage_backup_paths gesetzt ist
+  ansible.builtin.assert:
+    that: storage_backup_paths | length > 0
+    fail_msg: >
+      storage_run_restic_backup ist aktiviert aber storage_backup_paths ist leer.
+      Bitte Backup-Pfade in group_vars/k3s_server.yml definieren.
+  when: storage_run_restic_backup
+
+- name: Restic Passwort-Datei anlegen
+  ansible.builtin.copy:
+    content: "{{ restic_password }}"
+    dest: /etc/restic-password
+    owner: root
+    group: root
+    mode: "0600"
+  when: storage_run_restic_backup
+  no_log: true
+
+- name: Restic Repository initialisieren
+  ansible.builtin.command:
+    cmd: >
+      restic init
+      --repo {{ storage_restic_repo }}
+      --password-file /etc/restic-password
+    creates: "{{ storage_restic_repo }}/config"
+  when: storage_run_restic_backup
+
+- name: Backup-Skript anlegen (/usr/local/bin/homelab-backup.sh)
+  ansible.builtin.copy:
+    dest: /usr/local/bin/homelab-backup.sh
+    owner: root
+    group: root
+    mode: "0750"
+    content: |
+      #!/bin/bash
+      # homelab-backup.sh — Restic Backup Script
+      # Verwaltet von Ansible (storage role) — nicht manuell bearbeiten
+      set -euo pipefail
+
+      export RESTIC_PASSWORD_FILE=/etc/restic-password
+      REPO="{{ storage_restic_repo }}"
+
+      logger -t "homelab-backup" "Backup gestartet"
+
+      restic backup --repo "${REPO}" {{ storage_backup_paths | join(' ') }}
+
+      restic forget --repo "${REPO}" \
+        --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+
+      logger -t "homelab-backup" "Backup abgeschlossen"
+  when: storage_run_restic_backup
+
+- name: Restic Backup Cron-Job anlegen (täglich 03:00)
+  ansible.builtin.cron:
+    name: "homelab-restic-backup"
+    minute: "0"
+    hour: "3"
+    job: "/usr/local/bin/homelab-backup.sh >> /var/log/homelab-backup.log 2>&1"
+    user: root
+    state: present
+  when: storage_run_restic_backup

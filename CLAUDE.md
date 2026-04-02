@@ -43,13 +43,14 @@ High-level goal: understand what we're doing, why, and find all relevant code.
 
 ### Phase 2 — plan
 Produce a concrete plan with alternatives and specific file changes.
-- The plan MUST be emitted as valid XML (see XML schema below).
-- Include: files to change, step-by-step edits, validation commands, risks & mitigations.
+- Use the Markdown plan structure from `.agent/worklog-template.md` (§ 2. plan).
+- Include: goal, all options considered (chosen + rejected with reasons), files to change, step-by-step edits, tests, validation commands, risks & mitigations.
 
 ### Phase 3 — review
 Review the plan for defects (idempotency gaps, secret exposure, missing handlers, version pinning).
-- Apply findings directly by updating the XML plan.
-- Output (a) the updated XML plan and (b) a concise list of findings and what changed.
+- **Invoke the `plan-reviewer` subagent** on the plan before proceeding to implement.
+- Apply findings directly by updating the plan in the worklog.
+- Output (a) the updated plan and (b) a concise findings table: what was found and what changed.
 
 ### Phase 4 — implement
 Implement the plan:
@@ -58,7 +59,7 @@ Implement the plan:
 
 ### Phase 5 — ship
 - Run integration checks (e.g. `--check` mode against a real or staging node if available).
-- Ensure docs are updated if the change affects OPERATIONS.md, CONTRIBUTING.md, or APPS.md.
+- **Invoke the `doc-auditor` subagent** to check whether OPERATIONS.md, CONTRIBUTING.md, APPS.md, and README.md need updates. Implement all required changes it identifies.
 - Provide final summary: what changed, how verified, follow-ups.
 - **Pflicht: Neuen Block oben in `.agent/memory.md` einfügen** — Entscheidung, Worklog-Link, offene Punkte.
 
@@ -90,8 +91,8 @@ updated_at: "YYYY-MM-DDTHH:MM:SS+01:00"
 
 ### Worklog structure (append-only, phases in order)
 - `## 1. research`
-- `## 2. plan` (XML block)
-- `## 3. review` (updated XML + findings)
+- `## 2. plan` (Markdown plan — see template)
+- `## 3. review` (updated plan + findings table)
 - `## 4. implement` (summary, commands, results)
 - `## 5. ship` (final verification, release notes if needed)
 
@@ -99,66 +100,20 @@ Record every executed command and its outcome (pass/fail + key output).
 
 ---
 
-## 3) Plan XML Schema (MUST be valid XML)
+## 3) Plan Structure
 
-```xml
-<plan id="YYYYMMDD-HHMMSS-<slug>-<rand4>">
-  <goal>...</goal>
+The plan lives in `## 2. plan` of the worklog. Use the template at `.agent/worklog-template.md`.
 
-  <context>
-    <summary>...</summary>
-    <assumptions>
-      <assumption id="A1" confidence="high|medium|low">...</assumption>
-    </assumptions>
-    <open_questions>
-      <question id="Q1" severity="blocker|non_blocker">...</question>
-    </open_questions>
-  </context>
+Required sections (in order):
 
-  <options>
-    <option id="O1" chosen="true">
-      <description>...</description>
-      <tradeoffs>
-        <pro>...</pro>
-        <con>...</con>
-      </tradeoffs>
-    </option>
-    <option id="O2" chosen="false">...</option>
-  </options>
-
-  <changes>
-    <change id="C1">
-      <files>
-        <file path="..."/>
-      </files>
-      <steps>
-        <step>...</step>
-      </steps>
-    </change>
-  </changes>
-
-  <tests>
-    <lint><test>...</test></lint>
-    <idempotency><test>...</test></idempotency>
-    <integration><test>...</test></integration>
-  </tests>
-
-  <validation>
-    <command>...</command>
-  </validation>
-
-  <risks>
-    <risk id="R1" likelihood="low|medium|high" impact="low|medium|high">
-      <description>...</description>
-      <mitigation>...</mitigation>
-    </risk>
-  </risks>
-
-  <ship>
-    <notes>...</notes>
-  </ship>
-</plan>
-```
+1. **Goal** — one sentence: what must be true when done
+2. **Context** — summary, assumptions (with confidence), open questions (blocker / non-blocker)
+3. **Options considered** — ALL options including rejected ones; for each: what it does, pros, cons, and if rejected: why
+4. **Changes** — per change: files affected + concrete steps
+5. **Tests** — lint, idempotency (2nd run → 0 changes), integration
+6. **Validation** — the command that proves the goal is met
+7. **Risks** — likelihood, impact, mitigation
+8. **Ship notes** — docs to update, user actions required, follow-ups
 
 ---
 
@@ -235,52 +190,6 @@ Record every executed command and its outcome (pass/fail + key output).
 ---
 
 ## 8) Worklog Template
-Starter file location: `.agent/worklog-template.md`
+Full template with inline guidance: `.agent/worklog-template.md`
 
-```markdown
----
-id: "YYYYMMDD-HHMMSS-<slug>-<rand4>"
-title: "<short human title>"
-phase: "research"
-status: "in_progress"
-created_at: "YYYY-MM-DDTHH:MM:SS+01:00"
-updated_at: "YYYY-MM-DDTHH:MM:SS+01:00"
----
-
-## 1. research
-- Goal:
-- Open questions:
-- Repo areas to inspect:
-- Existing roles/charts relevant:
-- Git history notes:
-
-## 2. plan
-```xml
-<plan id="YYYYMMDD-HHMMSS-<slug>-<rand4>">
-  <goal></goal>
-  <context>
-    <summary></summary>
-    <assumptions></assumptions>
-    <open_questions></open_questions>
-  </context>
-  <options></options>
-  <changes></changes>
-  <tests></tests>
-  <validation></validation>
-  <risks></risks>
-  <ship></ship>
-</plan>
-```
-
-## 3. review
-- Findings (and what changed in the plan):
-
-## 4. implement
-- Changes made:
-- Commands run + results:
-
-## 5. ship
-- Final verification:
-- Docs updated (if applicable):
-- Notes:
-```
+Copy it as the starting point for every new worklog. The template covers all five phases with prompts for what to write in each section.

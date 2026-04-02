@@ -5,6 +5,7 @@
 # Voraussetzung: Cloudflare Zone ist aktiv, Tunnel wurde mit 'cloudflared tunnel create homelab' erstellt
 #
 # Ausführen mit: ansible-playbook infra/playbooks/40_platform.yml
+# Monitoring (kube-prometheus-stack): → 41_monitoring.yml (ausgelagert wegen langer Helm-Wartezeit)
 #
 # Hinweis: Tasks laufen via delegate_to: localhost (Helm/kubectl auf Mac).
 #          hosts: k3s_server stellt sicher dass group_vars (inkl. Secrets) geladen werden.
@@ -138,8 +139,47 @@
         wait_timeout: "3m"
       delegate_to: localhost
 
-    # --- Traefik: HTTP → HTTPS Redirect ---
-    - name: Traefik HelmChartConfig — HTTP zu HTTPS Redirect
+    - name: CF Ingress-Konfiguration als Variable setzen
+      ansible.builtin.set_fact:
+        cf_ingress_body:
+          config:
+            ingress:
+              - hostname: "ssh.furchert.ch"
+                service: "ssh://192.168.1.61:22"
+              - hostname: "grafana.furchert.ch"
+                service: "http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80"
+              - service: "http_status:404"
+
+    - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cloudflare_tunnel_id }}/configurations"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ cloudflare_tunnel_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ cf_ingress_body }}"
+        status_code: 200
+      delegate_to: localhost
+      no_log: true
+
+    - name: Cloudflared Pod neustarten wenn Ingress-Konfiguration geändert
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        name: cloudflared-cloudflare-tunnel-remote
+        namespace: "{{ platform_namespace }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  # Hash der Ingress-Config als stabile Annotation — Pod-Restart nur bei Config-Änderung
+                  kubectl.kubernetes.io/restartedAt: "{{ cf_ingress_body | to_json | hash('sha256') }}"
+      delegate_to: localhost
+
+    # --- Traefik: HTTP → HTTPS Redirect + Prometheus Metrics ---
+    - name: Traefik HelmChartConfig — HTTP zu HTTPS Redirect + Metrics
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -157,7 +197,20 @@
                       to: websecure
                       scheme: https
                       permanent: true
+                metrics:
+                  port: 9101
+                  expose:
+                    default: true
               logs:
                 general:
                   level: INFO
+              metrics:
+                prometheus:
+                  entryPoint: metrics
+                  addEntryPointsLabels: true
+                  addRoutersLabels: true
+                  addServicesLabels: true
       delegate_to: localhost
+
+    # ServiceMonitors + kube-prometheus-stack → 41_monitoring.yml
+    # (ausgelagert wegen wait_timeout: 10m — SSH-Tunnel bricht sonst ab)

@@ -20,10 +20,42 @@ k3s_token: "CHANGE_ME_min_32_zeichen_langer_zufallsstring"
 
 # Cloudflare API Token — Zone:DNS:Edit Berechtigung für furchert.ch
 # Erstellen: Cloudflare Dashboard → My Profile → API Tokens → Create Token
+# Berechtigung: Zone:DNS:Edit (für cert-manager DNS-01 Challenge)
 cloudflare_api_token: "CHANGE_ME_cloudflare_api_token"
 
-# Cloudflare Tunnel Token
+# Cloudflare Tunnel Token — Authentifizierungstoken für den cloudflared Pod
 # Erstellen:
 #   cloudflared tunnel create homelab
 #   cloudflared tunnel token homelab
 cloudflared_tunnel_token: "CHANGE_ME_cloudflared_tunnel_token"
+
+# Cloudflare Account ID + Tunnel ID — für Ingress-Konfiguration via API
+# Account ID: Cloudflare Dashboard → rechte Seite → Account ID
+# Tunnel ID: kubectl logs -n platform deployment/cloudflared-cloudflare-tunnel-remote | grep tunnelID
+cloudflare_account_id: "CHANGE_ME_cloudflare_account_id"
+cloudflare_tunnel_id: "CHANGE_ME_cloudflare_tunnel_id"
+
+# Cloudflare Tunnel API Token — Tunnel:Edit Berechtigung (separates Token!)
+# Erstellen: Cloudflare Dashboard → My Profile → API Tokens → Create Token
+# Berechtigung: Account:Cloudflare Tunnel:Edit
+# WICHTIG: Nicht mit cloudflare_api_token verwechseln — der hat nur DNS:Edit, kein Tunnel:Edit
+cloudflare_tunnel_api_token: "CHANGE_ME_cloudflare_tunnel_api_token"
+
+# Grafana Admin-Passwort — für Grafana-Login (grafana.furchert.ch)
+# Wählen: beliebiges sicheres Passwort
+grafana_admin_password: "CHANGE_ME_grafana_admin_password"
+
+# Restic Backup-Passwort — für Restic-Repository auf raspi5 (/var/lib/backup/restic-repo)
+# Generieren: openssl rand -base64 32
+# WICHTIG: Verlust bedeutet kein Zugriff auf Backups — sicher aufbewahren
+restic_password: "CHANGE_ME_restic_password"
+
+# Alertmanager Discord Webhook URL
+# Erstellen: Discord Server → Kanal-Einstellungen → Integrationen → Webhooks → Neuer Webhook → URL kopieren
+# Format: https://discord.com/api/webhooks/XXXXXXXXXX/YYYYYYYY
+alertmanager_discord_webhook_url: "CHANGE_ME_https://discord.com/api/webhooks/XXXXXXXXXX/YYYYYYYY"
+
+postgresql_password: "<generieren: openssl rand -base64 24>"
+postgresql_replication_password: "<generieren: openssl rand -base64 24>"
+influxdb_admin_password: "<min 8 Zeichen>"
+influxdb_admin_token: "<generieren: openssl rand -hex 32>"

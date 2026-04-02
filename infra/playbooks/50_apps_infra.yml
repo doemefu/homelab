@@ -1,0 +1,429 @@
+---
+# App Infrastructure: PostgreSQL 17, InfluxDB 2, Mosquitto 2
+# Namespace: apps
+#
+# Voraussetzung: 30_longhorn.yml ausgeführt (Longhorn Default StorageClass)
+# Voraussetzung: all.sops.yml enthält postgresql_password, postgresql_replication_password,
+#                influxdb_admin_password, influxdb_admin_token
+#
+# Ausführen: ansible-playbook infra/playbooks/50_apps_infra.yml
+- name: App Infrastructure — PostgreSQL, InfluxDB 2, Mosquitto
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    apps_namespace: apps
+
+  tasks:
+    # --- Namespace ---
+    - name: Apps Namespace anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ apps_namespace }}"
+      delegate_to: localhost
+
+    # --- PostgreSQL ---
+    # Hinweis: bitnami/postgresql chart nicht verwendet — Image docker.io/bitnami/postgresql
+    # ist auf Docker Hub nicht mehr verfügbar (seit Bitnami Registry-Wechsel 2024).
+    # Stattdessen: offizielles postgres:17-alpine Image via raw Manifests.
+
+    - name: PostgreSQL Secret anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: postgresql-secret
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            POSTGRES_PASSWORD: "{{ postgresql_password }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: PostgreSQL StatefulSet anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: postgresql
+            namespace: "{{ apps_namespace }}"
+          spec:
+            serviceName: postgresql
+            replicas: 1
+            selector:
+              matchLabels:
+                app: postgresql
+            template:
+              metadata:
+                labels:
+                  app: postgresql
+              spec:
+                containers:
+                  - name: postgresql
+                    image: postgres:17-alpine
+                    env:
+                      - name: POSTGRES_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgresql-secret
+                            key: POSTGRES_PASSWORD
+                      - name: POSTGRES_DB
+                        value: postgres
+                      - name: PGDATA
+                        value: /var/lib/postgresql/data/pgdata
+                    ports:
+                      - containerPort: 5432
+                    volumeMounts:
+                      - name: data
+                        mountPath: /var/lib/postgresql/data
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 256Mi
+                      limits:
+                        cpu: 500m
+                        memory: 512Mi
+                  - name: postgres-exporter
+                    image: prometheuscommunity/postgres-exporter:v0.15.0
+                    env:
+                      - name: DATA_SOURCE_URI
+                        value: "localhost:5432/postgres?sslmode=disable"
+                      - name: DATA_SOURCE_USER
+                        value: "postgres"
+                      - name: DATA_SOURCE_PASS
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgresql-secret
+                            key: POSTGRES_PASSWORD
+                    ports:
+                      - containerPort: 9187
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 32Mi
+                      limits:
+                        cpu: 100m
+                        memory: 64Mi
+            volumeClaimTemplates:
+              - metadata:
+                  name: data
+                spec:
+                  accessModes: [ReadWriteOnce]
+                  storageClassName: longhorn
+                  resources:
+                    requests:
+                      storage: 5Gi
+      delegate_to: localhost
+
+    - name: PostgreSQL Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgresql
+            namespace: "{{ apps_namespace }}"
+            labels:
+              app: postgresql
+          spec:
+            type: ClusterIP
+            selector:
+              app: postgresql
+            ports:
+              - name: postgresql
+                port: 5432
+                targetPort: 5432
+              - name: metrics
+                port: 9187
+                targetPort: 9187
+      delegate_to: localhost
+
+    # --- InfluxDB 2 ---
+    - name: InfluxData Helm Repo hinzufügen
+      kubernetes.core.helm_repository:
+        name: influxdata
+        repo_url: https://helm.influxdata.com/
+        binary_path: "{{ helm_binary }}"
+      delegate_to: localhost
+
+    - name: InfluxDB 2 deployen
+      kubernetes.core.helm:
+        name: influxdb2
+        chart_ref: influxdata/influxdb2
+        chart_version: "2.1.2"
+        release_namespace: "{{ apps_namespace }}"
+        kubeconfig: "{{ kubeconfig }}"
+        binary_path: "{{ helm_binary }}"
+        values_files:
+          - "{{ playbook_dir }}/../../cluster/values/influxdb2.yaml"
+        values:
+          adminUser:
+            password: "{{ influxdb_admin_password }}"
+            token: "{{ influxdb_admin_token }}"
+        wait: true
+        wait_timeout: "5m"
+      no_log: true
+      delegate_to: localhost
+
+    # --- Mosquitto (raw manifests — kein Helm, k8s-at-home chart archiviert) ---
+    - name: Mosquitto ConfigMap anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: mosquitto-config
+            namespace: "{{ apps_namespace }}"
+          data:
+            mosquitto.conf: |
+              listener 1883
+              # SECURITY: Anonymous access intentionally enabled for homelab M6 setup.
+              # Post-M6 task: add password_file + auth config (see .claude/memory/project_post_m6_items.md).
+              # Do NOT expose port 1883 externally without authentication.
+              allow_anonymous true
+              persistence true
+              persistence_location /mosquitto/data/
+              log_dest stdout
+              log_type error warning notice information
+      delegate_to: localhost
+
+    - name: Mosquitto PVC anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: mosquitto-data
+            namespace: "{{ apps_namespace }}"
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: longhorn  # Explicit — fragile against k3s upgrade resetting local-path as default
+            resources:
+              requests:
+                storage: 1Gi
+      delegate_to: localhost
+
+    - name: Mosquitto Deployment anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: mosquitto
+            namespace: "{{ apps_namespace }}"
+          spec:
+            replicas: 1
+            strategy:
+              type: Recreate  # RWO PVC — must terminate old pod before new one mounts the volume
+            selector:
+              matchLabels:
+                app: mosquitto
+            template:
+              metadata:
+                labels:
+                  app: mosquitto
+              spec:
+                containers:
+                  - name: mosquitto
+                    image: "eclipse-mosquitto:2.0.22"
+                    ports:
+                      - containerPort: 1883
+                    volumeMounts:
+                      - name: config
+                        mountPath: /mosquitto/config
+                      - name: data
+                        mountPath: /mosquitto/data
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 200m
+                        memory: 128Mi
+                volumes:
+                  - name: config
+                    configMap:
+                      name: mosquitto-config
+                  - name: data
+                    persistentVolumeClaim:
+                      claimName: mosquitto-data
+      delegate_to: localhost
+
+    - name: Mosquitto Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mosquitto
+            namespace: "{{ apps_namespace }}"
+          spec:
+            type: LoadBalancer
+            selector:
+              app: mosquitto
+            ports:
+              - name: mqtt
+                port: 1883
+                targetPort: 1883
+                protocol: TCP
+      delegate_to: localhost
+
+    # --- Mosquitto Exporter ---
+    - name: Mosquitto Exporter Deployment anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: mosquitto-exporter
+            namespace: "{{ apps_namespace }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: mosquitto-exporter
+            template:
+              metadata:
+                labels:
+                  app: mosquitto-exporter
+              spec:
+                containers:
+                  - name: mosquitto-exporter
+                    image: "nolte/mosquitto-exporter:v0.6.3"
+                    args:
+                      - "--endpoint"
+                      - "tcp://mosquitto.{{ apps_namespace }}.svc.cluster.local:1883"
+                    ports:
+                      - containerPort: 9234
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 16Mi
+                      limits:
+                        cpu: 50m
+                        memory: 32Mi
+      delegate_to: localhost
+
+    - name: Mosquitto Exporter Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mosquitto-metrics
+            namespace: "{{ apps_namespace }}"
+            labels:
+              app: mosquitto-exporter
+          spec:
+            type: ClusterIP
+            selector:
+              app: mosquitto-exporter
+            ports:
+              - name: metrics
+                port: 9234
+                targetPort: 9234
+      delegate_to: localhost
+
+    # --- Prometheus ServiceMonitors ---
+    # Vorbedingung: 41_monitoring.yml muss ausgeführt worden sein (Prometheus Operator CRDs)
+    - name: Prüfen ob Prometheus Operator CRD (ServiceMonitor) installiert ist
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: servicemonitors.monitoring.coreos.com
+      delegate_to: localhost
+      register: servicemonitor_crd
+
+    - name: Abbrechen wenn Prometheus Operator CRD fehlt
+      ansible.builtin.assert:
+        that: servicemonitor_crd.resources | length > 0
+        fail_msg: >
+          ServiceMonitor CRD nicht gefunden. Bitte zuerst 41_monitoring.yml ausführen:
+          ansible-playbook infra/playbooks/41_monitoring.yml
+
+    - name: PostgreSQL ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: postgresql
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - "{{ apps_namespace }}"
+            selector:
+              matchLabels:
+                app: postgresql
+      delegate_to: localhost
+
+    - name: InfluxDB ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: influxdb2
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: http
+                path: /metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - "{{ apps_namespace }}"
+            selector:
+              matchLabels:
+                app.kubernetes.io/instance: influxdb2
+      delegate_to: localhost
+
+    - name: Mosquitto ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: mosquitto
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - "{{ apps_namespace }}"
+            selector:
+              matchLabels:
+                app: mosquitto-exporter
+      delegate_to: localhost

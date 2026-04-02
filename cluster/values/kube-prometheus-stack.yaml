@@ -1,0 +1,94 @@
+---
+# kube-prometheus-stack Helm Values
+# Chart: prometheus-community/kube-prometheus-stack v69.3.1
+# Repo:  https://prometheus-community.github.io/helm-charts
+#
+# grafana.adminPassword: wird von 41_monitoring.yml aus all.sops.yml injiziert — nicht hier hinterlegen
+#
+# Grafana-Zugriff: ausschliesslich via Cloudflare Tunnel (kein Kubernetes Ingress).
+# cloudflared adressiert Grafana cross-namespace via ClusterIP FQDN:
+#   http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
+# Vorteil: kein cert-manager Zertifikat nötig, keine Traefik-Konfiguration.
+#
+# Alertmanager: Receiver-Konfiguration via Discord (discord_configs, native AM-Support).
+# Die alertmanager.config (route + receiver + inhibit_rules) wird von 41_monitoring.yml
+# als values-Override injiziert (alertmanager_discord_webhook_url aus all.sops.yml).
+# Vorbedingung: alertmanager_discord_webhook_url in all.sops.yml gesetzt.
+#
+# Prometheus Storage: 10Gi Longhorn PVC, 14 Tage Retention.
+# Longhorn ist Default StorageClass — kein storageClassName Key nötig.
+#
+# Ressourcen: bewusst konservativ für ARM64 Pi-Hardware (raspi5: 8GB, raspi4: 4GB).
+
+prometheus:
+  prometheusSpec:
+    retention: 14d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+    resources:
+      requests:
+        cpu: 200m
+        memory: 400Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+
+grafana:
+  enabled: true
+  # adminPassword: wird von 41_monitoring.yml injiziert (SOPS: grafana_admin_password)
+  ingress:
+    enabled: false  # Zugriff ausschliesslich via Cloudflare Tunnel
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  persistence:
+    enabled: true
+    type: pvc       # Explizit: verhindert silent emptyDir-Fallback
+    size: 1Gi
+    # storageClassName omitted → verwendet Longhorn (Default StorageClass)
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+nodeExporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+kubeStateMetrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi

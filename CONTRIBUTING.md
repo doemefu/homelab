@@ -13,6 +13,10 @@ ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collec
 # Note: kubernetes.core.helm requires Helm <4.0.0 — install helm@3 explicitly
 brew install helm@3 kubectl
 
+# helm-diff plugin (eliminates idempotency warnings in Helm tasks)
+/usr/local/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff
+# Apple Silicon: /opt/homebrew/opt/helm@3/bin/helm plugin install ...
+
 # Secrets
 brew install sops age
 ```
@@ -40,9 +44,16 @@ Secrets anlegen (einmalig nach Clone):
 ```bash
 cp infra/inventory/group_vars/all.sops.yml.example \
    infra/inventory/group_vars/all.sops.yml
-# Werte eintragen, dann verschlüsseln:
+# Alle CHANGE_ME-Einträge ersetzen, dann verschlüsseln:
 sops -e -i infra/inventory/group_vars/all.sops.yml
 ```
+
+> **Pflichtfeld für `40_platform.yml`:** `alertmanager_discord_webhook_url` muss gesetzt sein —
+> das Playbook enthält eine `assert`-Guard und schlägt ohne diesen Wert fehl.
+> URL erhalten: Discord → Kanal-Einstellungen → Integrationen → Webhooks → URL kopieren.
+
+> **Pflichtfelder für `50_apps_infra.yml`:** `postgresql_password`, `influxdb_admin_password` und
+> `influxdb_admin_token` müssen in `all.sops.yml` gesetzt sein — das Playbook schlägt ohne diese Werte fehl.
 
 ---
 
@@ -98,8 +109,9 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 ### Kubernetes / Helm
 - All Helm values in `cluster/values/<chart-name>.yaml` — nothing inline in playbooks
 - Pinned versions only — no `latest` for images, charts, or k3s
-- Namespaces: `platform`, `longhorn-system`, `monitoring`, `apps`
+- Namespaces: `platform`, `longhorn-system`, `monitoring`, `apps`, `homeassistant`
   (Exception: `longhorn-system` ist Helm-Chart-Konvention und wird nicht durch dieses Repo gewählt)
+- ServiceMonitors targeting app-namespace services are placed in the `monitoring` namespace with label `release: kube-prometheus-stack` — do not place them in `apps`
 - Resource limits required for all workloads in `apps` namespace
 
 ### Secrets
@@ -137,6 +149,10 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 3. All values in `cluster/values/<name>.yaml` with pinned `version:`
 4. Validate: `helm lint cluster/platform/<name>/ -f cluster/values/<name>.yaml`
 
+> **Remote-only charts** (z.B. kube-prometheus-stack): Chart-Repo und Version werden direkt im
+> Playbook referenziert — kein lokales `cluster/platform/<name>/` Verzeichnis. `helm lint` entfällt.
+> Validierung: `helm template <name> <repo>/<chart> --version <ver> -f cluster/values/<name>.yaml`
+
 ---
 
 ## Repository Conventions
@@ -145,3 +161,4 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 - **Secrets**: use SOPS, age key is at `~/.config/age/homelab.key` (not in repo)
 - **IPs**: static or DHCP-reserved — k3s requires stable node IPs
 - **No `latest`**: all versions pinned in inventory or Helm values
+- **group_vars/k3s_server.yml**: overrides `storage_*` defaults for raspi5 (Restic enabled, repo path, backup paths). When adding new backup paths, edit this file — not `storage/defaults/main.yml`.

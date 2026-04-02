@@ -206,7 +206,9 @@ homelab/                         ← GitHub Repo Root
 │       ├─ 10_base.yml           ← base + hardening + storage
 │       ├─ 20_k3s.yml            ← k3s server → agents joinen
 │       ├─ 30_longhorn.yml       ← Longhorn Helm Chart + Default StorageClass
-│       └─ 40_platform.yml       ← cert-manager, traefik, cloudflared, monitoring
+│       ├─ 40_platform.yml       ← cert-manager, traefik, cloudflared
+│       ├─ 41_monitoring.yml     ← kube-prometheus-stack (Prometheus, Grafana, Alertmanager)
+│       └─ 50_apps_infra.yml     ← PostgreSQL 17, InfluxDB 2, Mosquitto 2 (apps namespace)
 │
 ├─ cluster/                      ← Helm / Kubernetes
 │   ├─ platform/
@@ -307,6 +309,7 @@ Jeder Meilenstein hat ein konkretes Dokumentations-Deliverable — Runbooks ents
 | M3 | Longhorn deployed + Replication + Failover getestet         | Node offline → PV bleibt verfügbar, dokumentierter Failover-Test     | OPERATIONS.md: Storage-Runbook         |
 | M4 | Monitoring + Backups + Restore-Test                         | Grafana zeigt alle 4 Nodes, Restore einer DB erfolgreich             | OPERATIONS.md: Backup/Restore-Runbook  |
 | M5 | Plattform produktionsreif + alle Dokumente vollständig      | `examples/` fertig, alle 4 Docs reviewed, APPS.md vollständig        | Alle Dokumente abgenommen              |
+| M6 | App-Infrastruktur: PostgreSQL 17, InfluxDB 2, Mosquitto 2   | Alle 3 Services in `apps` namespace; `mqtt.furchert.ch` WSS extern   | OPERATIONS.md: App-Infra-Runbooks; APPS.md aktualisiert |
 
 ---
 
@@ -328,6 +331,39 @@ Jeder Meilenstein hat ein konkretes Dokumentations-Deliverable — Runbooks ents
 
 Ideen und geplante Verbesserungen die bewusst aus dem M1–M5-Scope ausgeschlossen sind.
 Erst angehen wenn die Definition of Done vollständig erfüllt ist.
+
+### Automatisierte Node-Reboots nach Kernel-Updates (kured)
+
+**Aktuell:** `unattended-upgrades` läuft täglich und installiert Sicherheitsupdates automatisch.
+Reboots (z.B. nach Kernel-Updates) sind manuell — erfordern drain → reboot → uncordon pro Node.
+
+**Ziel post-M5:** [kured](https://github.com/kubereboot/kured) (Kubernetes Reboot Daemon) als DaemonSet im Cluster:
+- Erkennt `/var/run/reboot-required` auf jedem Node automatisch
+- Koordiniert Reboots: drain → reboot → uncordon, ein Node nach dem anderen
+- Respektiert PodDisruptionBudgets und Longhorn-Replikation
+- Konfigurierbar: Reboot-Zeitfenster (z.B. nur nachts), Slack-Notification bei Reboot
+
+**Minimale Umsetzung:**
+1. kured als Helm Chart deployen (`kubereboot/kured`, Namespace `kube-system`)
+2. Reboot-Zeitfenster konfigurieren (`--reboot-days`, `--start-time`, `--end-time`)
+3. Ansible-Task in `40_platform.yml` ergänzen
+
+---
+
+### Cloudflare Access Policy für SSH (Zero Trust)
+
+**Aktuell:** SSH via Cloudflare Tunnel ist eingerichtet (`ssh://` Protokoll + `cloudflared access ssh` ProxyCommand).
+Schutz: Cloudflare Tunnel-Token + SSH Key Auth.
+
+**Ziel post-M5:** Cloudflare Zero Trust Access Policy als zweite Authentifizierungsschicht:
+- Nur autorisierte E-Mail-Adressen / Identity Provider erhalten Zugang
+- Policy über Cloudflare Dashboard oder Terraform (cloudflare/cloudflare Provider) automatisiert
+- Kurzlebige SSH-Zertifikate (Cloudflare-signiert) statt statischer Keys möglich
+
+**Minimal-Umsetzung:**
+1. Zero Trust → Access → Applications → SSH-App für `ssh.furchert.ch` anlegen
+2. Policy: Email `*@furchert.ch` oder spezifische Adresse
+3. `cloudflare_access_application` Terraform-Resource für Automatisierung
 
 ### Automatisiertes Update-Skript mit Integrationstests + Rollback
 

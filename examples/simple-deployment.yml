@@ -1,0 +1,88 @@
+# simple-deployment.yml
+#
+# Minimal example: Deployment + Service + Traefik IngressRoute (cluster-internal TLS).
+# Use this as a starting point for a stateless app with no public internet exposure.
+#
+# Prerequisites:
+#   kubectl create namespace apps   (one-time)
+#
+# Deploy:
+#   kubectl apply -f examples/simple-deployment.yml
+#
+# Verify:
+#   kubectl get pods -n apps
+#   kubectl port-forward -n apps svc/myapp 8080:80
+#   curl http://localhost:8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: apps
+  labels:
+    app: myapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          # Multi-arch image required (linux/arm64 + linux/amd64).
+          # nginx-unprivileged runs as non-root — preferred over plain nginx.
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  namespace: apps
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 8080
+
+---
+# Traefik IngressRoute — cluster-internal HTTPS access only.
+# TLS certificate is issued by cert-manager via letsencrypt-prod.
+#
+# For PUBLIC access via Cloudflare Tunnel instead:
+#   - Remove this IngressRoute.
+#   - See examples/with-ingress-public.yml.
+#
+# DNS: Add a CNAME in your DNS provider pointing myapp.furchert.ch to your
+#      cluster's external IP or Traefik LoadBalancer IP for internal use.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: myapp
+  namespace: apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`myapp.furchert.ch`)
+      kind: Rule
+      services:
+        - name: myapp
+          port: 80
+  tls:
+    certResolver: letsencrypt-prod

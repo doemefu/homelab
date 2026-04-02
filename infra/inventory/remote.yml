@@ -1,0 +1,29 @@
+---
+# Remote-Inventory für Zugriff von ausserhalb des LANs via Cloudflare Tunnel
+# Verwendung: ansible-playbook infra/playbooks/<playbook>.yml -i infra/inventory/remote.yml
+#
+# Voraussetzung: cloudflared lokal installiert (brew install cloudflared)
+# Voraussetzung: ssh.furchert.ch DNS-Record existiert (CNAME → <tunnel-id>.cfargotunnel.com)
+all:
+  children:
+    k3s_server:
+      hosts:
+        raspi5:
+          ansible_host: raspi5
+          ansible_ssh_common_args: '-o ProxyCommand="cloudflared access ssh --hostname %h"'
+    k3s_agent:
+      hosts:
+        raspi4:
+          ansible_host: ssh-raspi4.furchert.ch
+          ansible_ssh_common_args: '-o ProxyCommand="cloudflared access ssh --hostname %h"'
+        mba1:
+          ansible_host: 192.168.1.12
+        mba2:
+          ansible_host: 192.168.1.13
+    mac:
+      hosts:
+        mba1:
+        mba2:
+    docker_hosts:
+      hosts:
+        mba1:

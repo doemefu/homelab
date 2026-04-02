@@ -10,7 +10,7 @@ and Prometheus/Grafana observability.
 LAN
  ├─ raspi5 (arm64, 8 GB) — k3s Control-Plane + Worker, Backup-Target (USB/SSD)
  ├─ raspi4 (arm64, 4 GB) — k3s Worker
- ├─ mba1   (amd64, 8 GB) — k3s Worker, Docker/Home Assistant host
+ ├─ mba1   (amd64, 8 GB) — k3s Worker
  └─ mba2   (amd64, 8 GB) — k3s Worker
 
 Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Services
@@ -22,7 +22,7 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 |----------|---------------------|-------|------|-----------------------|
 | `raspi5` | Raspberry Pi 5      | arm64 | 8 GB | Control-Plane + Worker |
 | `raspi4` | Raspberry Pi 4      | arm64 | 4 GB | Worker                |
-| `mba1`   | MacBook Air 2020 i5 | amd64 | 8 GB | Worker + HA host      |
+| `mba1`   | MacBook Air 2020 i5 | amd64 | 8 GB | Worker                |
 | `mba2`   | MacBook Air 2019 i5 | amd64 | 8 GB | Worker                |
 
 ### Stack
@@ -35,7 +35,7 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | Storage     | Longhorn (RF=2, default StorageClass)       |
 | Ingress/TLS | Traefik + cert-manager (Let's Encrypt)      |
 | External    | Cloudflare Tunnel                           |
-| Observability | kube-prometheus-stack (Prometheus + Grafana) |
+| Observability | kube-prometheus-stack (Prometheus + Grafana + Alertmanager) |
 | Backups     | Restic → USB/SSD (pi5)                      |
 
 ### Pinned Versions
@@ -47,6 +47,8 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | cert-manager          | v1.17.1        |
 | kube-prometheus-stack | 69.3.1         |
 | cloudflared           | 2025.2.1       |
+| postgres-exporter     | v0.15.0        |
+| mosquitto-exporter    | v0.6.3         |
 
 ---
 
@@ -108,10 +110,13 @@ export KUBECONFIG=~/.kube/homelab.yaml
 | Playbook          | Purpose                                          | When to run         |
 |-------------------|--------------------------------------------------|---------------------|
 | `00_bootstrap.yml` | Create `ansible` user, SSH key, passwordless sudo | Once per new node  |
-| `10_base.yml`     | OS baseline + hardening + storage               | M1, then on changes |
+| `10_base.yml`     | OS baseline + hardening + storage + Restic cron (raspi5) | M1, then on changes |
 | `20_k3s.yml`      | k3s server + agents + Longhorn prereqs          | M2                  |
 | `30_longhorn.yml` | Longhorn Helm deploy + Default StorageClass     | M3                  |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config | M2                  |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config | M2, M5+             |
+| `41_monitoring.yml` | kube-prometheus-stack (Prometheus, Grafana, Alertmanager, Discord) | M4, M5+ |
+| `50_apps_infra.yml` | PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 in `apps` namespace | M6 |
+| `51_homeassistant.yml` | Home Assistant in `homeassistant` namespace (hostNetwork) | M6 |
 
 Run a playbook against all nodes:
 ```bash
@@ -134,11 +139,30 @@ ansible-playbook infra/playbooks/10_base.yml --check --diff -l raspi5
 
 | # | Status | Deliverable |
 |---|--------|-------------|
-| M1 | ✅ done (Pi nodes) | Ansible baseline + hardening — raspi5 + raspi4; mba1/mba2 deferred |
+| M1 | ✅ done | Ansible baseline + hardening — all 4 nodes (raspi5, raspi4, mba1, mba2); k3s cluster complete |
 | M2 | ✅ done | k3s + Traefik + cert-manager + Cloudflare Tunnel |
 | M3 | ✅ done | Longhorn v1.7.2 + RF=2 + Worker-Failover test |
-| M4 | ⬜ | Monitoring + backups + restore test |
-| M5 | ⬜ | Production-ready + all docs complete |
+| M4 | ✅ done | Monitoring (kube-prometheus-stack v69.3.1 + Grafana) + Restic Backups |
+| M5 | ✅ done | Production-ready: APPS.md complete, examples/ created, Grafana PVC, Alertmanager → Discord |
+| M6 | ✅ done | App infrastructure: PostgreSQL 17, InfluxDB 2, Mosquitto 2 (`apps` ns); Home Assistant (`homeassistant` ns, hostNetwork, http://node-ip:8123) |
+
+---
+
+## Open Items (Post-M5)
+
+Infrastructure work that is explicitly deferred — the cluster is fully operational without these.
+
+| Item | Description |
+|------|-------------|
+| **raspi4 SSH tunnel** | Add `ssh-raspi4.furchert.ch → 192.168.1.163:22` to cloudflared ingress in `40_platform.yml` (same pattern as raspi5) |
+| **Restic restore test** | Run the documented restore procedure (`OPERATIONS.md → Backup → Restore`) after external SSD is attached to raspi5 |
+| **Grafana PVC** | Verify `kubectl get pvc -n monitoring` shows `kube-prometheus-stack-grafana` Bound at 1Gi |
+| **ha_host cleanup** | Remove `ha_host: "mba1"` from `infra/inventory/group_vars/all.yml` — Home Assistant now runs in k3s; variable is stale |
+
+Planned extensions (see `docs/01-homelab-platform.md` → Erweiterungen):
+- kured — automated node reboots after kernel updates
+- Cloudflare Zero Trust Access Policy for SSH
+- Automated update script with rollback
 
 ---
 
@@ -160,7 +184,7 @@ infra/
   inventory/
     hosts.yml               # Node IPs and group assignments
     group_vars/             # Variables per group (all, k3s_server, mac, …)
-  playbooks/                # 00_bootstrap → 10_base → 20_k3s → 30_longhorn → 40_platform
+  playbooks/                # 00_bootstrap → 10_base → 20_k3s → 30_longhorn → 40_platform → 50_apps_infra → 51_homeassistant
   roles/
     base/                   # Hostname, timezone, NTP, packages, unattended-upgrades
     hardening/              # UFW, fail2ban, SSH hardening
@@ -172,8 +196,10 @@ infra/
     docker/                 # Docker CE for Home Assistant host (M2)
 cluster/
   platform/                 # Helm chart references
-  values/                   # Pinned Helm values
-examples/                   # Reference manifests for app deployments (M5)
+  values/                   # Pinned Helm values (kube-prometheus-stack, cloudflared, longhorn,
+                            #   influxdb2, home-assistant)
+examples/                   # Reference manifests for app deployments (see APPS.md)
+                            #   simple-deployment, with-postgres, with-ingress-public, helm-values-template
 docs/
   01-homelab-platform.md    # Full platform specification
 ```
@@ -225,6 +251,8 @@ kubectl get ingress -A                             # All Ingress resources
 kubectl get svc -A                                 # All Services
 kubectl -n platform get pods                       # cert-manager, cloudflared pods
 kubectl -n platform logs -l app=cloudflared --tail=50  # Cloudflare Tunnel logs
+kubectl -n monitoring get pods                     # prometheus, grafana, alertmanager
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80  # Grafana UI → http://localhost:3000
 ```
 
 ### Debugging
