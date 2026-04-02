@@ -206,7 +206,8 @@ homelab/                         ← GitHub Repo Root
 │       ├─ 10_base.yml           ← base + hardening + storage
 │       ├─ 20_k3s.yml            ← k3s server → agents joinen
 │       ├─ 30_longhorn.yml       ← Longhorn Helm Chart + Default StorageClass
-│       ├─ 40_platform.yml       ← cert-manager, traefik, cloudflared, monitoring
+│       ├─ 40_platform.yml       ← cert-manager, traefik, cloudflared
+│       ├─ 41_monitoring.yml     ← kube-prometheus-stack (Prometheus, Grafana, Alertmanager)
 │       └─ 50_apps_infra.yml     ← PostgreSQL 17, InfluxDB 2, Mosquitto 2 (apps namespace)
 │
 ├─ cluster/                      ← Helm / Kubernetes

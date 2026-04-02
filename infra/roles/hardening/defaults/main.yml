@@ -12,6 +12,7 @@ hardening_ufw_lan_ports:
   - { port: "2379:2380", proto: "tcp", comment: "etcd" }
   - { port: "9500:9502", proto: "tcp", comment: "Longhorn" }
   - { port: "9100", proto: "tcp", comment: "Node Exporter" }
+  - { port: "1883", proto: "tcp", comment: "Mosquitto MQTT (LAN only)" }
 
 # k3s CNI Subnetze (Pod CIDR + Service CIDR) — müssen für cross-node Traffic freigegeben werden
 # Flannel entpackt Pakete mit Pod-Quell-IPs; UFW kennt diese ohne explizite Regel nicht

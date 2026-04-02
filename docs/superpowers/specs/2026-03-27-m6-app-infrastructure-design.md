@@ -149,16 +149,15 @@ All variables loaded from SOPS in the playbook via the existing `community.sops.
 
 ## Cloudflare Tunnel Update
 
-The existing `40_platform.yml` Cloudflare ingress update task (PUT to CF API) is replicated in `50_apps_infra.yml` to add:
+**Not implemented in M6.** `50_apps_infra.yml` does not modify the Cloudflare Tunnel ingress configuration. Mosquitto (MQTT) is LAN-only in M6 — no public exposure via Cloudflare Tunnel.
 
-```yaml
-- hostname: mqtt.furchert.ch
-  service: ws://mosquitto.apps.svc.cluster.local:9001
-```
+The Cloudflare Tunnel ingress is managed exclusively by `infra/playbooks/40_platform.yml`. Exposing `mqtt.furchert.ch` publicly (including WSS + auth) is deferred as a post-M6 bundle:
 
-`50_apps_infra.yml` defines the complete desired ingress config in one PUT call — all rules explicitly listed (ssh.furchert.ch, mqtt.furchert.ch, fallback http_status:404). This is the same pattern as `40_platform.yml` and is idempotent. Any future tunnel rules added in other playbooks must also be listed here to avoid being dropped.
+- WSS endpoint (`mqtt.furchert.ch`) via Cloudflare Tunnel (Mosquitto port 9001)
+- MQTT password authentication (`password_file`)
+- DNS CNAME: `mqtt` → `<tunnel-id>.cfargotunnel.com` (Proxy: enabled)
 
-**DNS:** Manual step — add CNAME `mqtt` → `<tunnel-id>.cfargotunnel.com` (Proxy: enabled) in Cloudflare Dashboard.
+This bundle requires changes to `40_platform.yml` (ingress PUT) and Mosquitto config — to be designed separately.
 
 ---
 

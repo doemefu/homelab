@@ -71,16 +71,17 @@ UFW-Regeln werden von der `hardening`-Rolle gesetzt. Alle eingehenden Verbindung
 | Port(s)     | Protokoll | Zweck                              | Scope    |
 |-------------|-----------|-------------------------------------|----------|
 | 22          | TCP       | SSH                                 | LAN only |
+| 80, 443     | TCP       | HTTP/HTTPS (Traefik Ingress)        | LAN only |
 | 6443        | TCP       | k3s API Server                      | LAN only |
 | 10250       | TCP       | kubelet metrics                     | LAN only |
 | 8472        | UDP       | Flannel VXLAN Overlay               | LAN only |
 | 2379–2380   | TCP       | etcd (nur Control-Plane)            | LAN only |
 | 9500–9502   | TCP       | Longhorn Replikation                | LAN only |
 | 9100        | TCP       | Node Exporter (Prometheus Scrape)   | LAN only |
-| 9101        | TCP       | Traefik Metrics (Prometheus Scrape) | LAN only |
-| 9187        | TCP       | postgres-exporter Sidecar (Prometheus Scrape) | LAN only |
-| 9234        | TCP       | mosquitto-exporter (Prometheus Scrape) | LAN only |
-| 1883        | TCP       | Mosquitto MQTT (LAN only, anonym, kein Auth in M6) | LAN only |
+| 1883        | TCP       | Mosquitto MQTT                      | LAN only |
+
+> **Intra-Cluster-Ports** (kein UFW-Eintrag nötig — Prometheus scraped via CNI-Netz):
+> 9101 (Traefik Metrics), 9187 (postgres-exporter), 9234 (mosquitto-exporter)
 
 > Port-Forward-Befehle (z.B. `kubectl port-forward ... 9090:9090`) laufen lokal und erfordern keine UFW-Änderungen.
 

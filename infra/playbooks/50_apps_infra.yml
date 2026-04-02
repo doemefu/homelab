@@ -341,6 +341,23 @@
       delegate_to: localhost
 
     # --- Prometheus ServiceMonitors ---
+    # Vorbedingung: 41_monitoring.yml muss ausgeführt worden sein (Prometheus Operator CRDs)
+    - name: Prüfen ob Prometheus Operator CRD (ServiceMonitor) installiert ist
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: servicemonitors.monitoring.coreos.com
+      delegate_to: localhost
+      register: servicemonitor_crd
+
+    - name: Abbrechen wenn Prometheus Operator CRD fehlt
+      ansible.builtin.assert:
+        that: servicemonitor_crd.resources | length > 0
+        fail_msg: >
+          ServiceMonitor CRD nicht gefunden. Bitte zuerst 41_monitoring.yml ausführen:
+          ansible-playbook infra/playbooks/41_monitoring.yml
+
     - name: PostgreSQL ServiceMonitor anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"

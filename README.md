@@ -113,7 +113,8 @@ export KUBECONFIG=~/.kube/homelab.yaml
 | `10_base.yml`     | OS baseline + hardening + storage + Restic cron (raspi5) | M1, then on changes |
 | `20_k3s.yml`      | k3s server + agents + Longhorn prereqs          | M2                  |
 | `30_longhorn.yml` | Longhorn Helm deploy + Default StorageClass     | M3                  |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config, Monitoring, Alertmanager | M2, M4, M5+         |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik config | M2, M5+             |
+| `41_monitoring.yml` | kube-prometheus-stack (Prometheus, Grafana, Alertmanager, Discord) | M4, M5+ |
 | `50_apps_infra.yml` | PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 in `apps` namespace | M6 |
 | `51_homeassistant.yml` | Home Assistant in `homeassistant` namespace (hostNetwork) | M6 |
 

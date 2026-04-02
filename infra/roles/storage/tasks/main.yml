@@ -61,6 +61,14 @@
 
 # --- Restic Backup-Automatisierung (nur wenn storage_run_restic_backup: true) ---
 
+- name: Sicherstellen dass storage_backup_paths gesetzt ist
+  ansible.builtin.assert:
+    that: storage_backup_paths | length > 0
+    fail_msg: >
+      storage_run_restic_backup ist aktiviert aber storage_backup_paths ist leer.
+      Bitte Backup-Pfade in group_vars/k3s_server.yml definieren.
+  when: storage_run_restic_backup
+
 - name: Restic Passwort-Datei anlegen
   ansible.builtin.copy:
     content: "{{ restic_password }}"
