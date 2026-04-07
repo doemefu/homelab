@@ -202,9 +202,26 @@ examples/                   # Reference manifests for app deployments (see APPS.
                             #   simple-deployment, with-postgres, with-ingress-public, helm-values-template
 docs/
   01-homelab-platform.md    # Full platform specification
+  050-iot-app-rewrite.md    # IoT app migration plan (monolith -> microservices)
+  051-architecture-current.md  # Legacy monolith architecture
+  052-architecture-target.md   # Target microservices architecture
 ```
 
 For operational runbooks see `OPERATIONS.md`. For app deployment patterns see `APPS.md`.
+
+---
+
+## Related Repositories
+
+This repo provides the platform infrastructure. The application services run on this cluster and live in their own repos:
+
+| Repo | Description | Status |
+|------|-------------|--------|
+| [homelab-auth-service](https://github.com/doemefu/homelab-auth-service) | JWT authentication service — user CRUD, token issuance, JWKS endpoint | M1 complete |
+| [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | M2 in progress |
+| homelab-data-service | Historical data queries (InfluxDB) + schedule CRUD | Not yet created |
+
+Architecture docs for the full migration plan are in `docs/`.
 
 ---
 
