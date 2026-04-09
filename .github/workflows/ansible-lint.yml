@@ -1,0 +1,15 @@
+name: "Ansible Lint"
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ansible/ansible-lint@v25
+        with:
+          working_directory: infra/
