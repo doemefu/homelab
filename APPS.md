@@ -111,7 +111,7 @@ Adjust based on actual workload. Check `kubectl top pods -n apps` after deploy.
 
 ## Multi-Architecture Requirements
 
-The cluster runs ARM64 nodes (raspi5, raspi4) and will include amd64 nodes (mba1, mba2) post-M5.
+The cluster currently runs four Ready nodes: ARM64 `raspi5` (8 GB) and `raspi4` (4 GB), plus AMD64 `mba1` (8 CPU, ~8 Gi RAM) and `mba2` (4 CPU, ~8 Gi RAM).
 **All container images must support both architectures** (`linux/arm64` and `linux/amd64`).
 
 Check whether an image is multi-arch before using it:
@@ -251,7 +251,7 @@ Ensure `kubectl` is configured to talk to the homelab cluster:
 
 ```bash
 export KUBECONFIG=~/.kube/homelab.yaml
-kubectl get nodes  # should show raspi5 + raspi4 as Ready
+kubectl get nodes  # should show raspi5, raspi4, mba1, mba2 as Ready
 ```
 
 > Add `export KUBECONFIG=~/.kube/homelab.yaml` to your `~/.zshrc` to make it permanent.

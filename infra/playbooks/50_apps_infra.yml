@@ -27,6 +27,33 @@
             name: "{{ apps_namespace }}"
       delegate_to: localhost
 
+    - name: Prüfen dass sentry_dsn gesetzt ist
+      ansible.builtin.assert:
+        that:
+          - sentry_dsn is defined
+          - sentry_dsn | length > 0
+        fail_msg: >-
+          sentry_dsn ist nicht gesetzt.
+          Bitte in infra/inventory/group_vars/all.sops.yml eintragen
+          (Sentry → Project Settings → Client Keys → DSN).
+      delegate_to: localhost
+
+    # --- Sentry ---
+    - name: Sentry DSN Secret anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: sentry-dsn
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            dsn: "{{ sentry_dsn }}"
+      no_log: true
+      delegate_to: localhost
+
     # --- PostgreSQL ---
     # Hinweis: bitnami/postgresql chart nicht verwendet — Image docker.io/bitnami/postgresql
     # ist auf Docker Hub nicht mehr verfügbar (seit Bitnami Registry-Wechsel 2024).

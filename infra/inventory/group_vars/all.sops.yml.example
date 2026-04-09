@@ -59,3 +59,7 @@ postgresql_password: "<generieren: openssl rand -base64 24>"
 postgresql_replication_password: "<generieren: openssl rand -base64 24>"
 influxdb_admin_password: "<min 8 Zeichen>"
 influxdb_admin_token: "<generieren: openssl rand -hex 32>"
+
+# Sentry DSN — obtain from sentry.io project settings → Client Keys
+# One DSN shared across all three homelab microservices (auth, device, data)
+sentry_dsn: "https://REPLACE_ME@oXXXXXXXX.ingest.sentry.io/XXXXXXXX"
