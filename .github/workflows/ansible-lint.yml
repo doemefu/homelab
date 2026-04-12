@@ -9,7 +9,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Ansible collections
         run: ansible-galaxy collection install -r infra/requirements.yml
       - uses: ansible/ansible-lint@v26
