@@ -262,7 +262,34 @@ kubectl get nodes  # should show raspi5, raspi4, mba1, mba2 as Ready
 kubectl create namespace apps
 ```
 
-### kubectl apply workflow
+### Flux-managed apps (device-service, auth-service)
+
+`device-service` and `auth-service` are managed by **Flux CD**. Do not `kubectl apply` their manifests manually — Flux will overwrite any manual change within the next reconciliation interval (≤10 min).
+
+**Deploying a new version:** Push to `main` in the app repo. CI builds a new image with a `main-YYYYMMDDTHHMMSS` tag. Flux detects it within 5 minutes, commits the updated tag to the app repo, and the `Kustomization` applies the change to the cluster.
+
+**Checking status:**
+```bash
+flux get kustomizations -n flux-system          # reconciliation state
+flux get image updates -n flux-system           # last automation commit
+kubectl rollout status deployment/<app> -n apps # pod rollout
+```
+
+**Suspending automation** (e.g. for emergency pin):
+```bash
+flux suspend image update <app> -n flux-system
+# fix the image tag manually if needed, then:
+flux resume image update <app> -n flux-system
+```
+
+**Forcing a reconciliation:**
+```bash
+flux reconcile kustomization <app> -n flux-system --with-source
+```
+
+### kubectl apply workflow (non-Flux apps)
+
+For apps not managed by Flux, use the standard apply workflow:
 
 1. **Apply your manifest:**
    ```bash

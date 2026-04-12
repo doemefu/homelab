@@ -1,0 +1,12 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: auth-service
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: ssh://git@github.com/doemefu/homelab-auth-service
+  ref:
+    branch: main
+  secretRef:
+    name: auth-service-flux-auth
