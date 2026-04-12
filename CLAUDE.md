@@ -175,7 +175,8 @@ Required sections (in order):
 - Do **not** create new namespaces outside `platform`, `monitoring`, `apps` without discussion
 - Do **not** change Longhorn replication factor below 2
 - App code and app-specific deployments live in **separate repos** — do not add them here
-- Multi-Control-Plane HA, Service Mesh (Istio/Linkerd), GitOps controllers (ArgoCD/Flux) are **out of scope**
+- Multi-Control-Plane HA, Service Mesh (Istio/Linkerd) are **out of scope**
+- ArgoCD is **out of scope**. Flux CD is used for automated app deployments in the `apps` namespace — see `cluster/apps/`
 
 ---
 

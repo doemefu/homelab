@@ -17,8 +17,8 @@ brew install helm@3 kubectl
 /usr/local/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff
 # Apple Silicon: /opt/homebrew/opt/helm@3/bin/helm plugin install ...
 
-# Secrets
-brew install sops age
+# Secrets + GitOps CLI
+brew install sops age fluxcd/tap/flux
 ```
 
 > **Helm 4 Hinweis:** `brew install helm` installiert aktuell Helm 4.x, welches von
@@ -130,6 +130,35 @@ After bootstrap, all subsequent playbooks connect as the `ansible` user.
 | `args[module]` on loop with template value | Use explicit tasks instead of loop for static choices                                                         |
 | `stdout_callback = yaml`                   | Use `stdout_callback = ansible.builtin.default` + `result_format = yaml`                                      |
 | `validate:` on SSH drop-in                 | Don't use `validate:` for `/etc/ssh/sshd_config.d/*.conf` — `sshd -t` needs a full config file, not a drop-in |
+
+---
+
+## Adding a Flux-managed App
+
+`auth-service` and `device-service` are deployed via Flux CD. To add another app under Flux management:
+
+1. **Create Flux config files** under `cluster/apps/<app-name>/`:
+   - `kustomization.yaml` — lists the other files
+   - `source.yaml` — `GitRepository` pointing to the app repo (SSH URL + `secretRef`)
+   - `sync.yaml` — `Kustomization` CRD applying `./k8s` from the source
+   - `imagerepo.yaml` — `ImageRepository` scanning GHCR
+   - `imagepolicy.yaml` — `ImagePolicy` filtering `^main-[0-9]{8}T[0-9]{6}$`, `alphabetical: asc`
+   - `imageupdate.yaml` — `ImageUpdateAutomation` writing updated tag back to the app repo
+
+2. **Add the app to** `cluster/apps/kustomization.yaml` resources list.
+
+3. **Add a `$imagepolicy` marker** to the app's `k8s/deployment.yaml`:
+   ```yaml
+   image: ghcr.io/doemefu/<app>:main-<timestamp> # {"$imagepolicy": "flux-system:<app>"}
+   ```
+
+4. **Add a `k8s/kustomization.yaml`** to the app repo listing all manifest files.
+
+5. **Create SSH deploy keys** for write-back (one per app — see `imageupdate.yaml` for the pattern).
+
+6. **Register the Flux config** by committing to the infrastructure repo — Flux picks it up within the next reconciliation interval.
+
+See `cluster/apps/device-service/` as a reference implementation.
 
 ---
 

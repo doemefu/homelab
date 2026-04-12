@@ -262,7 +262,49 @@ kubectl get nodes  # should show raspi5, raspi4, mba1, mba2 as Ready
 kubectl create namespace apps
 ```
 
-### kubectl apply workflow
+### Flux-managed apps (device-service, auth-service)
+
+`device-service` and `auth-service` are managed by **Flux CD**. Do not `kubectl apply` their manifests manually — Flux will overwrite any manual change within the next reconciliation interval (≤10 min).
+
+**Prerequisites (one-time bootstrap):**
+
+1. Apply the apps Kustomization to the cluster (not auto-reconciled by the flux-system bootstrap):
+   ```bash
+   kubectl apply -f cluster/flux-system/apps-sync.yaml
+   ```
+
+2. Create the SSH deploy key Secret for each service in the `flux-system` namespace. The key must have **write access** to the app repo (ImageUpdateAutomation pushes tag commits back to `main`). Add the private key, public key, and known_hosts to your SOPS-encrypted vars and create the Secret via an Ansible task (same pattern as other Secrets in `50_apps_infra.yml`):
+   ```bash
+   # Secret name expected by source.yaml:
+   # auth-service:   auth-service-flux-auth
+   # device-service: device-service-flux-auth
+   # Fields: identity (SSH private key), identity.pub, known_hosts
+   ```
+
+**Deploying a new version:** Push to `main` in the app repo. CI builds a new image with a `main-YYYYMMDDTHHmmss` tag. Flux detects it within 5 minutes, commits the updated tag to the app repo, and the `Kustomization` applies the change to the cluster.
+
+**Checking status:**
+```bash
+flux get kustomizations -n flux-system          # reconciliation state
+flux get image update -n flux-system            # last automation commit
+kubectl rollout status deployment/<app> -n apps # pod rollout
+```
+
+**Suspending automation** (e.g. for emergency pin):
+```bash
+flux suspend image update <app> -n flux-system
+# fix the image tag manually if needed, then:
+flux resume image update <app> -n flux-system
+```
+
+**Forcing a reconciliation:**
+```bash
+flux reconcile kustomization <app> -n flux-system --with-source
+```
+
+### kubectl apply workflow (non-Flux apps)
+
+For apps not managed by Flux, use the standard apply workflow:
 
 1. **Apply your manifest:**
    ```bash

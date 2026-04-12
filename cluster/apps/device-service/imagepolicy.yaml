@@ -1,0 +1,15 @@
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: device-service
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: device-service
+  filterTags:
+    # Matches tags like: main-20260412T143000
+    pattern: '^main-[0-9]{8}T[0-9]{6}$'
+  policy:
+    alphabetical:
+      # asc: sorts ascending, selects the lexicographically greatest tag = newest timestamp
+      order: asc

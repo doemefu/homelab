@@ -1,0 +1,19 @@
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: auth-service
+  namespace: flux-system
+spec:
+  interval: 5m
+  image: ghcr.io/doemefu/homelab-auth-service
+  # secretRef:
+  #   name: ghcr-auth
+  # Uncomment secretRef if GHCR package is private.
+  # Create the secret with:
+  #   export GHCR_PAT='<token-with-read:packages>'
+  #   kubectl create secret docker-registry ghcr-auth \
+  #     -n flux-system \
+  #     --docker-server=ghcr.io \
+  #     --docker-username=doemefu \
+  #     --docker-password="${GHCR_PAT}"
+  #   unset GHCR_PAT

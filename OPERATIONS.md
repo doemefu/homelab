@@ -21,6 +21,7 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 ## Inhaltsverzeichnis
 
 - [Cluster Health](#cluster-health)
+- [Flux CD (GitOps)](#flux-cd-gitops)
 - [Ports & Firewall](#ports--firewall)
 - [k3s Upgrade](#k3s-upgrade)
 - [Node Drain & Reboot](#node-drain--reboot)
@@ -59,8 +60,69 @@ Erwartete Pods pro Namespace nach M6:
 | `platform`       | cert-manager (3x), cloudflared |
 | `longhorn-system`| longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager |
 | `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
-| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-* |
+| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-* |
 | `homeassistant`  | home-assistant-0 (hostNetwork, port 8123 on node IP) |
+
+---
+
+## Flux CD (GitOps)
+
+Flux CD automates deployments for `auth-service` and `device-service`. It polls GHCR for new image tags, commits the updated tag back to the app repo, and applies the manifest to the cluster — no manual `kubectl` steps needed.
+
+### Check Flux status
+
+```bash
+# Overall Flux health
+flux check
+
+# Source reconciliation (GitRepository objects)
+flux get sources git -n flux-system
+
+# Kustomization reconciliation (applies k8s/ manifests)
+flux get kustomizations -n flux-system
+
+# Image repos (GHCR scans)
+flux get image repositories -n flux-system
+
+# Image policies (tag selection)
+flux get image policy -n flux-system
+
+# Image update automation (write-back commits)
+flux get image update -n flux-system
+```
+
+### Force a reconciliation
+
+```bash
+flux reconcile kustomization device-service -n flux-system --with-source
+flux reconcile kustomization auth-service -n flux-system --with-source
+```
+
+### Suspend / resume automation (emergency image pin)
+
+```bash
+# Suspend (stops automatic tag updates) — replace <app> with auth-service or device-service
+flux suspend image update <app> -n flux-system
+
+# Resume
+flux resume image update <app> -n flux-system
+```
+
+### Troubleshoot
+
+```bash
+# See why a Kustomization failed
+flux logs -n flux-system --kind=Kustomization --name=device-service
+
+# Confirm pod is running the expected image
+kubectl get pods -n apps -l app=device-service -o jsonpath='{.items[0].spec.containers[0].image}'
+kubectl get pods -n apps -l app=auth-service   -o jsonpath='{.items[0].spec.containers[0].image}'
+```
+
+Common causes of stuck automation:
+- SSH deploy key missing or revoked → check `flux get sources git` for auth errors
+- GHCR package is private → add `ghcr-auth` secret and uncomment `secretRef` in `imagerepo.yaml`
+- Tag filter mismatch → verify new CI tags match `^main-[0-9]{8}T[0-9]{6}$`
 
 ---
 

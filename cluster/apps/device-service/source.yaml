@@ -1,0 +1,12 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: device-service
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: ssh://git@github.com/doemefu/homelab-device-service
+  ref:
+    branch: main
+  secretRef:
+    name: device-service-flux-auth
