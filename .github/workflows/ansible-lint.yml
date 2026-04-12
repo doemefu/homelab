@@ -10,6 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install Ansible collections
-        run: ansible-galaxy collection install -r infra/requirements.yml
       - uses: ansible/ansible-lint@v26
+        with:
+          requirements_file: infra/requirements.yml
