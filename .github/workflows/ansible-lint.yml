@@ -10,6 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: ansible/ansible-lint@v26
+      - uses: actions/setup-python@v5
         with:
-          requirements_file: infra/requirements.yml
+          python-version: "3.12"
+      - name: Install ansible-lint and ansible-core
+        run: pip install "ansible-lint==25.12.2" "ansible-core==2.20.4"
+      - name: Install Ansible collections
+        run: ansible-galaxy collection install -r infra/requirements.yml
+      - name: Run ansible-lint
+        run: ansible-lint infra/
