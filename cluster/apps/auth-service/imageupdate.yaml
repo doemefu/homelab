@@ -4,7 +4,7 @@ metadata:
   name: auth-service
   namespace: flux-system
 spec:
-  interval: 2m
+  interval: 5m
   sourceRef:
     kind: GitRepository
     name: auth-service

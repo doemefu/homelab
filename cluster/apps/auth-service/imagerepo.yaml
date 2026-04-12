@@ -10,8 +10,10 @@ spec:
   #   name: ghcr-auth
   # Uncomment secretRef if GHCR package is private.
   # Create the secret with:
+  #   export GHCR_PAT='<token-with-read:packages>'
   #   kubectl create secret docker-registry ghcr-auth \
   #     -n flux-system \
   #     --docker-server=ghcr.io \
   #     --docker-username=doemefu \
-  #     --docker-password=<PAT with read:packages>
+  #     --docker-password="${GHCR_PAT}"
+  #   unset GHCR_PAT

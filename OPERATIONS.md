@@ -85,10 +85,10 @@ flux get kustomizations -n flux-system
 flux get image repositories -n flux-system
 
 # Image policies (tag selection)
-flux get image policies -n flux-system
+flux get image policy -n flux-system
 
 # Image update automation (write-back commits)
-flux get image updates -n flux-system
+flux get image update -n flux-system
 ```
 
 ### Force a reconciliation
@@ -101,11 +101,11 @@ flux reconcile kustomization auth-service -n flux-system --with-source
 ### Suspend / resume automation (emergency image pin)
 
 ```bash
-# Suspend (stops automatic tag updates)
-flux suspend image update device-service -n flux-system
+# Suspend (stops automatic tag updates) — replace <app> with auth-service or device-service
+flux suspend image update <app> -n flux-system
 
 # Resume
-flux resume image update device-service -n flux-system
+flux resume image update <app> -n flux-system
 ```
 
 ### Troubleshoot
