@@ -64,7 +64,7 @@
     # kubernetes.core.k8s_exec runs shlex.split() on command strings, which breaks on mixed
     # quoting. Using ansible.builtin.command + kubectl exec bypasses that entirely.
 
-    - name: homelab PostgreSQL user anlegen (falls nicht vorhanden)
+    - name: Homelab PostgreSQL user anlegen (falls nicht vorhanden)
       ansible.builtin.command:
         argv:
           - kubectl
@@ -87,7 +87,7 @@
       register: pg_create_user
       changed_when: "'CREATE ROLE' in pg_create_user.stdout"
 
-    - name: homelab PostgreSQL user Passwort setzen/aktualisieren
+    - name: Homelab PostgreSQL user Passwort setzen/aktualisieren
       ansible.builtin.command:
         argv:
           - kubectl
@@ -107,7 +107,7 @@
       delegate_to: localhost
       changed_when: true
 
-    - name: homelabdb Datenbank anlegen (falls nicht vorhanden)
+    - name: Homelabdb Datenbank anlegen (falls nicht vorhanden)
       ansible.builtin.command:
         argv:
           - kubectl
@@ -150,7 +150,7 @@
       no_log: true
       delegate_to: localhost
 
-    - name: homelab-db-credentials anlegen (auth-service PostgreSQL)
+    - name: Homelab-db-credentials anlegen (auth-service PostgreSQL)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -166,7 +166,7 @@
       no_log: true
       delegate_to: localhost
 
-    - name: homelab-auth-secrets anlegen (OAuth2 client secrets)
+    - name: Homelab-auth-secrets anlegen (OAuth2 client secrets)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -182,7 +182,7 @@
       no_log: true
       delegate_to: localhost
 
-    - name: homelab-auth-rsa-keys anlegen (JWT signing keys)
+    - name: Homelab-auth-rsa-keys anlegen (JWT signing keys)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
