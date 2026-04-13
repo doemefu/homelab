@@ -39,3 +39,75 @@
     owner: root
     group: root
     mode: "0644"
+
+- name: Watchdog — Paket installieren
+  ansible.builtin.apt:
+    name: watchdog
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: mac_tweaks_watchdog_enabled
+
+- name: Watchdog — softdog Modul beim Boot laden
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/watchdog.conf
+    content: |
+      # Managed by Ansible — software watchdog (fallback if no hardware watchdog available)
+      softdog
+    owner: root
+    group: root
+    mode: "0644"
+  when: mac_tweaks_watchdog_enabled
+
+- name: Watchdog — softdog Modul sofort laden (kein Reboot noetig)
+  community.general.modprobe:
+    name: softdog
+    state: present
+  when: mac_tweaks_watchdog_enabled
+
+- name: Watchdog — Log-Verzeichnis anlegen
+  ansible.builtin.file:
+    path: "{{ mac_tweaks_watchdog_log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: mac_tweaks_watchdog_enabled
+
+- name: Watchdog — Konfiguration schreiben
+  ansible.builtin.template:
+    src: watchdog.conf.j2
+    dest: /etc/watchdog.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: mac_tweaks_watchdog_config
+  when: mac_tweaks_watchdog_enabled
+
+- name: Watchdog — Dienst aktivieren und (neu-)starten
+  ansible.builtin.service:
+    name: watchdog
+    state: "{{ 'restarted' if mac_tweaks_watchdog_config.changed else 'started' }}"
+    enabled: true
+  when: mac_tweaks_watchdog_enabled
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Watchdog — Dienst stoppen und deaktivieren
+  ansible.builtin.service:
+    name: watchdog
+    state: stopped
+    enabled: false
+  when: not mac_tweaks_watchdog_enabled
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Watchdog — Konfigurationsdatei entfernen
+  ansible.builtin.file:
+    path: /etc/watchdog.conf
+    state: absent
+  when: not mac_tweaks_watchdog_enabled
+
+- name: Watchdog — Boot-Modul-Konfiguration entfernen
+  ansible.builtin.file:
+    path: /etc/modules-load.d/watchdog.conf
+    state: absent
+  when: not mac_tweaks_watchdog_enabled

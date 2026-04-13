@@ -1,0 +1,206 @@
+---
+# App Services — K8s Secrets for device-service and auth-service
+# Namespace: apps
+#
+# Prerequisites:
+#   - 50_apps_infra.yml completed (PostgreSQL running)
+#   - all.sops.yml contains the variables listed below
+#
+# Required SOPS variables (add once via: sops infra/inventory/group_vars/all.sops.yml):
+#
+#   homelab_db_username:       homelab
+#   homelab_db_password:       <generated password>
+#   device_service_mqtt_password: <placeholder until MQTT auth is enabled post-M6>
+#   influxdb_admin_token:      <InfluxDB admin token (generated on first InfluxDB startup)>
+#   auth_service_grafana_client_secret: <from Grafana → Administration → Authentication → Generic OAuth>
+#   auth_service_ha_client_secret:      <from Home Assistant → Settings → OAuth Clients>
+#   auth_service_rsa_private_key: |
+#     -----BEGIN RSA PRIVATE KEY-----
+#     ...
+#     -----END RSA PRIVATE KEY-----
+#   auth_service_rsa_public_key: |
+#     -----BEGIN PUBLIC KEY-----
+#     ...
+#     -----END PUBLIC KEY-----
+#
+# One-time RSA key generation (run once, then paste output into SOPS):
+#   openssl genrsa -out /tmp/auth-rsa.pem 2048
+#   openssl rsa -in /tmp/auth-rsa.pem -pubout -out /tmp/auth-rsa-pub.pem
+#   cat /tmp/auth-rsa.pem        # → auth_service_rsa_private_key
+#   cat /tmp/auth-rsa-pub.pem    # → auth_service_rsa_public_key
+#   shred -u /tmp/auth-rsa.pem /tmp/auth-rsa-pub.pem
+#
+# Run: ansible-playbook infra/playbooks/52_app_services.yml
+
+- name: App Services — database init + K8s secrets
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    apps_namespace: apps
+    postgresql_pod: postgresql-0
+
+  tasks:
+
+    # --- Guards ---
+
+    - name: Prüfen dass alle benötigten SOPS-Variablen gesetzt sind
+      ansible.builtin.assert:
+        that:
+          - homelab_db_username is defined and homelab_db_username | length > 0
+          - homelab_db_username is match('^[a-z_][a-z0-9_]*$')
+          - homelab_db_password is defined and homelab_db_password | length > 0
+          - device_service_mqtt_password is defined
+          - influxdb_admin_token is defined and influxdb_admin_token | length > 0
+          - auth_service_grafana_client_secret is defined and auth_service_grafana_client_secret | length > 0
+          - auth_service_ha_client_secret is defined and auth_service_ha_client_secret | length > 0
+          - auth_service_rsa_private_key is defined and auth_service_rsa_private_key | length > 0
+          - auth_service_rsa_public_key is defined and auth_service_rsa_public_key | length > 0
+        fail_msg: >-
+          One or more required SOPS variables are missing.
+          Add them to infra/inventory/group_vars/all.sops.yml — see the header comment in this playbook.
+      delegate_to: localhost
+
+    # --- PostgreSQL: database + user (idempotent) ---
+    # kubernetes.core.k8s_exec runs shlex.split() on command strings, which breaks on mixed
+    # quoting. Using ansible.builtin.command + kubectl exec bypasses that entirely.
+
+    - name: Homelab PostgreSQL user anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='{{ homelab_db_username }}'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE {{ homelab_db_username }} WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_create_user
+      changed_when: "'CREATE ROLE' in pg_create_user.stdout"
+
+    - name: Homelab PostgreSQL user Passwort setzen/aktualisieren
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - psql
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ homelab_db_username | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ homelab_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Homelabdb Datenbank anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='homelabdb'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE homelabdb OWNER {{ homelab_db_username }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_create_db
+      changed_when: "'CREATE DATABASE' in pg_create_db.stdout"
+
+    # --- K8s secrets ---
+
+    - name: Device-service-secrets anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: device-service-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            db-username: "{{ homelab_db_username }}"
+            db-password: "{{ homelab_db_password }}"
+            mqtt-password: "{{ device_service_mqtt_password }}"
+            influx-token: "{{ influxdb_admin_token }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: Homelab-db-credentials anlegen (auth-service PostgreSQL)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: homelab-db-credentials
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            username: "{{ homelab_db_username }}"
+            password: "{{ homelab_db_password }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: Homelab-auth-secrets anlegen (OAuth2 client secrets)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: homelab-auth-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            grafana-client-secret: "{{ auth_service_grafana_client_secret }}"
+            ha-client-secret: "{{ auth_service_ha_client_secret }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: Homelab-auth-rsa-keys anlegen (JWT signing keys)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: homelab-auth-rsa-keys
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            private.pem: "{{ auth_service_rsa_private_key }}"
+            public.pem: "{{ auth_service_rsa_public_key }}"
+      no_log: true
+      delegate_to: localhost

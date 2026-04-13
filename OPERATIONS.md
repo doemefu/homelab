@@ -215,6 +215,36 @@ ansible all -m command -a "k3s --version"
 
 ---
 
+## MBA Nodes (mba1 / mba2) — Watchdog
+
+The MacBook Air workers run a kernel watchdog (`softdog`) that auto-reboots the node if the kernel freezes or panics.
+
+**Verify watchdog is healthy:**
+```bash
+ssh ansible@<mba-ip> "systemctl is-active watchdog && lsmod | grep softdog && ls /dev/watchdog"
+# Expected: active / softdog listed / /dev/watchdog present
+```
+
+**If watchdog is inactive after a reboot:**
+```bash
+ansible-playbook infra/playbooks/10_base.yml -l mac
+```
+
+**Disable temporarily for maintenance** (e.g. long-running operations that could trigger the load threshold):
+```bash
+# Stops and disables watchdog service + removes config files:
+ansible-playbook infra/playbooks/10_base.yml -l <node> -e "mac_tweaks_watchdog_enabled=false"
+# Re-enable (reinstalls config, starts service):
+ansible-playbook infra/playbooks/10_base.yml -l <node>
+```
+
+**If a node reboots unexpectedly:**
+1. Check `sudo journalctl -b -1 --no-pager | tail -50` — watchdog reboot leaves no graceful shutdown entry
+2. Check `sudo last -x reboot | head -5` — confirms reboot occurred
+3. Tune thresholds in `infra/roles/mac_tweaks/defaults/main.yml` if load spikes are causing false triggers
+
+---
+
 ## Node Drain & Reboot
 
 ```bash

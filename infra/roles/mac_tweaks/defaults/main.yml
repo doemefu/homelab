@@ -5,3 +5,11 @@ mac_tweaks_kernel_modules:
 
 mac_tweaks_logind_handle_lid_switch: "ignore"
 mac_tweaks_logind_handle_lid_switch_external_power: "ignore"
+
+mac_tweaks_watchdog_enabled: true
+mac_tweaks_watchdog_device: /dev/watchdog
+mac_tweaks_watchdog_interval: 10
+mac_tweaks_watchdog_timeout: 60
+mac_tweaks_watchdog_max_load_1: 24
+mac_tweaks_watchdog_min_memory: 51200
+mac_tweaks_watchdog_log_dir: /var/log/watchdog
