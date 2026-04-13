@@ -132,7 +132,7 @@
 
     # --- K8s secrets ---
 
-    - name: device-service-secrets anlegen
+    - name: Device-service-secrets anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
