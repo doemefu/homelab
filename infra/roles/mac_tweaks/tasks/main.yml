@@ -91,3 +91,23 @@
     enabled: true
   when: mac_tweaks_watchdog_enabled
   ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Watchdog — Dienst stoppen und deaktivieren
+  ansible.builtin.service:
+    name: watchdog
+    state: stopped
+    enabled: false
+  when: not mac_tweaks_watchdog_enabled
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Watchdog — Konfigurationsdatei entfernen
+  ansible.builtin.file:
+    path: /etc/watchdog.conf
+    state: absent
+  when: not mac_tweaks_watchdog_enabled
+
+- name: Watchdog — Boot-Modul-Konfiguration entfernen
+  ansible.builtin.file:
+    path: /etc/modules-load.d/watchdog.conf
+    state: absent
+  when: not mac_tweaks_watchdog_enabled

@@ -11,6 +11,7 @@
 #   homelab_db_username:       homelab
 #   homelab_db_password:       <generated password>
 #   device_service_mqtt_password: <placeholder until MQTT auth is enabled post-M6>
+#   influxdb_admin_token:      <InfluxDB admin token (generated on first InfluxDB startup)>
 #   auth_service_grafana_client_secret: <from Grafana → Administration → Authentication → Generic OAuth>
 #   auth_service_ha_client_secret:      <from Home Assistant → Settings → OAuth Clients>
 #   auth_service_rsa_private_key: |
@@ -48,6 +49,7 @@
       ansible.builtin.assert:
         that:
           - homelab_db_username is defined and homelab_db_username | length > 0
+          - homelab_db_username is match('^[a-z_][a-z0-9_]*$')
           - homelab_db_password is defined and homelab_db_password | length > 0
           - device_service_mqtt_password is defined
           - influxdb_admin_token is defined and influxdb_admin_token | length > 0
@@ -92,6 +94,7 @@
         argv:
           - kubectl
           - exec
+          - -i
           - -n
           - "{{ apps_namespace }}"
           - "{{ postgresql_pod }}"
@@ -99,13 +102,17 @@
           - psql
           - -U
           - postgres
-          - -c
-          - "ALTER ROLE {{ homelab_db_username }} WITH PASSWORD '{{ homelab_db_password }}'"
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ homelab_db_username | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ homelab_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       no_log: true
       delegate_to: localhost
-      changed_when: true
+      changed_when: false
 
     - name: Homelabdb Datenbank anlegen (falls nicht vorhanden)
       ansible.builtin.command:

@@ -232,9 +232,9 @@ ansible-playbook infra/playbooks/10_base.yml -l mac
 
 **Disable temporarily for maintenance** (e.g. long-running operations that could trigger the load threshold):
 ```bash
-# In host_vars or as extra var:
+# Stops and disables watchdog service + removes config files:
 ansible-playbook infra/playbooks/10_base.yml -l <node> -e "mac_tweaks_watchdog_enabled=false"
-# Re-enable:
+# Re-enable (reinstalls config, starts service):
 ansible-playbook infra/playbooks/10_base.yml -l <node>
 ```
 
