@@ -148,6 +148,10 @@
                 service: "ssh://192.168.1.61:22"
               - hostname: "grafana.furchert.ch"
                 service: "http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80"
+              - hostname: "auth.furchert.ch"
+                service: "http://auth-service.apps.svc.cluster.local:8080"
+              - hostname: "device.furchert.ch"
+                service: "http://device-service.apps.svc.cluster.local:8081"
               - service: "http_status:404"
 
     - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)
