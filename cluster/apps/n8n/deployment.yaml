@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n
+  namespace: apps
+  labels:
+    app: n8n
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: n8n
+  template:
+    metadata:
+      labels:
+        app: n8n
+    spec:
+      containers:
+        - name: n8n
+          # Pinned version with multi-arch support (linux/arm64 + linux/amd64)
+          image: n8nio/n8n:2.17.1
+          ports:
+            - containerPort: 5678
+          env:
+            - name: N8N_BASIC_AUTH_ACTIVE
+              value: "false"
+            - name: N8N_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: encryption-key
+            - name: N8N_HOST
+              value: "n8n.furchert.ch"
+            - name: N8N_PROTOCOL
+              value: "https"
+            - name: N8N_WEBHOOK_URL
+              value: "https://n8n.furchert.ch/"
+            - name: N8N_SSO_MANAGED_BY_ENV
+              value: "true"
+            - name: N8N_SSO_OIDC_LOGIN_ENABLED
+              value: "true"
+            - name: N8N_SSO_OIDC_CLIENT_ID
+              value: "n8n"
+            - name: N8N_SSO_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: homelab-auth-secrets
+                  key: n8n-client-secret
+            - name: N8N_SSO_OIDC_DISCOVERY_ENDPOINT
+              value: "https://auth.furchert.ch/.well-known/openid-configuration"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 15
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      volumes:
+        - name: n8n-data
+          persistentVolumeClaim:
+            claimName: n8n-data

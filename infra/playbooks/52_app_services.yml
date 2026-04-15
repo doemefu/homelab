@@ -15,8 +15,11 @@
 #   auth_service_grafana_client_secret:       <from Grafana → Administration → Authentication → Generic OAuth>
 #   auth_service_ha_client_secret:            <from Home Assistant → Settings → OAuth Clients>
 #   auth_service_device_service_client_secret: <choose a random secret (plain, no {noop} prefix)>
+#   auth_service_n8n_client_secret:           <choose a random secret for n8n OIDC client>
+#   n8n_encryption_key:                       <32+ char random key, e.g. openssl rand -hex 32>
 #       auth-service receives "{noop}<value>" (prefix added by playbook)
 #       device-service receives "<value>" (plain, as OAuth2 client-secret)
+#       n8n receives "<value>" (plain, as OAuth2 client-secret)
 #   auth_service_rsa_private_key: |
 #     -----BEGIN RSA PRIVATE KEY-----
 #     ...
@@ -59,6 +62,8 @@
           - auth_service_grafana_client_secret is defined and auth_service_grafana_client_secret | length > 0
           - auth_service_ha_client_secret is defined and auth_service_ha_client_secret | length > 0
           - auth_service_device_service_client_secret is defined and auth_service_device_service_client_secret | length > 0
+          - auth_service_n8n_client_secret is defined and auth_service_n8n_client_secret | length > 0
+          - n8n_encryption_key is defined and n8n_encryption_key | length > 0
           - auth_service_rsa_private_key is defined and auth_service_rsa_private_key | length > 0
           - auth_service_rsa_public_key is defined and auth_service_rsa_public_key | length > 0
         fail_msg: >-
@@ -192,6 +197,23 @@
             grafana-client-secret: "{{ auth_service_grafana_client_secret }}"
             ha-client-secret: "{{ auth_service_ha_client_secret }}"
             device-service-client-secret: "{noop}{{ auth_service_device_service_client_secret }}"
+            n8n-client-secret-authservice: "{noop}{{ auth_service_n8n_client_secret }}"
+            n8n-client-secret: "{{ auth_service_n8n_client_secret }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: N8n-secrets anlegen (encryption key)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: n8n-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            encryption-key: "{{ n8n_encryption_key }}"
       no_log: true
       delegate_to: localhost
 

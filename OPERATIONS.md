@@ -22,6 +22,7 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 
 - [Cluster Health](#cluster-health)
 - [Flux CD (GitOps)](#flux-cd-gitops)
+- [App Secrets / n8n OIDC (52_app_services.yml)](#app-secrets--n8n-oidc-52_app_servicesyml)
 - [Ports & Firewall](#ports--firewall)
 - [k3s Upgrade](#k3s-upgrade)
 - [Node Drain & Reboot](#node-drain--reboot)
@@ -60,14 +61,15 @@ Erwartete Pods pro Namespace nach M6:
 | `platform`       | cert-manager (3x), cloudflared |
 | `longhorn-system`| longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager |
 | `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
-| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-* |
+| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-*, n8n-* |
 | `homeassistant`  | home-assistant-0 (hostNetwork, port 8123 on node IP) |
 
 ---
 
 ## Flux CD (GitOps)
 
-Flux CD automates deployments for `auth-service` and `device-service`. It polls GHCR for new image tags, commits the updated tag back to the app repo, and applies the manifest to the cluster — no manual `kubectl` steps needed.
+Flux CD reconciles `auth-service`, `device-service`, and `n8n`.  
+Image automation (GHCR polling + write-back commits) currently applies to `auth-service` and `device-service`; `n8n` image updates are manual in this repo.
 
 ### Check Flux status
 
@@ -123,6 +125,42 @@ Common causes of stuck automation:
 - SSH deploy key missing or revoked → check `flux get sources git` for auth errors
 - GHCR package is private → add `ghcr-auth` secret and uncomment `secretRef` in `imagerepo.yaml`
 - Tag filter mismatch → verify new CI tags match `^main-[0-9]{8}T[0-9]{6}$`
+
+---
+
+## App Secrets / n8n OIDC (52_app_services.yml)
+
+`infra/playbooks/52_app_services.yml` provisions app-level secrets in the `apps` namespace (including n8n OIDC and encryption keys).
+
+### Required SOPS variables
+
+Set these in `infra/inventory/group_vars/all.sops.yml`:
+- `auth_service_n8n_client_secret`
+- `n8n_encryption_key`
+
+### Apply / rotate secrets
+
+```bash
+sops infra/inventory/group_vars/all.sops.yml
+ansible-playbook infra/playbooks/52_app_services.yml
+```
+
+### Verify created keys
+
+```bash
+kubectl get secret -n apps homelab-auth-secrets -o jsonpath='{.data.n8n-client-secret-authservice}' && echo
+kubectl get secret -n apps homelab-auth-secrets -o jsonpath='{.data.n8n-client-secret}' && echo
+kubectl get secret -n apps n8n-secrets -o jsonpath='{.data.encryption-key}' && echo
+```
+
+### Restart affected deployments after rotation
+
+```bash
+kubectl rollout restart deployment/auth-service -n apps
+kubectl rollout restart deployment/n8n -n apps
+```
+
+Troubleshooting note: n8n OIDC login failures or auth-service client-auth errors usually indicate stale/missing keys in `homelab-auth-secrets`/`n8n-secrets` or wrong `{noop}` prefix handling for the auth-service key.
 
 ---
 

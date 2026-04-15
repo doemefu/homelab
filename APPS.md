@@ -262,9 +262,9 @@ kubectl get nodes  # should show raspi5, raspi4, mba1, mba2 as Ready
 kubectl create namespace apps
 ```
 
-### Flux-managed apps (device-service, auth-service)
+### Flux-managed apps (device-service, auth-service, n8n)
 
-`device-service` and `auth-service` are managed by **Flux CD**. Do not `kubectl apply` their manifests manually — Flux will overwrite any manual change within the next reconciliation interval (≤10 min).
+`device-service`, `auth-service`, and `n8n` are managed by **Flux CD**. Do not `kubectl apply` their manifests manually — Flux will overwrite any manual change within the next reconciliation interval (≤10 min).
 
 **Prerequisites (one-time bootstrap):**
 
@@ -276,12 +276,18 @@ kubectl create namespace apps
 2. Create the SSH deploy key Secret for each service in the `flux-system` namespace. The key must have **write access** to the app repo (ImageUpdateAutomation pushes tag commits back to `main`). Add the private key, public key, and known_hosts to your SOPS-encrypted vars and create the Secret via an Ansible task (same pattern as other Secrets in `50_apps_infra.yml`):
    ```bash
    # Secret name expected by source.yaml:
-   # auth-service:   auth-service-flux-auth
-   # device-service: device-service-flux-auth
+    # auth-service:   auth-service-flux-auth
+    # device-service: device-service-flux-auth
    # Fields: identity (SSH private key), identity.pub, known_hosts
    ```
 
-**Deploying a new version:** Push to `main` in the app repo. CI builds a new image with a `main-YYYYMMDDTHHmmss` tag. Flux detects it within 5 minutes, commits the updated tag to the app repo, and the `Kustomization` applies the change to the cluster.
+**Deploying a new version:**  
+- `auth-service` / `device-service`: Push to `main` in the app repo. CI builds a `main-YYYYMMDDTHHmmss` image tag, Flux Image Automation updates the app repo, then Flux applies the rollout.  
+- `n8n`: image updates are manual by editing `cluster/apps/n8n/deployment.yaml` in this repo (no ImageUpdateAutomation configured).
+
+Before reconciling `n8n`, ensure `infra/playbooks/52_app_services.yml` has created:
+- `homelab-auth-secrets` keys `n8n-client-secret-authservice` and `n8n-client-secret`
+- `n8n-secrets` key `encryption-key`
 
 **Checking status:**
 ```bash

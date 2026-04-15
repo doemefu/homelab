@@ -152,6 +152,8 @@
                 service: "http://auth-service.apps.svc.cluster.local:8080"
               - hostname: "device.furchert.ch"
                 service: "http://device-service.apps.svc.cluster.local:8081"
+              - hostname: "n8n.furchert.ch"
+                service: "http://n8n.apps.svc.cluster.local:80"
               - service: "http_status:404"
 
     - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)

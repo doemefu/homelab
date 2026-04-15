@@ -63,3 +63,7 @@ influxdb_admin_token: "<generieren: openssl rand -hex 32>"
 # Sentry DSN — obtain from sentry.io project settings → Client Keys
 # One DSN shared across all three homelab microservices (auth, device, data)
 sentry_dsn: "https://REPLACE_ME@oXXXXXXXX.ingest.sentry.io/XXXXXXXX"
+
+# n8n OIDC client credentials and encryption key
+auth_service_n8n_client_secret: "CHANGE_ME_generate_secure_password"
+n8n_encryption_key: "CHANGE_ME_generate_secure_key_openssl_rand_hex_32"
