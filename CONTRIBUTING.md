@@ -55,7 +55,7 @@ sops -e -i infra/inventory/group_vars/all.sops.yml
 > **Pflichtfelder für `50_apps_infra.yml`:** `postgresql_password`, `influxdb_admin_password` und
 > `influxdb_admin_token` müssen in `all.sops.yml` gesetzt sein — das Playbook schlägt ohne diese Werte fehl.
 
-> **Pflichtfelder für `52_app_services.yml`:** `auth_service_n8n_client_secret` und
+> **Pflichtfelder für `59_app_services.yml`:** `auth_service_n8n_client_secret` und
 > `n8n_encryption_key` müssen in `all.sops.yml` gesetzt sein.
 > Empfehlung: `n8n_encryption_key` mit `openssl rand -hex 32` generieren.
 
@@ -195,4 +195,6 @@ See `cluster/apps/device-service/` as a reference implementation.
 - **IPs**: static or DHCP-reserved — k3s requires stable node IPs
 - **No `latest`**: all versions pinned in inventory or Helm values
 - **group_vars/k3s_server.yml**: overrides `storage_*` defaults for raspi5 (Restic enabled, repo path, backup paths). When adding new backup paths, edit this file — not `storage/defaults/main.yml`.
-- **n8n secrets**: do not add `cluster/apps/n8n/secret.yaml`; n8n secrets are provisioned via `infra/playbooks/52_app_services.yml` from SOPS variables.
+- **Standard app ownership**: standard infra apps are Ansible-managed unless explicitly listed as Flux-managed.
+- **n8n ownership guard**: n8n base resources are Ansible-managed via `infra/playbooks/52_n8n.yml`; do not add `n8n` back to `cluster/apps/kustomization.yaml`.
+- **n8n secrets**: do not add `cluster/apps/n8n/secret.yaml`; n8n secrets are provisioned via `infra/playbooks/59_app_services.yml` from SOPS variables.

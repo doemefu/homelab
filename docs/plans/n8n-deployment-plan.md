@@ -9,7 +9,7 @@ This plan outlines the deployment of n8n workflow automation tool in the Kuberne
 - **Exposure**: Cloudflare Tunnel (no Kubernetes Ingress needed)
 - **Authentication**: OIDC via homelab-auth-service (Spring Authorization Server)
 - **Persistence**: 5Gi Longhorn PVC for workflows and SQLite data
-- **GitOps**: FluxCD for automatic deployment
+- **Deployment ownership**: Ansible-managed (`52_n8n.yml` for resources, `59_app_services.yml` for secrets)
 
 ## Components Created
 
@@ -24,12 +24,12 @@ This plan outlines the deployment of n8n workflow automation tool in the Kuberne
   - Webhook URL configuration
   - Resource limits
 - `service.yaml`: ClusterIP service exposing port 80
-- `kustomization.yaml`: FluxCD kustomization
+- `kustomization.yaml`: local manifest grouping for n8n resources (not Flux-managed)
 
 ### 2. Configuration Updates
-- `cluster/apps/kustomization.yaml`: Added n8n to FluxCD resources
+- `infra/playbooks/52_n8n.yml`: Applies n8n PVC/Deployment/Service manifests
 - `infra/playbooks/40_platform.yml`: Added n8n to Cloudflare Tunnel ingress
-- `infra/playbooks/52_app_services.yml`: Added n8n client secrets + n8n-secrets creation
+- `infra/playbooks/59_app_services.yml`: Added n8n client secrets + n8n-secrets creation
 - `infra/inventory/group_vars/all.sops.yml.example`: Documented n8n client secret + encryption key
 
 ## Critical Configuration Details
@@ -106,7 +106,7 @@ auth_service_n8n_client_secret: "<choose_a_random_secret>"
 n8n_encryption_key: "<openssl rand -hex 32>"
 ```
 
-The playbook `52_app_services.yml` will automatically:
+The playbook `59_app_services.yml` will automatically:
 1. Write `n8n-client-secret-authservice` as `{noop}<secret>` for auth-service
 2. Write `n8n-client-secret` as raw `<secret>` for n8n
 3. Create/update `n8n-secrets` with `n8n_encryption_key`
@@ -125,25 +125,32 @@ auth_service_n8n_client_secret: "<your_random_secret>"
 n8n_encryption_key: "<openssl_rand_hex_32>"
 ```
 
-### 2. Run app services playbook
+### 2. Deploy n8n resources
 
-This creates the necessary secrets:
+This applies the n8n instance manifests:
 ```bash
-ansible-playbook infra/playbooks/52_app_services.yml
+ansible-playbook infra/playbooks/52_n8n.yml
 ```
 
-### 3. Update Cloudflare Tunnel
+### 3. Run app services playbook
+
+This creates/updates the necessary secrets:
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+```
+
+### 4. Update Cloudflare Tunnel
 ```bash
 ansible-playbook infra/playbooks/40_platform.yml
 ```
 
-### 4. Add DNS Record
+### 5. Add DNS Record
 - Cloudflare Dashboard → DNS → Add CNAME
   - Name: `n8n`
   - Target: `<tunnel-id>.cfargotunnel.com`
   - Proxy: enabled
 
-### 5. Configure OIDC client in auth-service
+### 6. Configure OIDC client in auth-service
 
 The auth-service configuration needs to include n8n as a registered OIDC client.
 

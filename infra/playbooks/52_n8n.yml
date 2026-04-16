@@ -1,0 +1,45 @@
+---
+# n8n deployment (instance resources only)
+# Namespace: apps
+#
+# Prerequisites:
+#   - 50_apps_infra.yml completed (apps namespace + base infra)
+#   - Run 59_app_services.yml after this playbook to create/rotate n8n/auth secrets
+#
+# Run: ansible-playbook infra/playbooks/52_n8n.yml
+- name: App Deployment — n8n
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    apps_namespace: apps
+
+  tasks:
+    - name: Apps Namespace anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ apps_namespace }}"
+      delegate_to: localhost
+
+    - name: N8n PVC anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/n8n/pvc.yaml"
+      delegate_to: localhost
+
+    - name: N8n Deployment anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/n8n/deployment.yaml"
+      delegate_to: localhost
+
+    - name: N8n Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/n8n/service.yaml"
+      delegate_to: localhost

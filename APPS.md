@@ -262,9 +262,9 @@ kubectl get nodes  # should show raspi5, raspi4, mba1, mba2 as Ready
 kubectl create namespace apps
 ```
 
-### Flux-managed apps (device-service, auth-service, n8n)
+### Flux-managed apps (device-service, auth-service)
 
-`device-service`, `auth-service`, and `n8n` are managed by **Flux CD**. Do not `kubectl apply` their manifests manually — Flux will overwrite any manual change within the next reconciliation interval (≤10 min).
+`device-service` and `auth-service` are managed by **Flux CD**. Do not `kubectl apply` their manifests manually — Flux will overwrite any manual change within the next reconciliation interval (≤10 min).
 
 **Prerequisites (one-time bootstrap):**
 
@@ -283,11 +283,23 @@ kubectl create namespace apps
 
 **Deploying a new version:**  
 - `auth-service` / `device-service`: Push to `main` in the app repo. CI builds a `main-YYYYMMDDTHHmmss` image tag, Flux Image Automation updates the app repo, then Flux applies the rollout.  
-- `n8n`: image updates are manual by editing `cluster/apps/n8n/deployment.yaml` in this repo (no ImageUpdateAutomation configured).
 
-Before reconciling `n8n`, ensure `infra/playbooks/52_app_services.yml` has created:
-- `homelab-auth-secrets` keys `n8n-client-secret-authservice` and `n8n-client-secret`
-- `n8n-secrets` key `encryption-key`
+### Ansible-managed app: n8n
+
+n8n is managed via Ansible playbooks, not Flux reconciliation.
+
+```bash
+ansible-playbook infra/playbooks/52_n8n.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+```
+
+For secret rotation or updates, re-run:
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+```
+
+Do not expect Flux reconcile to create or update n8n resources.
 
 **Checking status:**
 ```bash

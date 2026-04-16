@@ -3,4 +3,3 @@ kind: Kustomization
 resources:
   - device-service
   - auth-service
-  - n8n

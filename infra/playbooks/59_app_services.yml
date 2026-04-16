@@ -36,7 +36,7 @@
 #   cat /tmp/auth-rsa-pub.pem    # → auth_service_rsa_public_key
 #   shred -u /tmp/auth-rsa.pem /tmp/auth-rsa-pub.pem
 #
-# Run: ansible-playbook infra/playbooks/52_app_services.yml
+# Run: ansible-playbook infra/playbooks/59_app_services.yml
 
 - name: App Services — database init + K8s secrets
   hosts: k3s_server
@@ -57,7 +57,7 @@
           - homelab_db_username is defined and homelab_db_username | length > 0
           - homelab_db_username is match('^[a-z_][a-z0-9_]*$')
           - homelab_db_password is defined and homelab_db_password | length > 0
-          - device_service_mqtt_password is defined
+          - device_service_mqtt_password is defined and device_service_mqtt_password | length > 0
           - influxdb_admin_token is defined and influxdb_admin_token | length > 0
           - auth_service_grafana_client_secret is defined and auth_service_grafana_client_secret | length > 0
           - auth_service_ha_client_secret is defined and auth_service_ha_client_secret | length > 0
@@ -121,6 +121,7 @@
         KUBECONFIG: "{{ kubeconfig }}"
       no_log: true
       delegate_to: localhost
+      # Password rotation is intentionally always enforced; SQL output is not a reliable change signal here.
       changed_when: false
 
     - name: Homelabdb Datenbank anlegen (falls nicht vorhanden)

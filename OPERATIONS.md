@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M6 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant) — wird mit jedem Milestone ergänzt.
+> **Stand:** M7 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml with secrets from 59_app_services.yml) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -22,7 +22,8 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 
 - [Cluster Health](#cluster-health)
 - [Flux CD (GitOps)](#flux-cd-gitops)
-- [App Secrets / n8n OIDC (52_app_services.yml)](#app-secrets--n8n-oidc-52_app_servicesyml)
+- [n8n Deployment (52_n8n.yml)](#n8n-deployment-52_n8nyml)
+- [App Secrets / n8n OIDC (59_app_services.yml)](#app-secrets--n8n-oidc-59_app_servicesyml)
 - [Ports & Firewall](#ports--firewall)
 - [k3s Upgrade](#k3s-upgrade)
 - [Node Drain & Reboot](#node-drain--reboot)
@@ -53,7 +54,7 @@ kubectl get events -A --sort-by='.lastTimestamp' | tail -30
 kubectl get ns
 ```
 
-Erwartete Pods pro Namespace nach M6:
+Erwartete Pods pro Namespace nach M7:
 
 | Namespace        | Pods |
 |------------------|------|
@@ -68,8 +69,8 @@ Erwartete Pods pro Namespace nach M6:
 
 ## Flux CD (GitOps)
 
-Flux CD reconciles `auth-service`, `device-service`, and `n8n`.  
-Image automation (GHCR polling + write-back commits) currently applies to `auth-service` and `device-service`; `n8n` image updates are manual in this repo.
+Flux CD reconciles `auth-service` and `device-service`.
+Image automation (GHCR polling + write-back commits) applies to `auth-service` and `device-service`.
 
 ### Check Flux status
 
@@ -128,9 +129,24 @@ Common causes of stuck automation:
 
 ---
 
-## App Secrets / n8n OIDC (52_app_services.yml)
+## n8n Deployment (52_n8n.yml)
 
-`infra/playbooks/52_app_services.yml` provisions app-level secrets in the `apps` namespace (including n8n OIDC and encryption keys).
+`infra/playbooks/52_n8n.yml` deploys the n8n instance resources in namespace `apps`:
+- `cluster/apps/n8n/pvc.yaml`
+- `cluster/apps/n8n/deployment.yaml`
+- `cluster/apps/n8n/service.yaml`
+
+```bash
+ansible-playbook infra/playbooks/52_n8n.yml
+```
+
+`59_app_services.yml` can be run after `52_n8n.yml` to create or rotate n8n/auth secrets.
+
+---
+
+## App Secrets / n8n OIDC (59_app_services.yml)
+
+`infra/playbooks/59_app_services.yml` provisions app-level secrets in the `apps` namespace (including n8n OIDC and encryption keys).
 
 ### Required SOPS variables
 
@@ -142,7 +158,7 @@ Set these in `infra/inventory/group_vars/all.sops.yml`:
 
 ```bash
 sops infra/inventory/group_vars/all.sops.yml
-ansible-playbook infra/playbooks/52_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml
 ```
 
 ### Verify created keys
