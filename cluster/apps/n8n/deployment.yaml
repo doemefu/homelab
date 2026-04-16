@@ -15,6 +15,10 @@ spec:
       labels:
         app: n8n
     spec:
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: n8n
           # Pinned version with multi-arch support (linux/arm64 + linux/amd64)
@@ -22,6 +26,8 @@ spec:
           ports:
             - containerPort: 5678
           env:
+            - name: N8N_PORT
+              value: "5678"
             - name: N8N_BASIC_AUTH_ACTIVE
               value: "false"
             - name: N8N_ENCRYPTION_KEY
@@ -82,6 +88,10 @@ spec:
             limits:
               cpu: 1000m
               memory: 1Gi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
       volumes:
         - name: n8n-data
           persistentVolumeClaim:
