@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: apps
+data:
+  config.yaml: |
+    model_list:
+      - model_name: mistral-large
+        litellm_params:
+          model: mistral/mistral-large-latest
+          api_key: os.environ/MISTRAL_API_KEY
+
+      - model_name: mistral-small
+        litellm_params:
+          model: mistral/mistral-small-latest
+          api_key: os.environ/MISTRAL_API_KEY
+
+      - model_name: devstral
+        litellm_params:
+          model: mistral/devstral-latest
+          api_key: os.environ/MISTRAL_API_KEY
+
+      - model_name: magistral
+        litellm_params:
+          model: mistral/magistral-medium-latest
+          api_key: os.environ/MISTRAL_API_KEY
+          
+      - model_name: codestral
+        litellm_params:
+          model: mistral/codestral-latest
+          api_key: os.environ/MISTRAL_CODESTRAL_KEY
+
+      #- model_name: claude-3-5-sonnet
+       # litellm_params:
+       #   model: anthropic/claude-3-5-sonnet-20241022
+       #   api_key: os.environ/ANTHROPIC_API_KEY
+
+      # Placeholder — uncomment when Ollama is deployed on MacBook Air node
+      # - model_name: ollama/llama3
+      #   litellm_params:
+      #     model: ollama/llama3
+      #     api_base: http://ollama.apps.svc.cluster.local:11434
+
+    general_settings:
+      # os.environ/ syntax: LiteLLM reads value from env var at runtime.
+      # The literal key values must NEVER appear here — they live in litellm-secrets only.
+      master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: os.environ/DATABASE_URL
+      store_model_in_db: false
+      sso_callback_url: https://ai.furchert.ch/sso/callback
+      generic_client_id: litellm
+      generic_client_secret: os.environ/LITELLM_OIDC_CLIENT_SECRET
+      generic_authorization_endpoint: https://auth.furchert.ch/oauth2/authorize
+      generic_token_endpoint: https://auth.furchert.ch/oauth2/token
+      generic_userinfo_endpoint: https://auth.furchert.ch/userinfo
+      default_user_params:
+        user_role: admin

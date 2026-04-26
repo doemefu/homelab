@@ -1,5 +1,5 @@
 ---
-# App Services — K8s Secrets for device-service and auth-service
+# App Services — K8s Secrets for device-service, auth-service, and LiteLLM
 # Namespace: apps
 #
 # Prerequisites:
@@ -28,6 +28,14 @@
 #     -----BEGIN PUBLIC KEY-----
 #     ...
 #     -----END PUBLIC KEY-----
+#
+# LiteLLM variables (generate with commands in all.sops.yml.example):
+#   litellm_master_key:     sk-<openssl rand -hex 16>   # Bearer token for API access
+#   litellm_salt_key:       <openssl rand -hex 32>       # WARNING: permanent — never rotate after first use
+#   litellm_db_password:    <openssl rand -hex 16>       # Postgres password for litellm user
+#   anthropic_api_key:      <from console.anthropic.com>
+#   mistral_api_key:        <from console.mistral.ai>
+#   litellm_client_secret:  <openssl rand -hex 32>       # OIDC client secret for SSO UI login
 #
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
@@ -200,6 +208,7 @@
             device-service-client-secret: "{noop}{{ auth_service_device_service_client_secret }}"
             n8n-client-secret-authservice: "{noop}{{ auth_service_n8n_client_secret }}"
             n8n-client-secret: "{{ auth_service_n8n_client_secret }}"
+            litellm-client-secret-authservice: "{noop}{{ litellm_client_secret }}"
       no_log: true
       delegate_to: localhost
 
@@ -231,5 +240,113 @@
           stringData:
             private.pem: "{{ auth_service_rsa_private_key }}"
             public.pem: "{{ auth_service_rsa_public_key }}"
+      no_log: true
+      delegate_to: localhost
+
+    # --- LiteLLM: PostgreSQL database + secrets ---
+
+    - name: LiteLLM — Prüfen dass alle benötigten SOPS-Variablen gesetzt sind
+      ansible.builtin.assert:
+        that:
+          - litellm_master_key | default('') | length > 0
+          - litellm_master_key is match('^sk-')
+          - litellm_salt_key | default('') | length > 0
+          - litellm_db_password | default('') | length > 0
+          - mistral_api_key | default('') | length > 0
+          - litellm_client_secret | default('') | length > 0
+        fail_msg: >-
+          One or more required LiteLLM SOPS variables are missing or invalid.
+          litellm_master_key must start with 'sk-'.
+          Add them to infra/inventory/group_vars/all.sops.yml — see all.sops.yml.example for commands.
+      delegate_to: localhost
+
+    - name: LiteLLM PostgreSQL user anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='litellm'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE litellm WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_litellm_create_user
+      changed_when: "'CREATE ROLE' in pg_litellm_create_user.stdout"
+
+    - name: LiteLLM PostgreSQL user Passwort setzen/aktualisieren
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - psql
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ 'litellm' | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ litellm_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      changed_when: false
+
+    - name: LiteLLM Datenbank anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='litellm'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE litellm OWNER litellm"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_litellm_create_db
+      changed_when: "'CREATE DATABASE' in pg_litellm_create_db.stdout"
+
+    - name: LiteLLM-secrets anlegen (API keys, master key, salt key, DB URL)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: litellm-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            LITELLM_MASTER_KEY: "{{ litellm_master_key }}"
+            LITELLM_SALT_KEY: "{{ litellm_salt_key }}"
+            DATABASE_URL: "postgresql://litellm:{{ litellm_db_password }}@postgresql.apps.svc.cluster.local:5432/litellm"
+            ANTHROPIC_API_KEY: "{{ anthropic_api_key | default('') }}"
+            MISTRAL_API_KEY: "{{ mistral_api_key }}"
+            LITELLM_OIDC_CLIENT_SECRET: "{{ litellm_client_secret }}"
       no_log: true
       delegate_to: localhost

@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M7 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml with secrets from 59_app_services.yml) — wird mit jedem Milestone ergänzt.
+> **Stand:** M8 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml + LiteLLM v1.83.3-stable AI gateway at https://ai.furchert.ch) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -23,6 +23,7 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 - [Cluster Health](#cluster-health)
 - [Flux CD (GitOps)](#flux-cd-gitops)
 - [n8n Deployment (52_n8n.yml)](#n8n-deployment-52_n8nyml)
+- [LiteLLM AI Gateway (53_litellm.yml)](#litellm-ai-gateway-53_litellmyml)
 - [App Secrets / n8n OIDC (59_app_services.yml)](#app-secrets--n8n-oidc-59_app_servicesyml)
 - [Ports & Firewall](#ports--firewall)
 - [k3s Upgrade](#k3s-upgrade)
@@ -62,7 +63,7 @@ Erwartete Pods pro Namespace nach M7:
 | `platform`       | cert-manager (3x), cloudflared |
 | `longhorn-system`| longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager |
 | `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
-| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-*, n8n-* |
+| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-*, n8n-*, litellm-* |
 | `homeassistant`  | home-assistant-0 (hostNetwork, port 8123 on node IP) |
 
 ---
@@ -144,9 +145,88 @@ ansible-playbook infra/playbooks/52_n8n.yml
 
 ---
 
+## LiteLLM AI Gateway (53_litellm.yml)
+
+LiteLLM v1.83.3-stable is deployed in the `apps` namespace as an OpenAI-compatible AI proxy.
+
+- **Public endpoint:** `https://ai.furchert.ch` (Cloudflare Tunnel)
+- **Internal endpoint:** `litellm.apps.svc.cluster.local:4000`
+- **Routes:** `mistral-large-2411`, `mistral-small-2501`, `claude-3-5-sonnet-20241022`
+- **Auth:** bearer token — `Authorization: Bearer <LITELLM_MASTER_KEY>`
+- **Dashboard:** `https://ai.furchert.ch/ui`
+- **Postgres DB:** `litellm` database on the shared `postgresql` instance in `apps`
+
+### Deploy / redeploy
+
+Secrets must be bootstrapped before manifests are applied:
+
+```bash
+sops infra/inventory/group_vars/all.sops.yml   # add/verify litellm_* vars
+ansible-playbook infra/playbooks/59_app_services.yml   # DB init + Secret
+ansible-playbook infra/playbooks/53_litellm.yml        # manifests + rollout wait
+ansible-playbook infra/playbooks/40_platform.yml       # CF Tunnel ingress (add ai.furchert.ch)
+```
+
+### Required SOPS variables
+
+Set in `infra/inventory/group_vars/all.sops.yml` (see `all.sops.yml.example` for generation commands):
+
+| Variable | Notes |
+|---|---|
+| `litellm_master_key` | Starts with `sk-`. This is the bearer token — share with Claude Code as `ANTHROPIC_AUTH_TOKEN`. |
+| `litellm_salt_key` | **Permanent — never rotate after first use.** Used to encrypt virtual keys in the DB. Changing it makes all stored keys unrecoverable. |
+| `litellm_db_password` | Password for the `litellm` Postgres user. |
+| `anthropic_api_key` | From `console.anthropic.com`. |
+| `mistral_api_key` | From `console.mistral.ai`. Leave as `""` to disable Mistral routes. |
+
+### Claude Code integration
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://ai.furchert.ch",
+    "ANTHROPIC_AUTH_TOKEN": "sk-<litellm_master_key>",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
+  }
+}
+```
+
+### Verify / smoke test
+
+```bash
+kubectl get pods -n apps -l app=litellm
+kubectl get secret litellm-secrets -n apps
+
+# Full smoke test (requires LITELLM_MASTER_KEY env var):
+LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
+  ./scripts/smoke-test-litellm.sh
+```
+
+### Upgrade runbook
+
+1. Update image tag in `cluster/apps/litellm/deployment.yaml` to new pinned version (never use `latest`)
+2. Check LiteLLM release notes for the new version — avoid versions with known malicious releases (historical: 1.82.7, 1.82.8)
+3. Re-run `ansible-playbook infra/playbooks/53_litellm.yml`
+4. Confirm rollout: `kubectl rollout status deployment/litellm -n apps`
+
+### Troubleshooting
+
+- **Pod not starting:** ensure `litellm-secrets` Secret exists (`kubectl get secret litellm-secrets -n apps`) and the `litellm` DB and user exist in PostgreSQL
+- **401 on requests:** verify `LITELLM_MASTER_KEY` matches the `sk-*` value in the Secret
+- **Models not in `/models` response:** check `configmap.yaml` is mounted correctly — `kubectl exec -n apps <pod> -- cat /app/proxy_config.yaml`
+- **DB migration slow (first start):** liveness probe has 120s initial delay; wait up to 5 minutes on first deploy
+
+### Fallback (revert to direct Anthropic API)
+
+Remove or comment out the `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` overrides in `~/.claude/settings.json`. Claude Code will revert to calling `api.anthropic.com` directly.
+
+---
+
 ## App Secrets / n8n OIDC (59_app_services.yml)
 
-`infra/playbooks/59_app_services.yml` provisions app-level secrets in the `apps` namespace (including n8n OIDC and encryption keys).
+`infra/playbooks/59_app_services.yml` provisions app-level secrets in the `apps` namespace (including n8n OIDC and encryption keys, and LiteLLM Postgres + API key secrets).
 
 ### Required SOPS variables
 
@@ -853,6 +933,7 @@ Voraussetzungen in `all.sops.yml`: `postgresql_password`, `influxdb_admin_passwo
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 |
 | InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 |
 | Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 |
+| LiteLLM       | `litellm.apps.svc.cluster.local`            | 4000 |
 
 Mosquitto ist zusätzlich im LAN über Port 1883 via LoadBalancer erreichbar (k3s ServiceLB).
 

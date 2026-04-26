@@ -31,6 +31,7 @@ Die folgenden Shared Services laufen im `apps` Namespace und können von App-Dep
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 | `:9187/metrics` (postgres-exporter sidecar) | Single Replica; Passwort aus SOPS `postgresql_password` |
 | InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 | `:80/metrics` (native) | Org `homelab`, Bucket `default`, 30d Retention; Token aus SOPS `influxdb_admin_token` |
 | Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 | `mosquitto-metrics.apps:9234/metrics` (exporter) | Auch LAN-seitig via LoadBalancer Port 1883; anonym in M6 |
+| LiteLLM       | `litellm.apps.svc.cluster.local`            | 4000 | — | OpenAI-compatible AI proxy; Auth: `Authorization: Bearer <LITELLM_MASTER_KEY>`; extern: `https://ai.furchert.ch` |
 
 **Wichtig:** Mosquitto ist in M6 ohne Authentifizierung — nur LAN-seitiger Zugriff. Nicht extern exponieren ohne `password_file` (Post-M6).
 
@@ -300,6 +301,18 @@ ansible-playbook infra/playbooks/59_app_services.yml
 ```
 
 Do not expect Flux reconcile to create or update n8n resources.
+
+### Ansible-managed app: LiteLLM
+
+LiteLLM is managed via Ansible playbooks, not Flux reconciliation. Secrets must be bootstrapped before manifests are applied.
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml   # DB init + Secret
+ansible-playbook infra/playbooks/53_litellm.yml        # deploy manifests
+ansible-playbook infra/playbooks/40_platform.yml       # CF Tunnel ingress (ai.furchert.ch)
+```
+
+Do not add `litellm` to `cluster/apps/kustomization.yaml` — Flux must not reconcile it.
 
 **Checking status:**
 ```bash

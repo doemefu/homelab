@@ -37,6 +37,7 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | External    | Cloudflare Tunnel                           |
 | Observability | kube-prometheus-stack (Prometheus + Grafana + Alertmanager) |
 | GitOps      | Flux CD (image automation + app deployments) |
+| AI Gateway  | LiteLLM v1.83.3-stable (OpenAI-compatible proxy) |
 | Backups     | Restic → USB/SSD (pi5)                      |
 
 ### Pinned Versions
@@ -51,6 +52,7 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | Flux CD               | v2.x (bootstrapped via `flux` CLI) |
 | postgres-exporter     | v0.15.0        |
 | mosquitto-exporter    | v0.6.3         |
+| LiteLLM               | v1.83.3-stable |
 
 ---
 
@@ -120,10 +122,11 @@ export KUBECONFIG=~/.kube/homelab.yaml
 | `50_apps_infra.yml` | PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 in `apps` namespace | M6 |
 | `51_homeassistant.yml` | Home Assistant in `homeassistant` namespace (hostNetwork) | M6 |
 | `52_n8n.yml` | n8n instance deployment (PVC, Deployment, Service) in `apps` namespace | M7+ |
-| `59_app_services.yml` | App-level secrets + DB bootstrap for auth-service/device-service/n8n | M7+ |
+| `53_litellm.yml` | LiteLLM AI gateway deployment (ConfigMap, Deployment, Service) in `apps` namespace | M8+ |
+| `59_app_services.yml` | App-level secrets + DB bootstrap for auth-service/device-service/n8n/litellm | M7+ |
 
-For n8n run order, apply instance resources first and secrets second:
-`ansible-playbook infra/playbooks/52_n8n.yml && ansible-playbook infra/playbooks/59_app_services.yml`
+For n8n: `ansible-playbook infra/playbooks/52_n8n.yml && ansible-playbook infra/playbooks/59_app_services.yml`
+For LiteLLM: secrets must be bootstrapped first — `ansible-playbook infra/playbooks/59_app_services.yml && ansible-playbook infra/playbooks/53_litellm.yml`
 Re-run `59_app_services.yml` for secret rotation/refresh.
 
 Run a playbook against all nodes:
@@ -154,6 +157,7 @@ ansible-playbook infra/playbooks/10_base.yml --check --diff -l raspi5
 | M5 | ✅ done | Production-ready: APPS.md complete, examples/ created, Grafana PVC, Alertmanager → Discord |
 | M6 | ✅ done | App infrastructure: PostgreSQL 17, InfluxDB 2, Mosquitto 2 (`apps` ns); Home Assistant (`homeassistant` ns, hostNetwork, http://node-ip:8123) |
 | M7 | ✅ done | Flux CD GitOps: automated deployments for auth-service + device-service via ImagePolicy + ImageUpdateAutomation |
+| M8 | ✅ done | LiteLLM AI gateway v1.83.3-stable (`apps` ns); public at `https://ai.furchert.ch`; routes: mistral-large-2411, mistral-small-2501, claude-3-5-sonnet-20241022; Postgres DB `litellm` on shared postgresql instance |
 
 ---
 
@@ -193,7 +197,7 @@ infra/
   inventory/
     hosts.yml               # Node IPs and group assignments
     group_vars/             # Variables per group (all, k3s_server, mac, …)
-  playbooks/                # 00_bootstrap → 10_base → 20_k3s → 30_longhorn → 40_platform → 50_apps_infra → 51_homeassistant → 52_n8n → 59_app_services
+  playbooks/                # 00_bootstrap → 10_base → 20_k3s → 30_longhorn → 40_platform → 50_apps_infra → 51_homeassistant → 52_n8n → 53_litellm → 59_app_services
   roles/
     base/                   # Hostname, timezone, NTP, packages, unattended-upgrades
     hardening/              # UFW, fail2ban, SSH hardening
@@ -211,6 +215,7 @@ cluster/
     device-service/         # source, sync, imagerepo, imagepolicy, imageupdate CRDs
     auth-service/           # source, sync, imagerepo, imagepolicy, imageupdate CRDs
     n8n/                    # n8n manifests (deployment, service, pvc) applied by 52_n8n.yml
+    litellm/                # LiteLLM manifests (configmap, deployment, service) applied by 53_litellm.yml
   platform/                 # Helm chart references
   values/                   # Pinned Helm values (kube-prometheus-stack, cloudflared, longhorn,
                             #   influxdb2, home-assistant)

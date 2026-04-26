@@ -38,6 +38,15 @@
         binary_path: "{{ helm_binary }}"
       delegate_to: localhost
 
+    - name: Helm Repo Cache aktualisieren
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary }}"
+          - repo
+          - update
+      delegate_to: localhost
+      changed_when: false
+
     - name: Cert-manager deployen
       kubernetes.core.helm:
         name: cert-manager
@@ -154,6 +163,8 @@
                 service: "http://device-service.apps.svc.cluster.local:8081"
               - hostname: "n8n.furchert.ch"
                 service: "http://n8n.apps.svc.cluster.local:80"
+              - hostname: "ai.furchert.ch"
+                service: "http://litellm.apps.svc.cluster.local:4000"
               - service: "http_status:404"
 
     - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)

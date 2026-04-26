@@ -67,3 +67,29 @@ sentry_dsn: "https://REPLACE_ME@oXXXXXXXX.ingest.sentry.io/XXXXXXXX"
 # n8n OIDC client credentials and encryption key
 auth_service_n8n_client_secret: "CHANGE_ME_generate_secure_password"
 n8n_encryption_key: "CHANGE_ME_generate_secure_key_openssl_rand_hex_32"
+
+# LiteLLM AI Gateway credentials
+# litellm_master_key: bearer token for API access — share with Claude Code (ANTHROPIC_AUTH_TOKEN)
+#   Format: must start with "sk-"
+#   Generate: echo "sk-$(openssl rand -hex 16)"
+litellm_master_key: "sk-CHANGE_ME_openssl_rand_hex_16"
+
+# litellm_salt_key: used to encrypt virtual keys stored in the database.
+#   WARNING: this value is PERMANENT — changing it after first use makes all stored keys unrecoverable.
+#   Generate: openssl rand -hex 32
+litellm_salt_key: "CHANGE_ME_openssl_rand_hex_32"
+
+# litellm_db_password: Postgres password for the litellm database user
+#   Generate: openssl rand -hex 16
+litellm_db_password: "CHANGE_ME_openssl_rand_hex_16"
+
+# Anthropic API key — from https://console.anthropic.com/settings/keys
+anthropic_api_key: "sk-ant-CHANGE_ME"
+
+# Mistral API key — from https://console.mistral.ai/api-keys
+# Leave as empty string ("") to disable Mistral routing without breaking the deployment.
+mistral_api_key: "CHANGE_ME_mistral_api_key"
+
+# LiteLLM OIDC client secret — shared with auth-service for SSO UI login
+# Generate: openssl rand -hex 32
+litellm_client_secret: "CHANGE_ME_openssl_rand_hex_32"

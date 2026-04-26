@@ -59,6 +59,11 @@ sops -e -i infra/inventory/group_vars/all.sops.yml
 > `n8n_encryption_key` müssen in `all.sops.yml` gesetzt sein.
 > Empfehlung: `n8n_encryption_key` mit `openssl rand -hex 32` generieren.
 
+> **Pflichtfelder für `53_litellm.yml` / `59_app_services.yml` (LiteLLM):** `litellm_master_key`,
+> `litellm_salt_key`, `litellm_db_password`, `anthropic_api_key`, und `mistral_api_key` müssen in
+> `all.sops.yml` gesetzt sein. `litellm_salt_key` einmalig generieren (`openssl rand -hex 32`) und
+> **niemals** nachträglich rotieren — ein Wechsel macht alle gespeicherten Virtual Keys unlesbar.
+
 ---
 
 ## Ansible Development Workflow
@@ -198,3 +203,5 @@ See `cluster/apps/device-service/` as a reference implementation.
 - **Standard app ownership**: standard infra apps are Ansible-managed unless explicitly listed as Flux-managed.
 - **n8n ownership guard**: n8n base resources are Ansible-managed via `infra/playbooks/52_n8n.yml`; do not add `n8n` back to `cluster/apps/kustomization.yaml`.
 - **n8n secrets**: do not add `cluster/apps/n8n/secret.yaml`; n8n secrets are provisioned via `infra/playbooks/59_app_services.yml` from SOPS variables.
+- **LiteLLM ownership guard**: LiteLLM resources are Ansible-managed via `infra/playbooks/53_litellm.yml`; do not add `litellm` to `cluster/apps/kustomization.yaml` — Flux must not reconcile it.
+- **LiteLLM salt key**: `litellm_salt_key` must never be rotated after initial provisioning. Rotation invalidates all virtual keys stored in the LiteLLM database.
