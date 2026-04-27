@@ -60,9 +60,10 @@ sops -e -i infra/inventory/group_vars/all.sops.yml
 > Empfehlung: `n8n_encryption_key` mit `openssl rand -hex 32` generieren.
 
 > **Pflichtfelder für `53_litellm.yml` / `59_app_services.yml` (LiteLLM):** `litellm_master_key`,
-> `litellm_salt_key`, `litellm_db_password`, `anthropic_api_key`, und `mistral_api_key` müssen in
+> `litellm_salt_key`, `litellm_db_password`, `mistral_api_key`, `mistral_codestral_api_key`, und
+> `litellm_client_secret` müssen in
 > `all.sops.yml` gesetzt sein. `litellm_salt_key` einmalig generieren (`openssl rand -hex 32`) und
-> **niemals** nachträglich rotieren — ein Wechsel macht alle gespeicherten Virtual Keys unlesbar.
+> **niemals** nachträglich rotieren; dies gilt nur für die Erstbereitstellung — ein Wechsel macht alle gespeicherten Virtual Keys unlesbar.
 
 ---
 

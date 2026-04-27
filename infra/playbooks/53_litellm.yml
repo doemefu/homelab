@@ -7,7 +7,7 @@
 #   - 50_apps_infra.yml completed (apps namespace + PostgreSQL running)
 #   - 59_app_services.yml completed (litellm-secrets + litellm Postgres DB created)
 #   - all.sops.yml contains: litellm_master_key, litellm_salt_key, litellm_db_password,
-#                             anthropic_api_key, mistral_api_key
+#                             mistral_api_key, mistral_codestral_api_key, litellm_client_secret
 #
 # Run order:
 #   1. ansible-playbook infra/playbooks/59_app_services.yml   # secrets + DB

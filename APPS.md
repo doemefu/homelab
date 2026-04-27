@@ -305,6 +305,7 @@ Do not expect Flux reconcile to create or update n8n resources.
 ### Ansible-managed app: LiteLLM
 
 LiteLLM is managed via Ansible playbooks, not Flux reconciliation. Secrets must be bootstrapped before manifests are applied.
+Current active routes are Mistral-only (`mistral-large`, `mistral-small`, `devstral`, `magistral`, `codestral`) using latest provider aliases. Anthropic routes are intentionally disabled.
 
 ```bash
 ansible-playbook infra/playbooks/59_app_services.yml   # DB init + Secret

@@ -33,8 +33,8 @@
 #   litellm_master_key:     sk-<openssl rand -hex 16>   # Bearer token for API access
 #   litellm_salt_key:       <openssl rand -hex 32>       # WARNING: permanent — never rotate after first use
 #   litellm_db_password:    <openssl rand -hex 16>       # Postgres password for litellm user
-#   anthropic_api_key:      <from console.anthropic.com>
 #   mistral_api_key:        <from console.mistral.ai>
+#   mistral_codestral_api_key: <from console.mistral.ai> # dedicated key for codestral route
 #   litellm_client_secret:  <openssl rand -hex 32>       # OIDC client secret for SSO UI login
 #
 # One-time RSA key generation (run once, then paste output into SOPS):
@@ -253,6 +253,7 @@
           - litellm_salt_key | default('') | length > 0
           - litellm_db_password | default('') | length > 0
           - mistral_api_key | default('') | length > 0
+          - mistral_codestral_api_key | default('') | length > 0
           - litellm_client_secret | default('') | length > 0
         fail_msg: >-
           One or more required LiteLLM SOPS variables are missing or invalid.
@@ -345,8 +346,8 @@
             LITELLM_MASTER_KEY: "{{ litellm_master_key }}"
             LITELLM_SALT_KEY: "{{ litellm_salt_key }}"
             DATABASE_URL: "postgresql://litellm:{{ litellm_db_password }}@postgresql.apps.svc.cluster.local:5432/litellm"
-            ANTHROPIC_API_KEY: "{{ anthropic_api_key | default('') }}"
             MISTRAL_API_KEY: "{{ mistral_api_key }}"
+            MISTRAL_CODESTRAL_KEY: "{{ mistral_codestral_api_key }}"
             LITELLM_OIDC_CLIENT_SECRET: "{{ litellm_client_secret }}"
       no_log: true
       delegate_to: localhost

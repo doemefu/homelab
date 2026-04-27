@@ -37,7 +37,7 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | External    | Cloudflare Tunnel                           |
 | Observability | kube-prometheus-stack (Prometheus + Grafana + Alertmanager) |
 | GitOps      | Flux CD (image automation + app deployments) |
-| AI Gateway  | LiteLLM v1.83.3-stable (OpenAI-compatible proxy) |
+| AI Gateway  | LiteLLM v1.83.7-stable.patch.1 (OpenAI-compatible proxy) |
 | Backups     | Restic → USB/SSD (pi5)                      |
 
 ### Pinned Versions
@@ -52,7 +52,7 @@ Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Serv
 | Flux CD               | v2.x (bootstrapped via `flux` CLI) |
 | postgres-exporter     | v0.15.0        |
 | mosquitto-exporter    | v0.6.3         |
-| LiteLLM               | v1.83.3-stable |
+| LiteLLM               | v1.83.7-stable.patch.1 |
 
 ---
 
@@ -157,7 +157,7 @@ ansible-playbook infra/playbooks/10_base.yml --check --diff -l raspi5
 | M5 | ✅ done | Production-ready: APPS.md complete, examples/ created, Grafana PVC, Alertmanager → Discord |
 | M6 | ✅ done | App infrastructure: PostgreSQL 17, InfluxDB 2, Mosquitto 2 (`apps` ns); Home Assistant (`homeassistant` ns, hostNetwork, http://node-ip:8123) |
 | M7 | ✅ done | Flux CD GitOps: automated deployments for auth-service + device-service via ImagePolicy + ImageUpdateAutomation |
-| M8 | ✅ done | LiteLLM AI gateway v1.83.3-stable (`apps` ns); public at `https://ai.furchert.ch`; routes: mistral-large-2411, mistral-small-2501, claude-3-5-sonnet-20241022; Postgres DB `litellm` on shared postgresql instance |
+| M8 | ✅ done | LiteLLM AI gateway v1.83.7-stable.patch.1 (`apps` ns); public at `https://ai.furchert.ch`; routes: `mistral-large`, `mistral-small`, `devstral`, `magistral`, `codestral` (all via latest aliases); Anthropic routes intentionally disabled; Postgres DB `litellm` on shared postgresql instance |
 
 ---
 

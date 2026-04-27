@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M8 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml + LiteLLM v1.83.3-stable AI gateway at https://ai.furchert.ch) — wird mit jedem Milestone ergänzt.
+> **Stand:** M8 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml + LiteLLM v1.83.7-stable.patch.1 AI gateway at https://ai.furchert.ch) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -147,11 +147,11 @@ ansible-playbook infra/playbooks/52_n8n.yml
 
 ## LiteLLM AI Gateway (53_litellm.yml)
 
-LiteLLM v1.83.3-stable is deployed in the `apps` namespace as an OpenAI-compatible AI proxy.
+LiteLLM v1.83.7-stable.patch.1 is deployed in the `apps` namespace as an OpenAI-compatible AI proxy.
 
 - **Public endpoint:** `https://ai.furchert.ch` (Cloudflare Tunnel)
 - **Internal endpoint:** `litellm.apps.svc.cluster.local:4000`
-- **Routes:** `mistral-large-2411`, `mistral-small-2501`, `claude-3-5-sonnet-20241022`
+- **Routes:** `mistral-large`, `mistral-small`, `devstral`, `magistral`, `codestral` (provider side uses `*-latest` aliases)
 - **Auth:** bearer token — `Authorization: Bearer <LITELLM_MASTER_KEY>`
 - **Dashboard:** `https://ai.furchert.ch/ui`
 - **Postgres DB:** `litellm` database on the shared `postgresql` instance in `apps`
@@ -173,25 +173,16 @@ Set in `infra/inventory/group_vars/all.sops.yml` (see `all.sops.yml.example` for
 
 | Variable | Notes |
 |---|---|
-| `litellm_master_key` | Starts with `sk-`. This is the bearer token — share with Claude Code as `ANTHROPIC_AUTH_TOKEN`. |
+| `litellm_master_key` | Starts with `sk-`. This is the bearer token — used for bearer token authentication on LiteLLM API requests and UI login. |
 | `litellm_salt_key` | **Permanent — never rotate after first use.** Used to encrypt virtual keys in the DB. Changing it makes all stored keys unrecoverable. |
 | `litellm_db_password` | Password for the `litellm` Postgres user. |
-| `anthropic_api_key` | From `console.anthropic.com`. |
-| `mistral_api_key` | From `console.mistral.ai`. Leave as `""` to disable Mistral routes. |
+| `mistral_api_key` | From `console.mistral.ai`. |
+| `mistral_codestral_api_key` | Dedicated Mistral key for the `codestral` route. |
+| `litellm_client_secret` | OIDC client secret used for LiteLLM UI SSO login against auth-service. |
 
-### Claude Code integration
+### Client integration note
 
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://ai.furchert.ch",
-    "ANTHROPIC_AUTH_TOKEN": "sk-<litellm_master_key>",
-    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
-  }
-}
-```
+Anthropic provider routes are intentionally disabled in this deployment. Clients should set their OpenAI-compatible base URL to `https://ai.furchert.ch` and use `Authorization: Bearer <LITELLM_MASTER_KEY>`. Do not use `ANTHROPIC_BASE_URL` — it has no effect on this Mistral-only gateway.
 
 ### Verify / smoke test
 
@@ -206,7 +197,7 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 
 ### Upgrade runbook
 
-1. Update image tag in `cluster/apps/litellm/deployment.yaml` to new pinned version (never use `latest`)
+1. Update image tag in `cluster/apps/litellm/deployment.yaml` to a new pinned stable patch version (never use floating tags)
 2. Check LiteLLM release notes for the new version — avoid versions with known malicious releases (historical: 1.82.7, 1.82.8)
 3. Re-run `ansible-playbook infra/playbooks/53_litellm.yml`
 4. Confirm rollout: `kubectl rollout status deployment/litellm -n apps`
@@ -217,10 +208,11 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 - **401 on requests:** verify `LITELLM_MASTER_KEY` matches the `sk-*` value in the Secret
 - **Models not in `/models` response:** check `configmap.yaml` is mounted correctly — `kubectl exec -n apps <pod> -- cat /app/proxy_config.yaml`
 - **DB migration slow (first start):** liveness probe has 120s initial delay; wait up to 5 minutes on first deploy
+- **Codestral request errors:** verify `mistral_codestral_api_key` is set in `all.sops.yml` and present as `MISTRAL_CODESTRAL_KEY` in `litellm-secrets`
 
-### Fallback (revert to direct Anthropic API)
+### Anthropic status
 
-Remove or comment out the `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` overrides in `~/.claude/settings.json`. Claude Code will revert to calling `api.anthropic.com` directly.
+Anthropic routes are currently disabled by design. Re-introduce them only in a dedicated follow-up that updates config, secrets, smoke tests, and docs together.
 
 ---
 

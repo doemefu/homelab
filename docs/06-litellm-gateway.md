@@ -75,14 +75,13 @@ Running AI workloads (Claude Code subagents, future microservice features) curre
 - **Prompt caching / semantic search** — LiteLLM's Redis-backed caching is a valuable follow-on but adds infra complexity. Excluded from v1.
 - **External user-facing AI features** — The gateway is for internal homelab consumers only in v1. No public API product.
 - **Modifying existing homelab services** — Auth, device, and data services will not be changed in this epic. Integration is a separate story in each service's repo.
+- **Anthropic integration** — Intentionally disabled in current deployment; re-enabling requires coordinated updates to secrets, config, and tests in a future change.
 
 ### User Stories
 
-**As a Claude Code/Cowork user**, I want my subagent tasks to route through a cheaper model automatically so that I can run longer, more complex sessions without cost anxiety.
-
 **As a homelab developer (Dominic)**, I want a single dashboard showing AI cost-per-model and request logs so that I can see what AI is costing me in real time and catch unexpected usage spikes.
 
-**As a homelab microservice** (auth, device, data), I want to call a stable internal AI endpoint with a JWT credential so that I can add AI features without managing external API keys or worrying about model changes.
+**As a homelab microservice** (auth, device, data), I want to call a stable internal AI endpoint with an API credential so that I can add AI features without managing external API keys or worrying about model changes.
 
 **As a homelab operator**, I want to swap the underlying model (e.g. Mistral → Ollama) by changing a ConfigMap entry so that cost or capability changes don't require redeploying consumer services.
 
@@ -90,10 +89,9 @@ Running AI workloads (Claude Code subagents, future microservice features) curre
 
 #### Must-Have (P0)
 
-- LiteLLM deployed to `litellm` namespace in k3s with a dedicated Postgres database.
+- LiteLLM deployed to `litellm` namespace (technically `apps` namespace in current k3s) with a dedicated Postgres database.
 - Cloudflare Tunnel exposes LiteLLM at `litellm.furchert.ch` (HTTPS, authenticated).
-- LiteLLM model routing configured for: `claude-3-5-sonnet` (Anthropic), `mistral-large` and `mistral-small` (Mistral API).
-- Claude Code configured to use `ANTHROPIC_BASE_URL=https://litellm.furchert.ch` with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.
+- LiteLLM model routing configured for: `mistral-large-latest` and `mistral-small-latest` (Mistral API). Anthropic routes intentionally disabled.
 - Smoke test confirms `/health` and `/models` return expected responses; a sample chat completion succeeds for each configured model.
 - All secrets (API keys, DB password, tunnel token) stored in a k8s Secret, never in ConfigMap or committed plaintext.
 
@@ -334,12 +332,10 @@ flowchart TD
 
 | Resource | Namespace | Notes |
 |---|---|---|
-| `00-namespace.yaml` | — | Creates `litellm` ns |
-| `01-secret.yaml` | litellm | MISTRAL_API_KEY, ANTHROPIC_API_KEY, LITELLM_MASTER_KEY, DATABASE_URL, CF_TUNNEL_TOKEN |
-| `02-configmap.yaml` | litellm | LiteLLM model routing config (YAML). Ollama entry commented out as placeholder. |
-| `03-deployment.yaml` | litellm | 1 replica; resource limits: 256Mi/500m → adjust after profiling |
-| `04-service.yaml` | litellm | ClusterIP :4000 |
-| `05-cloudflared.yaml` | litellm | cloudflared tunnel deployment |
+| `deployment.yaml` | apps | LiteLLM v1.83.7-stable.patch.1; 1 replica; resource limits: 256Mi/500m |
+| `configmap.yaml` | apps | LiteLLM model routing config (YAML). Ollama entry commented out as placeholder. Anthropic routes disabled. |
+| `service.yaml` | apps | ClusterIP :4000 |
+| Secrets provisioned | apps | MISTRAL_API_KEY, MISTRAL_CODESTRAL_KEY (for Codestral routes), LITELLM_MASTER_KEY, DATABASE_URL |
 
 ### LiteLLM Model Routing Config (ConfigMap excerpt)
 
@@ -355,10 +351,10 @@ model_list:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
 
-  - model_name: claude-3-5-sonnet
+  - model_name: mistral-codestral
     litellm_params:
-      model: anthropic/claude-3-5-sonnet-20241022
-      api_key: os.environ/ANTHROPIC_API_KEY
+      model: mistral/mistral-codestral-latest
+      api_key: os.environ/MISTRAL_CODESTRAL_KEY
 
   # Placeholder — enable when Ollama is deployed on MacBook Air node
   # - model_name: ollama/llama3
@@ -366,40 +362,46 @@ model_list:
   #     model: ollama/llama3
   #     api_base: http://ollama.default.svc.cluster.local:11434
 
+  # Note: Anthropic integration intentionally disabled. Re-enable by adding claude-3-5-sonnet route, provisioning ANTHROPIC_API_KEY secret, and updating deployment env vars.
+
 general_settings:
   database_url: os.environ/DATABASE_URL
   master_key: os.environ/LITELLM_MASTER_KEY
-  store_model_in_db: false
+  store_model_in_db: true
 ```
 
 ### Smoke Test Plan
 
+Automated smoke tests run in `scripts/smoke-test-litellm.sh`:
+
 ```bash
-# 1. Health
+# 1. Health check
 curl https://litellm.furchert.ch/health
 
-# 2. List models
+# 2. List models (authenticated)
 curl https://litellm.furchert.ch/models \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY"
 
-# 3. Mistral completion
+# 3. Mistral Small completion test
 curl https://litellm.furchert.ch/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model": "mistral-small", "messages": [{"role": "user", "content": "ping"}]}'
 
-# 4. Anthropic proxy completion
+# 4. Codestral completion test
 curl https://litellm.furchert.ch/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "ping"}]}'
+  -d '{"model": "mistral-codestral", "messages": [{"role": "user", "content": "ping"}]}'
 
-# 5. Unauthenticated rejection
+# 5. Mistral Large completion test
 curl https://litellm.furchert.ch/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "mistral-small", "messages": [{"role": "user", "content": "ping"}]}'
-# Expected: 401
+  -d '{"model": "mistral-large", "messages": [{"role": "user", "content": "ping"}]}'
 ```
+
+**Note:** Anthropic routes intentionally disabled; smoke test no longer includes Claude tests.
 
 ### Deployment Diagram
 
