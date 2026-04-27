@@ -47,7 +47,7 @@ data:
       # The literal key values must NEVER appear here — they live in litellm-secrets only.
       master_key: os.environ/LITELLM_MASTER_KEY
       database_url: os.environ/DATABASE_URL
-      store_model_in_db: false
+      store_model_in_db: true   # set to false to have script / configmap as single source of truth
       sso_callback_url: https://ai.furchert.ch/sso/callback
       generic_client_id: litellm
       generic_client_secret: os.environ/LITELLM_OIDC_CLIENT_SECRET
