@@ -55,11 +55,36 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: ANTHROPIC_API_KEY
+            - name: GENERIC_TIMEZONE
+              value: "Europe/Zurich"
+            - name: TZ
+              value: "Europe/Zurich"
             - name: LITELLM_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: litellm-secrets
                   key: LITELLM_OIDC_CLIENT_SECRET
+            # LiteLLM reads SSO config exclusively from env vars (os.getenv), not from general_settings.
+            - name: GENERIC_CLIENT_ID
+              value: "litellm"
+            - name: GENERIC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: LITELLM_OIDC_CLIENT_SECRET
+            - name: GENERIC_AUTHORIZATION_ENDPOINT
+              value: "https://auth.furchert.ch/oauth2/authorize"
+            - name: GENERIC_TOKEN_ENDPOINT
+              value: "https://auth.furchert.ch/oauth2/token"
+            - name: GENERIC_USERINFO_ENDPOINT
+              value: "https://auth.furchert.ch/userinfo"
+            # Required so the SSO callback redirect_uri is https://ai.furchert.ch/sso/callback,
+            # not the internal cluster IP that LiteLLM would otherwise derive from request.base_url.
+            - name: PROXY_BASE_URL
+              value: "https://ai.furchert.ch"
+            # auth-service has requireProofKey(true) globally — all clients must use PKCE.
+            - name: GENERIC_CLIENT_USE_PKCE
+              value: "true"
           # ConfigMap mounted as a file — ordering: ConfigMap must exist before Deployment is applied.
           volumeMounts:
             - name: config-volume
