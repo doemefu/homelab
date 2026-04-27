@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M8 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml + LiteLLM v1.83.3-stable AI gateway at https://ai.furchert.ch) — wird mit jedem Milestone ergänzt.
+> **Stand:** M8 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml + LiteLLM v1.83.7-stable.patch.1 AI gateway at https://ai.furchert.ch) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -20,6 +20,8 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 
 ## Inhaltsverzeichnis
 
+- [Deployment Voraussetzungen](#deployment-voraussetzungen)
+- [Deployment Reihenfolge (Step-by-Step)](#deployment-reihenfolge-step-by-step)
 - [Cluster Health](#cluster-health)
 - [Flux CD (GitOps)](#flux-cd-gitops)
 - [n8n Deployment (52_n8n.yml)](#n8n-deployment-52_n8nyml)
@@ -34,6 +36,75 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 - [Longhorn Storage](#longhorn-storage)
 - [Monitoring (Prometheus + Grafana)](#monitoring-prometheus--grafana)
 - [Backup (Restic)](#backup-restic)
+- [App Infrastructure (PostgreSQL / InfluxDB 2 / Mosquitto)](#app-infrastructure-postgresql--influxdb-2--mosquitto)
+- [Home Assistant](#home-assistant)
+
+---
+
+## Deployment Voraussetzungen
+
+Für einen vollständigen Neuaufbau oder Re-Deployment werden benötigt:
+
+### Infrastruktur / Ressourcen
+- Reachable nodes gemäß `infra/inventory/hosts.yml` (stabile IPs / DHCP-Reservierungen)
+- Lokale Tooling-Umgebung: `ansible`, `ansible-lint`, `kubectl`, `helm@3`, `sops`, `age`, `flux`, `cloudflared`
+- Funktionsfähiger `KUBECONFIG` (`~/.kube/homelab.yaml`)
+
+### Secrets / Keys (SOPS)
+In `infra/inventory/group_vars/all.sops.yml` müssen alle Pflichtwerte gesetzt sein (siehe `.example`):
+- Cloudflare: `cloudflare_api_token`, `cloudflared_tunnel_token`, `cloudflare_account_id`, `cloudflare_tunnel_id`, `cloudflare_tunnel_api_token`
+- Monitoring: `grafana_admin_password`, `alertmanager_discord_webhook_url`
+- Cluster/backup core: `k3s_token`, `restic_password`
+- Shared app infra: `postgresql_password`, `influxdb_admin_password`, `influxdb_admin_token`, `sentry_dsn`
+- App services: `homelab_db_*`, `auth_service_*`, `n8n_encryption_key`, RSA keys
+- LiteLLM: `litellm_*`, `mistral_api_key`, `mistral_codestral_api_key`
+
+### Zusatzabhängigkeiten
+- DNS records for Cloudflare-hosted public endpoints
+- Flux app-sync bootstrap (`cluster/flux-system/apps-sync.yaml`) for app-level GitOps reconciliation
+
+---
+
+## Deployment Reihenfolge (Step-by-Step)
+
+Empfohlene Reihenfolge für komplette Bereitstellung:
+
+```bash
+# 0) New nodes only
+ansible-playbook infra/playbooks/00_bootstrap.yml -e ansible_user=<initial-user> -l <node> --become
+
+# 1) Base system / hardening
+ansible-playbook infra/playbooks/10_base.yml
+
+# 2) k3s cluster
+ansible-playbook infra/playbooks/20_k3s.yml
+
+# 3) Storage
+ansible-playbook infra/playbooks/30_longhorn.yml
+
+# 4) Platform ingress/TLS
+ansible-playbook infra/playbooks/40_platform.yml
+
+# 5) Monitoring
+ansible-playbook infra/playbooks/41_monitoring.yml
+
+# 6) Shared app infrastructure
+ansible-playbook infra/playbooks/50_apps_infra.yml
+
+# 7) App runtimes + app secrets/bootstrap
+ansible-playbook infra/playbooks/51_homeassistant.yml
+ansible-playbook infra/playbooks/52_n8n.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/53_litellm.yml
+
+# 8) Ensure Cloudflare ingress contains latest app routes
+ansible-playbook infra/playbooks/40_platform.yml
+```
+
+For Flux-managed apps (`auth-service`, `device-service`) also ensure:
+```bash
+kubectl apply -f cluster/flux-system/apps-sync.yaml
+```
 
 ---
 
@@ -55,7 +126,7 @@ kubectl get events -A --sort-by='.lastTimestamp' | tail -30
 kubectl get ns
 ```
 
-Erwartete Pods pro Namespace nach M7:
+Erwartete Pods pro Namespace nach M8:
 
 | Namespace        | Pods |
 |------------------|------|
@@ -65,6 +136,7 @@ Erwartete Pods pro Namespace nach M7:
 | `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
 | `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-*, n8n-*, litellm-* |
 | `homeassistant`  | home-assistant-0 (hostNetwork, port 8123 on node IP) |
+| `flux-system`    | source-controller, kustomize-controller, helm-controller, notification-controller, image-reflector-controller, image-automation-controller |
 
 ---
 
@@ -147,11 +219,11 @@ ansible-playbook infra/playbooks/52_n8n.yml
 
 ## LiteLLM AI Gateway (53_litellm.yml)
 
-LiteLLM v1.83.3-stable is deployed in the `apps` namespace as an OpenAI-compatible AI proxy.
+LiteLLM v1.83.7-stable.patch.1 is deployed in the `apps` namespace as an OpenAI-compatible AI proxy.
 
 - **Public endpoint:** `https://ai.furchert.ch` (Cloudflare Tunnel)
 - **Internal endpoint:** `litellm.apps.svc.cluster.local:4000`
-- **Routes:** `mistral-large-2411`, `mistral-small-2501`, `claude-3-5-sonnet-20241022`
+- **Routes:** `mistral-large`, `mistral-small`, `devstral`, `magistral`, `codestral` (provider side uses `*-latest` aliases)
 - **Auth:** bearer token — `Authorization: Bearer <LITELLM_MASTER_KEY>`
 - **Dashboard:** `https://ai.furchert.ch/ui`
 - **Postgres DB:** `litellm` database on the shared `postgresql` instance in `apps`
@@ -173,25 +245,16 @@ Set in `infra/inventory/group_vars/all.sops.yml` (see `all.sops.yml.example` for
 
 | Variable | Notes |
 |---|---|
-| `litellm_master_key` | Starts with `sk-`. This is the bearer token — share with Claude Code as `ANTHROPIC_AUTH_TOKEN`. |
+| `litellm_master_key` | Starts with `sk-`. This is the bearer token — used for bearer token authentication on LiteLLM API requests and UI login. |
 | `litellm_salt_key` | **Permanent — never rotate after first use.** Used to encrypt virtual keys in the DB. Changing it makes all stored keys unrecoverable. |
 | `litellm_db_password` | Password for the `litellm` Postgres user. |
-| `anthropic_api_key` | From `console.anthropic.com`. |
-| `mistral_api_key` | From `console.mistral.ai`. Leave as `""` to disable Mistral routes. |
+| `mistral_api_key` | From `console.mistral.ai`. |
+| `mistral_codestral_api_key` | Dedicated Mistral key for the `codestral` route. |
+| `litellm_client_secret` | OIDC client secret used for LiteLLM UI SSO login against auth-service. |
 
-### Claude Code integration
+### Client integration note
 
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://ai.furchert.ch",
-    "ANTHROPIC_AUTH_TOKEN": "sk-<litellm_master_key>",
-    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
-  }
-}
-```
+Anthropic provider routes are intentionally disabled in this deployment. Clients should set their OpenAI-compatible base URL to `https://ai.furchert.ch` and use `Authorization: Bearer <LITELLM_MASTER_KEY>`. Do not use `ANTHROPIC_BASE_URL` — it has no effect on this Mistral-only gateway.
 
 ### Verify / smoke test
 
@@ -206,7 +269,7 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 
 ### Upgrade runbook
 
-1. Update image tag in `cluster/apps/litellm/deployment.yaml` to new pinned version (never use `latest`)
+1. Update image tag in `cluster/apps/litellm/deployment.yaml` to a new pinned stable patch version (never use floating tags)
 2. Check LiteLLM release notes for the new version — avoid versions with known malicious releases (historical: 1.82.7, 1.82.8)
 3. Re-run `ansible-playbook infra/playbooks/53_litellm.yml`
 4. Confirm rollout: `kubectl rollout status deployment/litellm -n apps`
@@ -217,10 +280,11 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 - **401 on requests:** verify `LITELLM_MASTER_KEY` matches the `sk-*` value in the Secret
 - **Models not in `/models` response:** check `configmap.yaml` is mounted correctly — `kubectl exec -n apps <pod> -- cat /app/proxy_config.yaml`
 - **DB migration slow (first start):** liveness probe has 120s initial delay; wait up to 5 minutes on first deploy
+- **Codestral request errors:** verify `mistral_codestral_api_key` is set in `all.sops.yml` and present as `MISTRAL_CODESTRAL_KEY` in `litellm-secrets`
 
-### Fallback (revert to direct Anthropic API)
+### Anthropic status
 
-Remove or comment out the `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` overrides in `~/.claude/settings.json`. Claude Code will revert to calling `api.anthropic.com` directly.
+Anthropic routes are currently disabled by design. Re-introduce them only in a dedicated follow-up that updates config, secrets, smoke tests, and docs together.
 
 ---
 
@@ -230,9 +294,26 @@ Remove or comment out the `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` overri
 
 ### Required SOPS variables
 
-Set these in `infra/inventory/group_vars/all.sops.yml`:
+Set these in `infra/inventory/group_vars/all.sops.yml` (incomplete values fail the playbook `assert` checks):
+- `homelab_db_username`
+- `homelab_db_password`
+- `device_service_mqtt_password`
+- `influxdb_admin_token`
+- `auth_service_grafana_client_secret`
+- `auth_service_ha_client_secret`
+- `auth_service_device_service_client_secret`
 - `auth_service_n8n_client_secret`
 - `n8n_encryption_key`
+- `auth_service_rsa_private_key`
+- `auth_service_rsa_public_key`
+- `litellm_master_key`
+- `litellm_salt_key`
+- `litellm_db_password`
+- `mistral_api_key`
+- `mistral_codestral_api_key`
+- `litellm_client_secret`
+
+Canonical source for required vars: header + `assert` tasks in `infra/playbooks/59_app_services.yml` and `infra/inventory/group_vars/all.sops.yml.example`.
 
 ### Apply / rotate secrets
 
@@ -931,7 +1012,7 @@ Voraussetzungen in `all.sops.yml`: `postgresql_password`, `influxdb_admin_passwo
 | Service       | FQDN                                        | Port |
 |---------------|---------------------------------------------|------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 |
-| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 |
+| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | service port `http` (chart default; metrics on `/metrics`) |
 | Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 |
 | LiteLLM       | `litellm.apps.svc.cluster.local`            | 4000 |
 

@@ -18,10 +18,10 @@ spec:
       enableServiceLinks: false
       containers:
         - name: litellm
-          # Pinned version — avoid 1.82.7 and 1.82.8 (malicious releases).
+          # Pinned stable patch version — avoid 1.82.7 and 1.82.8 (malicious releases).
           # The -database variant auto-migrates Postgres schema on startup.
           # Multi-arch: linux/amd64 + linux/arm64
-          image: docker.litellm.ai/berriai/litellm-database:v1.83.3-stable
+          image: docker.litellm.ai/berriai/litellm-database:v1.83.7-stable.patch.1
           args:
             - "--config"
             - "/app/proxy_config.yaml"
@@ -30,6 +30,8 @@ spec:
           ports:
             - containerPort: 4000
           env:
+            - name: LITELLM_DROP_PARAMS
+              value: "true"
             - name: LITELLM_MASTER_KEY
               valueFrom:
                 secretKeyRef:
@@ -50,11 +52,11 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: MISTRAL_API_KEY
-            - name: ANTHROPIC_API_KEY
+            - name: MISTRAL_CODESTRAL_KEY
               valueFrom:
                 secretKeyRef:
                   name: litellm-secrets
-                  key: ANTHROPIC_API_KEY
+                  key: MISTRAL_CODESTRAL_KEY
             - name: GENERIC_TIMEZONE
               value: "Europe/Zurich"
             - name: TZ

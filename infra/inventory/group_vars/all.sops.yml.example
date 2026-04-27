@@ -83,12 +83,11 @@ litellm_salt_key: "CHANGE_ME_openssl_rand_hex_32"
 #   Generate: openssl rand -hex 16
 litellm_db_password: "CHANGE_ME_openssl_rand_hex_16"
 
-# Anthropic API key — from https://console.anthropic.com/settings/keys
-anthropic_api_key: "sk-ant-CHANGE_ME"
-
 # Mistral API key — from https://console.mistral.ai/api-keys
-# Leave as empty string ("") to disable Mistral routing without breaking the deployment.
 mistral_api_key: "CHANGE_ME_mistral_api_key"
+
+# Dedicated Mistral key for the Codestral route (kept separate intentionally)
+mistral_codestral_api_key: "CHANGE_ME_mistral_codestral_api_key"
 
 # LiteLLM OIDC client secret — shared with auth-service for SSO UI login
 # Generate: openssl rand -hex 32

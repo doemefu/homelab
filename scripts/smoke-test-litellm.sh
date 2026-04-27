@@ -47,9 +47,10 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
 echo "[3/5] Models list..."
 RESPONSE=$(curl -s "$BASE_URL/models" -H "Authorization: Bearer $MASTER_KEY")
 echo "$RESPONSE" | grep -q '"mistral-small"' && pass "GET /models contains mistral-small" || fail "mistral-small missing from /models response"
-echo "$RESPONSE" | grep -q '"claude-3-5-sonnet"' && pass "GET /models contains claude-3-5-sonnet" || fail "claude-3-5-sonnet missing from /models response"
+echo "$RESPONSE" | grep -q '"mistral-large"' && pass "GET /models contains mistral-large" || fail "mistral-large missing from /models response"
+echo "$RESPONSE" | grep -q '"mistral-codestral"' && pass "GET /models contains mistral-codestral" || fail "mistral-codestral missing from /models response"
 
-# 4. Mistral completion
+# 4. Mistral Small completion
 echo "[4/5] Mistral Small completion..."
 RESPONSE=$(curl -s -X POST "$BASE_URL/v1/chat/completions" \
   -H "Authorization: Bearer $MASTER_KEY" \
@@ -57,17 +58,17 @@ RESPONSE=$(curl -s -X POST "$BASE_URL/v1/chat/completions" \
   -d '{"model":"mistral-small","messages":[{"role":"user","content":"Reply with one word: pong"}],"max_tokens":10}')
 echo "$RESPONSE" | grep -q '"choices"' && pass "Mistral Small completion → choices present" || fail "Mistral Small completion failed: $RESPONSE"
 
-# 5. Anthropic completion via proxy
-echo "[5/5] Anthropic claude-3-5-sonnet completion via proxy..."
+# 5. Mistral Codestral completion
+echo "[5/5] Mistral Codestral completion..."
 RESPONSE=$(curl -s -X POST "$BASE_URL/v1/chat/completions" \
   -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"Reply with one word: pong"}],"max_tokens":10}')
-echo "$RESPONSE" | grep -q '"choices"' && pass "Anthropic proxy completion → choices present" || fail "Anthropic proxy completion failed: $RESPONSE"
+  -d '{"model":"mistral-codestral","messages":[{"role":"user","content":"Reply with one word: pong"}],"max_tokens":10}')
+echo "$RESPONSE" | grep -q '"choices"' && pass "Mistral Codestral completion → choices present" || fail "Mistral Codestral completion failed: $RESPONSE"
 
 echo "---"
 echo -e "${GREEN}All checks passed.${NC} LiteLLM is operational at $BASE_URL"
 echo ""
 echo "Next steps:"
 echo "  Dashboard: $BASE_URL/ui  (login with master key)"
-echo "  Claude Code: set ANTHROPIC_BASE_URL=$BASE_URL and ANTHROPIC_AUTH_TOKEN=\$LITELLM_MASTER_KEY"
+echo "  Clients: point OpenAI-compatible base URL to $BASE_URL and use Authorization Bearer \$LITELLM_MASTER_KEY"
