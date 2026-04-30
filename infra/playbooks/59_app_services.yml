@@ -1,5 +1,5 @@
 ---
-# App Services — K8s Secrets for device-service and auth-service
+# App Services — K8s Secrets for device-service, auth-service, and LiteLLM
 # Namespace: apps
 #
 # Prerequisites:
@@ -12,8 +12,14 @@
 #   homelab_db_password:       <generated password>
 #   device_service_mqtt_password: <placeholder until MQTT auth is enabled post-M6>
 #   influxdb_admin_token:      <InfluxDB admin token (generated on first InfluxDB startup)>
-#   auth_service_grafana_client_secret: <from Grafana → Administration → Authentication → Generic OAuth>
-#   auth_service_ha_client_secret:      <from Home Assistant → Settings → OAuth Clients>
+#   auth_service_grafana_client_secret:       <from Grafana → Administration → Authentication → Generic OAuth>
+#   auth_service_ha_client_secret:            <from Home Assistant → Settings → OAuth Clients>
+#   auth_service_device_service_client_secret: <choose a random secret (plain, no {noop} prefix)>
+#   auth_service_n8n_client_secret:           <choose a random secret for n8n OIDC client>
+#   n8n_encryption_key:                       <32+ char random key, e.g. openssl rand -hex 32>
+#       auth-service receives "{noop}<value>" (prefix added by playbook)
+#       device-service receives "<value>" (plain, as OAuth2 client-secret)
+#       n8n receives "<value>" (plain, as OAuth2 client-secret)
 #   auth_service_rsa_private_key: |
 #     -----BEGIN RSA PRIVATE KEY-----
 #     ...
@@ -23,6 +29,14 @@
 #     ...
 #     -----END PUBLIC KEY-----
 #
+# LiteLLM variables (generate with commands in all.sops.yml.example):
+#   litellm_master_key:     sk-<openssl rand -hex 16>   # Bearer token for API access
+#   litellm_salt_key:       <openssl rand -hex 32>       # WARNING: permanent — never rotate after first use
+#   litellm_db_password:    <openssl rand -hex 16>       # Postgres password for litellm user
+#   mistral_api_key:        <from console.mistral.ai>
+#   mistral_codestral_api_key: <from console.mistral.ai> # dedicated key for codestral route
+#   litellm_client_secret:  <openssl rand -hex 32>       # OIDC client secret for SSO UI login
+#
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
 #   openssl rsa -in /tmp/auth-rsa.pem -pubout -out /tmp/auth-rsa-pub.pem
@@ -30,7 +44,7 @@
 #   cat /tmp/auth-rsa-pub.pem    # → auth_service_rsa_public_key
 #   shred -u /tmp/auth-rsa.pem /tmp/auth-rsa-pub.pem
 #
-# Run: ansible-playbook infra/playbooks/52_app_services.yml
+# Run: ansible-playbook infra/playbooks/59_app_services.yml
 
 - name: App Services — database init + K8s secrets
   hosts: k3s_server
@@ -51,10 +65,13 @@
           - homelab_db_username is defined and homelab_db_username | length > 0
           - homelab_db_username is match('^[a-z_][a-z0-9_]*$')
           - homelab_db_password is defined and homelab_db_password | length > 0
-          - device_service_mqtt_password is defined
+          - device_service_mqtt_password is defined and device_service_mqtt_password | length > 0
           - influxdb_admin_token is defined and influxdb_admin_token | length > 0
           - auth_service_grafana_client_secret is defined and auth_service_grafana_client_secret | length > 0
           - auth_service_ha_client_secret is defined and auth_service_ha_client_secret | length > 0
+          - auth_service_device_service_client_secret is defined and auth_service_device_service_client_secret | length > 0
+          - auth_service_n8n_client_secret is defined and auth_service_n8n_client_secret | length > 0
+          - n8n_encryption_key is defined and n8n_encryption_key | length > 0
           - auth_service_rsa_private_key is defined and auth_service_rsa_private_key | length > 0
           - auth_service_rsa_public_key is defined and auth_service_rsa_public_key | length > 0
         fail_msg: >-
@@ -112,6 +129,7 @@
         KUBECONFIG: "{{ kubeconfig }}"
       no_log: true
       delegate_to: localhost
+      # Password rotation is intentionally always enforced; SQL output is not a reliable change signal here.
       changed_when: false
 
     - name: Homelabdb Datenbank anlegen (falls nicht vorhanden)
@@ -154,6 +172,7 @@
             db-password: "{{ homelab_db_password }}"
             mqtt-password: "{{ device_service_mqtt_password }}"
             influx-token: "{{ influxdb_admin_token }}"
+            device-service-client-secret: "{{ auth_service_device_service_client_secret }}"
       no_log: true
       delegate_to: localhost
 
@@ -186,6 +205,25 @@
           stringData:
             grafana-client-secret: "{{ auth_service_grafana_client_secret }}"
             ha-client-secret: "{{ auth_service_ha_client_secret }}"
+            device-service-client-secret: "{noop}{{ auth_service_device_service_client_secret }}"
+            n8n-client-secret-authservice: "{noop}{{ auth_service_n8n_client_secret }}"
+            n8n-client-secret: "{{ auth_service_n8n_client_secret }}"
+            litellm-client-secret-authservice: "{noop}{{ litellm_client_secret }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: N8n-secrets anlegen (encryption key)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: n8n-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            encryption-key: "{{ n8n_encryption_key }}"
       no_log: true
       delegate_to: localhost
 
@@ -202,5 +240,114 @@
           stringData:
             private.pem: "{{ auth_service_rsa_private_key }}"
             public.pem: "{{ auth_service_rsa_public_key }}"
+      no_log: true
+      delegate_to: localhost
+
+    # --- LiteLLM: PostgreSQL database + secrets ---
+
+    - name: LiteLLM — Prüfen dass alle benötigten SOPS-Variablen gesetzt sind
+      ansible.builtin.assert:
+        that:
+          - litellm_master_key | default('') | length > 0
+          - litellm_master_key is match('^sk-')
+          - litellm_salt_key | default('') | length > 0
+          - litellm_db_password | default('') | length > 0
+          - mistral_api_key | default('') | length > 0
+          - mistral_codestral_api_key | default('') | length > 0
+          - litellm_client_secret | default('') | length > 0
+        fail_msg: >-
+          One or more required LiteLLM SOPS variables are missing or invalid.
+          litellm_master_key must start with 'sk-'.
+          Add them to infra/inventory/group_vars/all.sops.yml — see all.sops.yml.example for commands.
+      delegate_to: localhost
+
+    - name: LiteLLM PostgreSQL user anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='litellm'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE litellm WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_litellm_create_user
+      changed_when: "'CREATE ROLE' in pg_litellm_create_user.stdout"
+
+    - name: LiteLLM PostgreSQL user Passwort setzen/aktualisieren
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - psql
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ 'litellm' | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ litellm_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      changed_when: false
+
+    - name: LiteLLM Datenbank anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='litellm'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE litellm OWNER litellm"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_litellm_create_db
+      changed_when: "'CREATE DATABASE' in pg_litellm_create_db.stdout"
+
+    - name: LiteLLM-secrets anlegen (API keys, master key, salt key, DB URL)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: litellm-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            LITELLM_MASTER_KEY: "{{ litellm_master_key }}"
+            LITELLM_SALT_KEY: "{{ litellm_salt_key }}"
+            DATABASE_URL: "postgresql://litellm:{{ litellm_db_password }}@postgresql.apps.svc.cluster.local:5432/litellm"
+            MISTRAL_API_KEY: "{{ mistral_api_key }}"
+            MISTRAL_CODESTRAL_KEY: "{{ mistral_codestral_api_key }}"
+            LITELLM_OIDC_CLIENT_SECRET: "{{ litellm_client_secret }}"
       no_log: true
       delegate_to: localhost

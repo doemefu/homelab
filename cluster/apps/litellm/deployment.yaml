@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: apps
+  labels:
+    app: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: litellm
+          # Pinned stable patch version — avoid 1.82.7 and 1.82.8 (malicious releases).
+          # The -database variant auto-migrates Postgres schema on startup.
+          # Multi-arch: linux/amd64 + linux/arm64
+          image: docker.litellm.ai/berriai/litellm-database:v1.83.7-stable.patch.1
+          args:
+            - "--config"
+            - "/app/proxy_config.yaml"
+            - "--port"
+            - "4000"
+          ports:
+            - containerPort: 4000
+          env:
+            - name: LITELLM_DROP_PARAMS
+              value: "true"
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: LITELLM_MASTER_KEY
+            - name: LITELLM_SALT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: LITELLM_SALT_KEY
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: DATABASE_URL
+            - name: MISTRAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: MISTRAL_API_KEY
+            - name: MISTRAL_CODESTRAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: MISTRAL_CODESTRAL_KEY
+            - name: GENERIC_TIMEZONE
+              value: "Europe/Zurich"
+            - name: TZ
+              value: "Europe/Zurich"
+            - name: LITELLM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: LITELLM_OIDC_CLIENT_SECRET
+            # LiteLLM reads SSO config exclusively from env vars (os.getenv), not from general_settings.
+            - name: GENERIC_CLIENT_ID
+              value: "litellm"
+            - name: GENERIC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: LITELLM_OIDC_CLIENT_SECRET
+            - name: GENERIC_AUTHORIZATION_ENDPOINT
+              value: "https://auth.furchert.ch/oauth2/authorize"
+            - name: GENERIC_TOKEN_ENDPOINT
+              value: "https://auth.furchert.ch/oauth2/token"
+            - name: GENERIC_USERINFO_ENDPOINT
+              value: "https://auth.furchert.ch/userinfo"
+            # Required so the SSO callback redirect_uri is https://ai.furchert.ch/sso/callback,
+            # not the internal cluster IP that LiteLLM would otherwise derive from request.base_url.
+            - name: PROXY_BASE_URL
+              value: "https://ai.furchert.ch"
+            # auth-service has requireProofKey(true) globally — all clients must use PKCE.
+            - name: GENERIC_CLIENT_USE_PKCE
+              value: "true"
+          # ConfigMap mounted as a file — ordering: ConfigMap must exist before Deployment is applied.
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/proxy_config.yaml
+              subPath: config.yaml
+              readOnly: true
+          # LiteLLM -database image runs Alembic migrations on startup — first boot takes 60-120s.
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+      volumes:
+        - name: config-volume
+          configMap:
+            name: litellm-config

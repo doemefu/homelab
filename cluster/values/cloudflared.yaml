@@ -11,6 +11,8 @@
 #
 # Aktuelle Ingress-Regeln (Single Source of Truth: 40_platform.yml):
 #   - hostname: ssh.furchert.ch     → ssh://192.168.1.61:22  (raspi5 SSH)
+#   - hostname: grafana.furchert.ch → http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
+#   - hostname: auth.furchert.ch    → http://auth-service.apps.svc.cluster.local:8080
 #   - service:  http_status:404     (Fallback — alle anderen Anfragen)
 #
 # Neuen Service hinzufügen: Ingress-Liste in 40_platform.yml ergänzen,

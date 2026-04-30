@@ -2,7 +2,7 @@
 
 Dieses Dokument enthält Runbooks für den laufenden Cluster-Betrieb.
 
-> **Stand:** M6 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant) — wird mit jedem Milestone ergänzt.
+> **Stand:** M8 (k3s + Cloudflare + Longhorn + Monitoring + Backup + Alertmanager + Grafana PVC + PostgreSQL 17 + InfluxDB 2 + Mosquitto 2 + Home Assistant + Flux for auth-service/device-service + n8n via 52_n8n.yml + LiteLLM v1.83.7-stable.patch.1 AI gateway at https://ai.furchert.ch) — wird mit jedem Milestone ergänzt.
 
 ---
 
@@ -20,8 +20,13 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 
 ## Inhaltsverzeichnis
 
+- [Deployment Voraussetzungen](#deployment-voraussetzungen)
+- [Deployment Reihenfolge (Step-by-Step)](#deployment-reihenfolge-step-by-step)
 - [Cluster Health](#cluster-health)
 - [Flux CD (GitOps)](#flux-cd-gitops)
+- [n8n Deployment (52_n8n.yml)](#n8n-deployment-52_n8nyml)
+- [LiteLLM AI Gateway (53_litellm.yml)](#litellm-ai-gateway-53_litellmyml)
+- [App Secrets / n8n OIDC (59_app_services.yml)](#app-secrets--n8n-oidc-59_app_servicesyml)
 - [Ports & Firewall](#ports--firewall)
 - [k3s Upgrade](#k3s-upgrade)
 - [Node Drain & Reboot](#node-drain--reboot)
@@ -31,6 +36,75 @@ Alternativ: `kubectl --kubeconfig ~/.kube/homelab.yaml <befehl>`
 - [Longhorn Storage](#longhorn-storage)
 - [Monitoring (Prometheus + Grafana)](#monitoring-prometheus--grafana)
 - [Backup (Restic)](#backup-restic)
+- [App Infrastructure (PostgreSQL / InfluxDB 2 / Mosquitto)](#app-infrastructure-postgresql--influxdb-2--mosquitto)
+- [Home Assistant](#home-assistant)
+
+---
+
+## Deployment Voraussetzungen
+
+Für einen vollständigen Neuaufbau oder Re-Deployment werden benötigt:
+
+### Infrastruktur / Ressourcen
+- Reachable nodes gemäß `infra/inventory/hosts.yml` (stabile IPs / DHCP-Reservierungen)
+- Lokale Tooling-Umgebung: `ansible`, `ansible-lint`, `kubectl`, `helm@3`, `sops`, `age`, `flux`, `cloudflared`
+- Funktionsfähiger `KUBECONFIG` (`~/.kube/homelab.yaml`)
+
+### Secrets / Keys (SOPS)
+In `infra/inventory/group_vars/all.sops.yml` müssen alle Pflichtwerte gesetzt sein (siehe `.example`):
+- Cloudflare: `cloudflare_api_token`, `cloudflared_tunnel_token`, `cloudflare_account_id`, `cloudflare_tunnel_id`, `cloudflare_tunnel_api_token`
+- Monitoring: `grafana_admin_password`, `alertmanager_discord_webhook_url`
+- Cluster/backup core: `k3s_token`, `restic_password`
+- Shared app infra: `postgresql_password`, `influxdb_admin_password`, `influxdb_admin_token`, `sentry_dsn`
+- App services: `homelab_db_*`, `auth_service_*`, `n8n_encryption_key`, RSA keys
+- LiteLLM: `litellm_*`, `mistral_api_key`, `mistral_codestral_api_key`
+
+### Zusatzabhängigkeiten
+- DNS records for Cloudflare-hosted public endpoints
+- Flux app-sync bootstrap (`cluster/flux-system/apps-sync.yaml`) for app-level GitOps reconciliation
+
+---
+
+## Deployment Reihenfolge (Step-by-Step)
+
+Empfohlene Reihenfolge für komplette Bereitstellung:
+
+```bash
+# 0) New nodes only
+ansible-playbook infra/playbooks/00_bootstrap.yml -e ansible_user=<initial-user> -l <node> --become
+
+# 1) Base system / hardening
+ansible-playbook infra/playbooks/10_base.yml
+
+# 2) k3s cluster
+ansible-playbook infra/playbooks/20_k3s.yml
+
+# 3) Storage
+ansible-playbook infra/playbooks/30_longhorn.yml
+
+# 4) Platform ingress/TLS
+ansible-playbook infra/playbooks/40_platform.yml
+
+# 5) Monitoring
+ansible-playbook infra/playbooks/41_monitoring.yml
+
+# 6) Shared app infrastructure
+ansible-playbook infra/playbooks/50_apps_infra.yml
+
+# 7) App runtimes + app secrets/bootstrap
+ansible-playbook infra/playbooks/51_homeassistant.yml
+ansible-playbook infra/playbooks/52_n8n.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/53_litellm.yml
+
+# 8) Ensure Cloudflare ingress contains latest app routes
+ansible-playbook infra/playbooks/40_platform.yml
+```
+
+For Flux-managed apps (`auth-service`, `device-service`) also ensure:
+```bash
+kubectl apply -f cluster/flux-system/apps-sync.yaml
+```
 
 ---
 
@@ -52,7 +126,7 @@ kubectl get events -A --sort-by='.lastTimestamp' | tail -30
 kubectl get ns
 ```
 
-Erwartete Pods pro Namespace nach M6:
+Erwartete Pods pro Namespace nach M8:
 
 | Namespace        | Pods |
 |------------------|------|
@@ -60,14 +134,16 @@ Erwartete Pods pro Namespace nach M6:
 | `platform`       | cert-manager (3x), cloudflared |
 | `longhorn-system`| longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager |
 | `monitoring`     | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* (DaemonSet, 1 pro Node) |
-| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-* |
+| `apps`           | postgresql-0, influxdb2-0, mosquitto-*, mosquitto-exporter-*, auth-service-*, device-service-*, n8n-*, litellm-* |
 | `homeassistant`  | home-assistant-0 (hostNetwork, port 8123 on node IP) |
+| `flux-system`    | source-controller, kustomize-controller, helm-controller, notification-controller, image-reflector-controller, image-automation-controller |
 
 ---
 
 ## Flux CD (GitOps)
 
-Flux CD automates deployments for `auth-service` and `device-service`. It polls GHCR for new image tags, commits the updated tag back to the app repo, and applies the manifest to the cluster — no manual `kubectl` steps needed.
+Flux CD reconciles `auth-service` and `device-service`.
+Image automation (GHCR polling + write-back commits) applies to `auth-service` and `device-service`.
 
 ### Check Flux status
 
@@ -123,6 +199,145 @@ Common causes of stuck automation:
 - SSH deploy key missing or revoked → check `flux get sources git` for auth errors
 - GHCR package is private → add `ghcr-auth` secret and uncomment `secretRef` in `imagerepo.yaml`
 - Tag filter mismatch → verify new CI tags match `^main-[0-9]{8}T[0-9]{6}$`
+
+---
+
+## n8n Deployment (52_n8n.yml)
+
+`infra/playbooks/52_n8n.yml` deploys the n8n instance resources in namespace `apps`:
+- `cluster/apps/n8n/pvc.yaml`
+- `cluster/apps/n8n/deployment.yaml`
+- `cluster/apps/n8n/service.yaml`
+
+```bash
+ansible-playbook infra/playbooks/52_n8n.yml
+```
+
+`59_app_services.yml` can be run after `52_n8n.yml` to create or rotate n8n/auth secrets.
+
+---
+
+## LiteLLM AI Gateway (53_litellm.yml)
+
+LiteLLM v1.83.7-stable.patch.1 is deployed in the `apps` namespace as an OpenAI-compatible AI proxy.
+
+- **Public endpoint:** `https://ai.furchert.ch` (Cloudflare Tunnel)
+- **Internal endpoint:** `litellm.apps.svc.cluster.local:4000`
+- **Routes:** `mistral-large`, `mistral-small`, `devstral`, `magistral`, `codestral` (provider side uses `*-latest` aliases)
+- **Auth:** bearer token — `Authorization: Bearer <LITELLM_MASTER_KEY>`
+- **Dashboard:** `https://ai.furchert.ch/ui`
+- **Postgres DB:** `litellm` database on the shared `postgresql` instance in `apps`
+
+### Deploy / redeploy
+
+Secrets must be bootstrapped before manifests are applied:
+
+```bash
+sops infra/inventory/group_vars/all.sops.yml   # add/verify litellm_* vars
+ansible-playbook infra/playbooks/59_app_services.yml   # DB init + Secret
+ansible-playbook infra/playbooks/53_litellm.yml        # manifests + rollout wait
+ansible-playbook infra/playbooks/40_platform.yml       # CF Tunnel ingress (add ai.furchert.ch)
+```
+
+### Required SOPS variables
+
+Set in `infra/inventory/group_vars/all.sops.yml` (see `all.sops.yml.example` for generation commands):
+
+| Variable | Notes |
+|---|---|
+| `litellm_master_key` | Starts with `sk-`. This is the bearer token — used for bearer token authentication on LiteLLM API requests and UI login. |
+| `litellm_salt_key` | **Permanent — never rotate after first use.** Used to encrypt virtual keys in the DB. Changing it makes all stored keys unrecoverable. |
+| `litellm_db_password` | Password for the `litellm` Postgres user. |
+| `mistral_api_key` | From `console.mistral.ai`. |
+| `mistral_codestral_api_key` | Dedicated Mistral key for the `codestral` route. |
+| `litellm_client_secret` | OIDC client secret used for LiteLLM UI SSO login against auth-service. |
+
+### Client integration note
+
+Anthropic provider routes are intentionally disabled in this deployment. Clients should set their OpenAI-compatible base URL to `https://ai.furchert.ch` and use `Authorization: Bearer <LITELLM_MASTER_KEY>`. Do not use `ANTHROPIC_BASE_URL` — it has no effect on this Mistral-only gateway.
+
+### Verify / smoke test
+
+```bash
+kubectl get pods -n apps -l app=litellm
+kubectl get secret litellm-secrets -n apps
+
+# Full smoke test (requires LITELLM_MASTER_KEY env var):
+LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
+  ./scripts/smoke-test-litellm.sh
+```
+
+### Upgrade runbook
+
+1. Update image tag in `cluster/apps/litellm/deployment.yaml` to a new pinned stable patch version (never use floating tags)
+2. Check LiteLLM release notes for the new version — avoid versions with known malicious releases (historical: 1.82.7, 1.82.8)
+3. Re-run `ansible-playbook infra/playbooks/53_litellm.yml`
+4. Confirm rollout: `kubectl rollout status deployment/litellm -n apps`
+
+### Troubleshooting
+
+- **Pod not starting:** ensure `litellm-secrets` Secret exists (`kubectl get secret litellm-secrets -n apps`) and the `litellm` DB and user exist in PostgreSQL
+- **401 on requests:** verify `LITELLM_MASTER_KEY` matches the `sk-*` value in the Secret
+- **Models not in `/models` response:** check `configmap.yaml` is mounted correctly — `kubectl exec -n apps <pod> -- cat /app/proxy_config.yaml`
+- **DB migration slow (first start):** liveness probe has 120s initial delay; wait up to 5 minutes on first deploy
+- **Codestral request errors:** verify `mistral_codestral_api_key` is set in `all.sops.yml` and present as `MISTRAL_CODESTRAL_KEY` in `litellm-secrets`
+
+### Anthropic status
+
+Anthropic routes are currently disabled by design. Re-introduce them only in a dedicated follow-up that updates config, secrets, smoke tests, and docs together.
+
+---
+
+## App Secrets / n8n OIDC (59_app_services.yml)
+
+`infra/playbooks/59_app_services.yml` provisions app-level secrets in the `apps` namespace (including n8n OIDC and encryption keys, and LiteLLM Postgres + API key secrets).
+
+### Required SOPS variables
+
+Set these in `infra/inventory/group_vars/all.sops.yml` (incomplete values fail the playbook `assert` checks):
+- `homelab_db_username`
+- `homelab_db_password`
+- `device_service_mqtt_password`
+- `influxdb_admin_token`
+- `auth_service_grafana_client_secret`
+- `auth_service_ha_client_secret`
+- `auth_service_device_service_client_secret`
+- `auth_service_n8n_client_secret`
+- `n8n_encryption_key`
+- `auth_service_rsa_private_key`
+- `auth_service_rsa_public_key`
+- `litellm_master_key`
+- `litellm_salt_key`
+- `litellm_db_password`
+- `mistral_api_key`
+- `mistral_codestral_api_key`
+- `litellm_client_secret`
+
+Canonical source for required vars: header + `assert` tasks in `infra/playbooks/59_app_services.yml` and `infra/inventory/group_vars/all.sops.yml.example`.
+
+### Apply / rotate secrets
+
+```bash
+sops infra/inventory/group_vars/all.sops.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+```
+
+### Verify created keys
+
+```bash
+kubectl get secret -n apps homelab-auth-secrets -o jsonpath='{.data.n8n-client-secret-authservice}' && echo
+kubectl get secret -n apps homelab-auth-secrets -o jsonpath='{.data.n8n-client-secret}' && echo
+kubectl get secret -n apps n8n-secrets -o jsonpath='{.data.encryption-key}' && echo
+```
+
+### Restart affected deployments after rotation
+
+```bash
+kubectl rollout restart deployment/auth-service -n apps
+kubectl rollout restart deployment/n8n -n apps
+```
+
+Troubleshooting note: n8n OIDC login failures or auth-service client-auth errors usually indicate stale/missing keys in `homelab-auth-secrets`/`n8n-secrets` or wrong `{noop}` prefix handling for the auth-service key.
 
 ---
 
@@ -797,8 +1012,9 @@ Voraussetzungen in `all.sops.yml`: `postgresql_password`, `influxdb_admin_passwo
 | Service       | FQDN                                        | Port |
 |---------------|---------------------------------------------|------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local`         | 5432 |
-| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | 8086 |
+| InfluxDB 2    | `influxdb2.apps.svc.cluster.local`          | service port `http` (chart default; metrics on `/metrics`) |
 | Mosquitto 2   | `mosquitto.apps.svc.cluster.local`          | 1883 |
+| LiteLLM       | `litellm.apps.svc.cluster.local`            | 4000 |
 
 Mosquitto ist zusätzlich im LAN über Port 1883 via LoadBalancer erreichbar (k3s ServiceLB).
 

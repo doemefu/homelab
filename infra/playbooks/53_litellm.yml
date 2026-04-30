@@ -1,0 +1,91 @@
+---
+# LiteLLM AI Gateway deployment
+# Namespace: apps
+# Public endpoint: https://ai.furchert.ch (via Cloudflare Tunnel — configured in 40_platform.yml)
+#
+# Prerequisites:
+#   - 50_apps_infra.yml completed (apps namespace + PostgreSQL running)
+#   - 59_app_services.yml completed (litellm-secrets + litellm Postgres DB created)
+#   - all.sops.yml contains: litellm_master_key, litellm_salt_key, litellm_db_password,
+#                             mistral_api_key, mistral_codestral_api_key, litellm_client_secret
+#
+# Run order:
+#   1. ansible-playbook infra/playbooks/59_app_services.yml   # secrets + DB
+#   2. ansible-playbook infra/playbooks/53_litellm.yml        # this file
+#   3. ansible-playbook infra/playbooks/40_platform.yml       # CF Tunnel ingress
+#
+# Idempotent: running twice produces zero changes on second run.
+# ConfigMap hash annotation: Deployment restarts automatically when configmap.yaml changes.
+#
+# Run: ansible-playbook infra/playbooks/53_litellm.yml
+
+- name: App Deployment — LiteLLM AI Gateway
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    apps_namespace: apps
+
+  tasks:
+    - name: Apps Namespace sicherstellen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ apps_namespace }}"
+      delegate_to: localhost
+
+    # ConfigMap must be applied BEFORE Deployment — Deployment mounts it as a volume.
+    # Applying them out of order causes pod failure: "configmap litellm-config not found".
+    - name: LiteLLM ConfigMap anlegen (model routing config)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/litellm/configmap.yaml"
+      delegate_to: localhost
+
+    - name: LiteLLM Deployment anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/litellm/deployment.yaml"
+      delegate_to: localhost
+
+    - name: LiteLLM Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/litellm/service.yaml"
+      delegate_to: localhost
+
+    # Restart Deployment when configmap.yaml changes — same hash-annotation pattern as cloudflared.
+    # The annotation on spec.template.metadata triggers a rolling restart when the hash changes.
+    - name: LiteLLM ConfigMap-Hash setzen (automatischer Restart bei Config-Änderung)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        name: litellm
+        namespace: "{{ apps_namespace }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  homelab.furchert.ch/config-hash: >-
+                    {{ lookup('file', playbook_dir + '/../../cluster/apps/litellm/configmap.yaml') | hash('sha256') }}
+      delegate_to: localhost
+
+    - name: LiteLLM Rollout warten (bis zu 600s — erste Ausführung startet Datenbankmigrationen)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/litellm
+          - -n
+          - "{{ apps_namespace }}"
+          - --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      changed_when: false
