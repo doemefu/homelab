@@ -27,6 +27,9 @@ if [[ -z "$MASTER_KEY" ]]; then
   exit 1
 fi
 
+command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not found."; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "Error: jq is required but not found. Install: brew install jq"; exit 1; }
+
 echo "Smoke testing LiteLLM at: $BASE_URL"
 echo "---"
 

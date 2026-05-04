@@ -63,7 +63,7 @@ Running AI workloads (Claude Code subagents, future microservice features) curre
 ### Goals
 
 1. **Reduce AI costs** — Route Claude Code subagent calls through Mistral Small/Large, targeting ≥50% cost reduction on background tasks within 30 days of deployment.
-2. **Unify model access** — All homelab consumers reach AI via one endpoint (`litellm.furchert.ch`) with no direct external API keys in service configs.
+2. **Unify model access** — All homelab consumers reach AI via one endpoint (`ai.furchert.ch`) with no direct external API keys in service configs.
 3. **Centralise cost visibility** — A single usage dashboard shows cost-per-model and token consumption; accessible within 1 minute of any query.
 4. **Secure the gateway** — All API calls require a valid credential; unauthenticated requests return 401. Auth-service issues and validates tokens for service consumers.
 5. **Future-proof model routing** — Adding a new model (e.g. Ollama) requires a config change only, not code changes in any consumer.
@@ -90,7 +90,7 @@ Running AI workloads (Claude Code subagents, future microservice features) curre
 #### Must-Have (P0)
 
 - LiteLLM deployed to `litellm` namespace (technically `apps` namespace in current k3s) with a dedicated Postgres database.
-- Cloudflare Tunnel exposes LiteLLM at `litellm.furchert.ch` (HTTPS, authenticated).
+- Cloudflare Tunnel exposes LiteLLM at `https://ai.furchert.ch` (HTTPS, authenticated).
 - LiteLLM model routing configured for: `mistral-large-latest` and `mistral-small-latest` (Mistral API). Anthropic routes intentionally disabled.
 - Smoke test confirms `/health` and `/models` return expected responses; a sample chat completion succeeds for each configured model.
 - All secrets (API keys, DB password, tunnel token) stored in a k8s Secret, never in ConfigMap or committed plaintext.
@@ -125,7 +125,7 @@ Running AI workloads (Claude Code subagents, future microservice features) curre
 | Does LiteLLM transparently proxy Anthropic beta headers that Claude Code relies on? | Dominic — validate in smoke test | Yes (Phase 1 completion) |
 | Should auth-service issue LiteLLM virtual keys, or should LiteLLM consume auth-service JWTs directly via a custom auth handler? | Dominic + auth-service design | Yes (Phase 2 design) |
 | What Postgres version / resource limits are appropriate for LiteLLM's usage volume? | Dominic | No |
-| Should `litellm.furchert.ch` be accessible from the public internet, or restricted via Cloudflare Access to known IPs/users? | Dominic | No (default: locked behind Cloudflare Access) |
+| Should `ai.furchert.ch` be accessible from the public internet, or restricted via Cloudflare Access to known IPs/users? | Dominic | No (default: locked behind Cloudflare Access) |
 
 ### Timeline
 
@@ -252,7 +252,7 @@ The Postgres dependency is real but low-cost — the homelab already runs a Post
 ┌───────────────────────────────────────────────────────────────┐
 │  Cloudflare Edge                                              │
 │  ┌─────────────────────────────────────────────────────────┐  │
-│  │  litellm.furchert.ch  (Cloudflare Tunnel)               │  │
+│  │  ai.furchert.ch  (Cloudflare Tunnel)                    │  │
 │  │  → optional: Cloudflare Access policy for authz         │  │
 │  └─────────────────────────────────────────────────────────┘  │
 └───────────────────────────────┬───────────────────────────────┘
@@ -281,7 +281,7 @@ The Postgres dependency is real but low-cost — the homelab already runs a Post
 │  ┌──────────────────────────▼──────────────────────────────┐  │
 │  │  Deployment: cloudflared-litellm                        │  │
 │  │  (cloudflare/cloudflared)                               │  │
-│  │  Tunnels litellm.furchert.ch → litellm:4000             │  │
+│  │  Tunnels ai.furchert.ch → litellm:4000                  │  │
 │  └─────────────────────────────────────────────────────────┘  │
 │                                                               │
 │  ┌─────────────────────────────────────────────────────────┐  │
@@ -304,8 +304,8 @@ Internal service consumers (Phase 2):
 
 ```
 flowchart TD
-    A([Claude Code: subagent task]) --> B[ANTHROPIC_BASE_URL = litellm.furchert.ch]
-    B --> C[Cloudflare Tunnel: litellm.furchert.ch]
+    A([Claude Code: subagent task]) --> B[ANTHROPIC_BASE_URL = ai.furchert.ch]
+    B --> C[Cloudflare Tunnel: ai.furchert.ch]
     C --> D[LiteLLM pod: POST /v1/chat/completions]
     D --> E{model in request?}
     E -- mistral-small --> F[Mistral API: api.mistral.ai]
@@ -377,26 +377,26 @@ Automated smoke tests run in `scripts/smoke-test-litellm.sh`:
 
 ```bash
 # 1. Health check
-curl https://litellm.furchert.ch/health
+curl https://ai.furchert.ch/health
 
 # 2. List models (authenticated)
-curl https://litellm.furchert.ch/models \
+curl https://ai.furchert.ch/models \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY"
 
 # 3. Mistral Small completion test
-curl https://litellm.furchert.ch/v1/chat/completions \
+curl https://ai.furchert.ch/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model": "mistral-small", "messages": [{"role": "user", "content": "ping"}]}'
 
 # 4. Codestral completion test
-curl https://litellm.furchert.ch/v1/chat/completions \
+curl https://ai.furchert.ch/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model": "mistral-codestral", "messages": [{"role": "user", "content": "ping"}]}'
 
 # 5. Mistral Large completion test
-curl https://litellm.furchert.ch/v1/chat/completions \
+curl https://ai.furchert.ch/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model": "mistral-large", "messages": [{"role": "user", "content": "ping"}]}'
@@ -412,7 +412,7 @@ graph LR
         CC[Claude Code / Cowork]
         MistralAPI[Mistral API\napi.mistral.ai]
         AnthropicAPI[Anthropic API\napi.anthropic.com]
-        CF[Cloudflare Edge\nlitellm.furchert.ch]
+        CF[Cloudflare Edge\nai.furchert.ch]
     end
 
     subgraph k3s Cluster
@@ -524,14 +524,14 @@ graph LR
 ```markdown
 ## User story
 
-> As a **homelab operator**, I want to deploy LiteLLM to the k3s cluster so that all AI consumers have a stable, version-pinned proxy endpoint at `litellm.furchert.ch`.
+> As a **homelab operator**, I want to deploy LiteLLM to the k3s cluster so that all AI consumers have a stable, version-pinned proxy endpoint at `ai.furchert.ch`.
 
 ---
 
 ## Notes / limitations
 
 - Postgres: use the existing `default/postgres` deployment; create a dedicated `litellm` database and user.
-- Cloudflare Tunnel: new tunnel named `litellm`; DNS record `litellm.furchert.ch`.
+- Cloudflare Tunnel: uses the shared `homelab` tunnel; DNS record `ai.furchert.ch`.
 - Secrets via k8s Secret only — never committed plaintext.
 - LiteLLM image: pin to a specific known-good version. Never `:latest`.
 - Out of scope: Ollama, auth-service OIDC, rate limiting.
@@ -541,7 +541,7 @@ graph LR
 ## Definition of done
 
 - [ ] `kubectl -n litellm get pods` shows all pods Running
-- [ ] `curl https://litellm.furchert.ch/health` returns HTTP 200
+- [ ] `curl https://ai.furchert.ch/health` returns HTTP 200
 - [ ] `curl https://ai.furchert.ch/v1/models` returns the configured model list
 - [ ] Mistral completions succeed via the proxy (smoke test script passes; Anthropic disabled)
 - [ ] Unauthenticated requests return 401
@@ -647,7 +647,7 @@ Update `~/.claude/settings.json` on the development Mac to set:
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "https://litellm.furchert.ch",
+    "ANTHROPIC_BASE_URL": "https://ai.furchert.ch",
     "ANTHROPIC_API_KEY": "sk-<LITELLM_MASTER_KEY>",
     "ANTHROPIC_MODEL": "mistral-large",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
@@ -659,7 +659,7 @@ Document the config in `OPERATIONS.md` under an "AI Gateway" section.
 
 ### Done when
 
-- [ ] `claude` CLI routes completions through `litellm.furchert.ch` (confirmed via LiteLLM request logs)
+- [ ] `claude` CLI routes completions through `ai.furchert.ch` (confirmed via LiteLLM request logs)
 - [ ] Subagent tasks visibly use `mistral-small` in the usage dashboard
 - [ ] Fallback documented: how to switch back to direct Anthropic API if LiteLLM is unavailable
 - [ ] Config documented in `OPERATIONS.md`

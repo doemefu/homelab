@@ -139,16 +139,16 @@ All services are discoverable via Kubernetes internal DNS.
 |--------|------|-------------|
 | GET | `/health/liveliness` | Liveness probe (120s initial delay) |
 | GET | `/health/readiness` | Readiness probe (120s initial delay) |
-| GET | `/models` | List available model routes |
+| GET | `/v1/models` | List available model routes |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat completions |
 | GET | `/ui` | Web dashboard |
 
 **Available Model Routes** (Mistral-only, Anthropic disabled):
 - `mistral-large` → `mistral-large-latest`
 - `mistral-small` → `mistral-small-latest`
-- `devstral` → `devstral-latest`
-- `magistral` → `magistral-latest`
-- `codestral` → `codestral-latest` (uses dedicated `MISTRAL_CODESTRAL_API_KEY`)
+- `mistral-devstral` → `devstral-latest`
+- `mistral-magistral` → `magistral-latest`
+- `mistral-codestral` → `codestral-latest` (uses dedicated `MISTRAL_CODESTRAL_KEY`)
 
 **OIDC Integration**: LiteLLM UI and API use auth-service for SSO login:
 - Discovery: `https://auth.furchert.ch/.well-known/openid-configuration`
@@ -574,5 +574,5 @@ kubectl describe nodes | grep -A 5 Allocatable
 |------|------|
 | Deploy your app on this platform | **[APP-DEPLOYMENT.md](APP-DEPLOYMENT.md)** |
 | Deploy/operate the cluster itself | **[DEPLOYMENT.md](DEPLOYMENT.md)** |
-| Contribute to this repo | **[DEVELOPMENT.md](DEVELOPMENT.md)** |
-| General platform overview | **[OVERVIEW.md](OVERVIEW.md)** |
+| Contribute to this repo | **[CONTRIBUTING.md](CONTRIBUTING.md)** |
+| General platform overview | **[README.md](README.md)** |

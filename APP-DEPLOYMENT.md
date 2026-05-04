@@ -238,7 +238,7 @@ docker buildx imagetools inspect <image>:<tag> | grep Platform
 ```
 
 Expected output includes both:
-```
+```text
 Platform: linux/amd64
 Platform: linux/arm64
 ```
@@ -463,7 +463,7 @@ For non-Flux, non-Ansible managed apps:
 
 **Setup**:
 
-1. Follow the Flux onboarding procedure in [DEVELOPMENT.md](DEVELOPMENT.md#adding-a-flux-managed-app)
+1. Follow the Flux onboarding procedure in [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-flux-managed-app)
 2. **DO NOT** manually `kubectl apply` Flux-managed resources — Flux will overwrite changes
 
 **Verify**:
@@ -718,5 +718,5 @@ alias ktp='kubectl top pods'
 |------|------|
 | Deploy/operate the cluster itself | [DEPLOYMENT.md](DEPLOYMENT.md) |
 | View platform interfaces and contracts | [INTERFACES.md](INTERFACES.md) |
-| Understand the platform context | [OVERVIEW.md](OVERVIEW.md) |
-| Contribute to this infrastructure repo | [DEVELOPMENT.md](DEVELOPMENT.md) |
+| Understand the platform context | [README.md](README.md) |
+| Contribute to this infrastructure repo | [CONTRIBUTING.md](CONTRIBUTING.md) |

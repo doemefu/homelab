@@ -64,17 +64,23 @@ N8N_BASIC_AUTH_ACTIVE: "false"
 ### Probes
 ```yaml
 livenessProbe:
-  httpGet: /healthz:5678
+  httpGet:
+    path: /healthz
+    port: 5678
   initialDelaySeconds: 30
   periodSeconds: 10
 
 readinessProbe:
-  httpGet: /healthz:5678
+  httpGet:
+    path: /healthz
+    port: 5678
   initialDelaySeconds: 5
   periodSeconds: 10
 
 startupProbe:
-  httpGet: /healthz:5678
+  httpGet:
+    path: /healthz
+    port: 5678
   initialDelaySeconds: 10
   failureThreshold: 15
 ```
@@ -125,18 +131,18 @@ auth_service_n8n_client_secret: "<your_random_secret>"
 n8n_encryption_key: "<openssl_rand_hex_32>"
 ```
 
-### 2. Deploy n8n resources
+### 2. Run app services playbook
+
+This creates/updates the necessary secrets (must run before 52_n8n.yml):
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+```
+
+### 3. Deploy n8n resources
 
 This applies the n8n instance manifests:
 ```bash
 ansible-playbook infra/playbooks/52_n8n.yml
-```
-
-### 3. Run app services playbook
-
-This creates/updates the necessary secrets:
-```bash
-ansible-playbook infra/playbooks/59_app_services.yml
 ```
 
 ### 4. Update Cloudflare Tunnel
@@ -164,7 +170,7 @@ n8n:
   grant-types: authorization_code
 ```
 
-### 6. Verify Deployment
+### 7. Verify Deployment
 ```bash
 # Check resources
 kubectl get pods -n apps | grep n8n

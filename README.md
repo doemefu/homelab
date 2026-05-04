@@ -122,7 +122,7 @@ All external access is via Cloudflare Tunnel. Canonical hostnames are configured
 |--------|------|-------------|
 | GET | `/health/liveliness` | Liveness probe |
 | GET | `/health/readiness` | Readiness probe |
-| GET | `/models` | List available models |
+| GET | `/v1/models` | List available models |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat completions |
 | GET | `/ui` | Web dashboard |
 
@@ -316,5 +316,5 @@ Architecture and migration planning documents are in `docs/`.
 |------|------|
 | Understand how to deploy apps on this platform | **[APP-DEPLOYMENT.md](APP-DEPLOYMENT.md)** |
 | View platform interfaces and contracts | **[INTERFACES.md](INTERFACES.md)** |
-| Contribute to this infrastructure repo | **[DEVELOPMENT.md](DEVELOPMENT.md)** |
+| Contribute to this infrastructure repo | **[CONTRIBUTING.md](CONTRIBUTING.md)** |
 | Deploy or operate the cluster | **[DEPLOYMENT.md](DEPLOYMENT.md)** |

@@ -75,20 +75,9 @@ Add env var sourced from `homelab-auth-secrets` (same pattern as `N8N_CLIENT_SEC
 
 ### 3. LiteLLM ConfigMap — `cluster/apps/litellm/configmap.yaml`
 
-Add to `general_settings`:
+> **Implementation note:** LiteLLM reads SSO config exclusively from environment variables (`os.getenv`), not from `general_settings` in the ConfigMap. Do NOT add `generic_*` or `sso_callback_url` keys to the ConfigMap — they are silently ignored. All SSO settings go in the Deployment as env vars (see step 4).
 
-```yaml
-sso_callback_url: https://ai.furchert.ch/sso/callback
-generic_client_id: litellm
-generic_client_secret: os.environ/LITELLM_OIDC_CLIENT_SECRET
-generic_authorization_endpoint: https://auth.furchert.ch/oauth2/authorize
-generic_token_endpoint: https://auth.furchert.ch/oauth2/token
-generic_userinfo_endpoint: https://auth.furchert.ch/userinfo
-default_user_params:
-  user_role: admin
-```
-
-`generic_client_id` is hardcoded (`litellm`) — it is not sensitive. Only the client secret goes through env var.
+No ConfigMap changes are needed for SSO.
 
 ### 4. LiteLLM Deployment — `cluster/apps/litellm/deployment.yaml`
 
@@ -120,7 +109,7 @@ litellm_client_secret: "changeme  # openssl rand -hex 32"
 ## What is NOT changing
 
 - Master-key login remains enabled (fallback for CLI, API, and recovery)
-- `store_model_in_db` stays `false` — models remain IaC-managed via ConfigMap
+- `store_model_in_db` stays `true` — models are persisted in the DB for dashboard-managed config (intentional; matches shipped ConfigMap)
 - No new playbook — `53_litellm.yml` handles ConfigMap + Deployment, `59_app_services.yml` handles secrets
 - No auth-service code changes — only `application.yaml` config + k8s deployment env var
 - API key (virtual key) management stays entirely within LiteLLM dashboard

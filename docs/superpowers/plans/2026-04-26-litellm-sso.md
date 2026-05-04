@@ -197,8 +197,8 @@ Replace with (add `LITELLM_OIDC_CLIENT_SECRET`):
             LITELLM_MASTER_KEY: "{{ litellm_master_key }}"
             LITELLM_SALT_KEY: "{{ litellm_salt_key }}"
             DATABASE_URL: "postgresql://litellm:{{ litellm_db_password }}@postgresql.apps.svc.cluster.local:5432/litellm"
-            ANTHROPIC_API_KEY: "{{ anthropic_api_key | default('') }}"
             MISTRAL_API_KEY: "{{ mistral_api_key }}"
+            MISTRAL_CODESTRAL_KEY: "{{ mistral_codestral_api_key }}"
             LITELLM_OIDC_CLIENT_SECRET: "{{ litellm_client_secret }}"
       no_log: true
       delegate_to: localhost
@@ -206,26 +206,9 @@ Replace with (add `LITELLM_OIDC_CLIENT_SECRET`):
 
 - [ ] **Step 2.4: Update the header comment in 59_app_services.yml**
 
-Find the LiteLLM variables comment block in the header (around line 32–38):
+Find the LiteLLM variables comment block in the header (around line 32–38) and ensure it includes `litellm_client_secret` and `mistral_codestral_api_key`. The current shipped header already reflects the Mistral-only configuration (Anthropic removed). Add `litellm_client_secret` if not present:
 
 ```
-# LiteLLM variables (generate with commands in all.sops.yml.example):
-#   litellm_master_key:   sk-<openssl rand -hex 16>   # Bearer token for API access
-#   litellm_salt_key:     <openssl rand -hex 32>       # WARNING: permanent — never rotate after first use
-#   litellm_db_password:  <openssl rand -hex 16>       # Postgres password for litellm user
-#   anthropic_api_key:    <from console.anthropic.com>
-#   mistral_api_key:      <from console.mistral.ai>
-```
-
-Replace with:
-
-```
-# LiteLLM variables (generate with commands in all.sops.yml.example):
-#   litellm_master_key:     sk-<openssl rand -hex 16>   # Bearer token for API access
-#   litellm_salt_key:       <openssl rand -hex 32>       # WARNING: permanent — never rotate after first use
-#   litellm_db_password:    <openssl rand -hex 16>       # Postgres password for litellm user
-#   anthropic_api_key:      <from console.anthropic.com>
-#   mistral_api_key:        <from console.mistral.ai>
 #   litellm_client_secret:  <openssl rand -hex 32>       # OIDC client secret for SSO UI login
 ```
 
@@ -248,47 +231,13 @@ git commit -m "feat(secrets): add litellm OIDC client secret to homelab-auth-sec
 
 ## Task 3: Update LiteLLM ConfigMap — add SSO settings
 
-**Files:**
-- Modify: `cluster/apps/litellm/configmap.yaml`
+> **⚠️ Implementation correction:** LiteLLM reads SSO settings exclusively from environment variables (`os.getenv`), NOT from `general_settings` in the ConfigMap. Keys like `generic_client_id`, `sso_callback_url`, etc. placed in `general_settings` are silently ignored. **No ConfigMap changes are needed for SSO.** Skip to Task 4.
 
-- [ ] **Step 3.1: Add SSO settings to `general_settings`**
+Also note: `store_model_in_db` is already `true` in the shipped ConfigMap (intentional — allows dashboard-managed model config). Do not change it to `false`.
 
-The current `general_settings` block in `cluster/apps/litellm/configmap.yaml` (lines 45–50):
+- [x] **Step 3.1: No ConfigMap changes needed** — SSO config goes in Deployment env vars (Task 4).
 
-```yaml
-    general_settings:
-      # os.environ/ syntax: LiteLLM reads value from env var at runtime.
-      # The literal key values must NEVER appear here — they live in litellm-secrets only.
-      master_key: os.environ/LITELLM_MASTER_KEY
-      database_url: os.environ/DATABASE_URL
-      store_model_in_db: false
-```
-
-Replace with:
-
-```yaml
-    general_settings:
-      # os.environ/ syntax: LiteLLM reads value from env var at runtime.
-      # The literal key values must NEVER appear here — they live in litellm-secrets only.
-      master_key: os.environ/LITELLM_MASTER_KEY
-      database_url: os.environ/DATABASE_URL
-      store_model_in_db: false
-      sso_callback_url: https://ai.furchert.ch/sso/callback
-      generic_client_id: litellm
-      generic_client_secret: os.environ/LITELLM_OIDC_CLIENT_SECRET
-      generic_authorization_endpoint: https://auth.furchert.ch/oauth2/authorize
-      generic_token_endpoint: https://auth.furchert.ch/oauth2/token
-      generic_userinfo_endpoint: https://auth.furchert.ch/userinfo
-      default_user_params:
-        user_role: admin
-```
-
-- [ ] **Step 3.2: Commit**
-
-```bash
-git add cluster/apps/litellm/configmap.yaml
-git commit -m "feat(litellm): add generic OIDC SSO settings pointing at auth-service"
-```
+- [ ] **Step 3.2: Commit** — skip, no changes.
 
 ---
 
@@ -297,22 +246,22 @@ git commit -m "feat(litellm): add generic OIDC SSO settings pointing at auth-ser
 **Files:**
 - Modify: `cluster/apps/litellm/deployment.yaml`
 
-- [ ] **Step 4.1: Add `LITELLM_OIDC_CLIENT_SECRET` env var**
+- [ ] **Step 4.1: Add SSO env vars**
 
-In `cluster/apps/litellm/deployment.yaml`, find the `env:` block. After the `ANTHROPIC_API_KEY` entry (around line 53–57):
-
-```yaml
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: litellm-secrets
-                  key: ANTHROPIC_API_KEY
-```
-
-Add after it:
+In `cluster/apps/litellm/deployment.yaml`, add the following env vars to the `env:` block (Anthropic is disabled — do not reference `ANTHROPIC_API_KEY`):
 
 ```yaml
-            - name: LITELLM_OIDC_CLIENT_SECRET
+            - name: PROXY_BASE_URL
+              value: "https://ai.furchert.ch"
+            - name: GENERIC_CLIENT_ID
+              value: "litellm"
+            - name: GENERIC_AUTHORIZATION_ENDPOINT
+              value: "https://auth.furchert.ch/oauth2/authorize"
+            - name: GENERIC_TOKEN_ENDPOINT
+              value: "https://auth.furchert.ch/oauth2/token"
+            - name: GENERIC_USERINFO_ENDPOINT
+              value: "https://auth.furchert.ch/userinfo"
+            - name: GENERIC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: litellm-secrets

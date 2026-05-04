@@ -23,7 +23,7 @@ Before starting any deployment or upgrade, verify:
 - [ ] `ansible` installed
 - [ ] `ansible-lint` installed
 - [ ] `kubectl` installed and configured (`export KUBECONFIG=~/.kube/homelab.yaml`)
-- [ ] `helm@3` installed (NOT Helm 4 — see [DEVELOPMENT.md](DEVELOPMENT.md#helm-4-warning))
+- [ ] `helm@3` installed (NOT Helm 4 — see [CONTRIBUTING.md](CONTRIBUTING.md))
 - [ ] `sops` installed
 - [ ] `age` installed
 - [ ] `flux` installed
@@ -32,7 +32,7 @@ Before starting any deployment or upgrade, verify:
 ### Secrets Check
 
 - [ ] `infra/inventory/group_vars/all.sops.yml` exists and is decrypted
-- [ ] All required variables set (see [DEVELOPMENT.md](DEVELOPMENT.md#required-sops-variables-checklist))
+- [ ] All required variables set (see [CONTRIBUTING.md](CONTRIBUTING.md))
 - [ ] SOPS key available: `export SOPS_AGE_KEY_FILE=~/.config/age/homelab.key`
 
 ### External Dependencies
@@ -319,7 +319,7 @@ brew install cloudflared
 ```
 
 Add to `~/.ssh/config`:
-```
+```sshconfig
 Host raspi5
   HostName ssh.furchert.ch
   User ansible
@@ -787,5 +787,5 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 |------|------|
 | Deploy YOUR apps on this platform | [APP-DEPLOYMENT.md](APP-DEPLOYMENT.md) |
 | Platform interfaces and contracts | [INTERFACES.md](INTERFACES.md) |
-| Platform overview, features, URLs | [OVERVIEW.md](OVERVIEW.md) |
-| Work on this infrastructure repo | [DEVELOPMENT.md](DEVELOPMENT.md) |
+| Platform overview, features, URLs | [README.md](README.md) |
+| Work on this infrastructure repo | [CONTRIBUTING.md](CONTRIBUTING.md) |
