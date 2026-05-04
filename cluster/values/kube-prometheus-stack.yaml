@@ -41,15 +41,6 @@ prometheus:
         cpu: 1000m
         memory: 1Gi
 
-prometheus-node-exporter:
-  # kubeRBACProxy adds RBAC to the /metrics endpoint and sets host:127.0.0.1 on liveness/
-  # readiness probes (the only chart-supported mechanism — livenessProbe.httpGet.host is
-  # not templated). Defense-in-depth: probes work regardless of which node interface k3s
-  # registers with (MBA nodes originally registered via WiFi, now fixed to Ethernet via
-  # --node-ip in k3s-agent.service).
-  kubeRBACProxy:
-    enabled: true
-
 grafana:
   enabled: true
   # adminPassword: wird von 41_monitoring.yml injiziert (SOPS: grafana_admin_password)
