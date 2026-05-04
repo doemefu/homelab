@@ -8,7 +8,7 @@ This is the **Infrastructure-as-Code** repository for a heterogeneous Kubernetes
 
 ### Network Topology
 
-```
+```text
 Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Services
                            ↓
                     LAN (192.168.1.0/24)
@@ -128,7 +128,7 @@ All external access is via Cloudflare Tunnel. Canonical hostnames are configured
 
 **Authentication**: Bearer token — `Authorization: Bearer <LITELLM_MASTER_KEY>`
 
-**Available Routes**: `mistral-large`, `mistral-small`, `devstral`, `magistral`, `codestral` (all via latest aliases, Mistral-only; Anthropic disabled)
+**Available Routes**: `mistral-large`, `mistral-small`, `mistral-devstral`, `mistral-magistral`, `mistral-codestral` (all via latest aliases, Mistral-only; Anthropic disabled)
 
 ---
 
@@ -204,7 +204,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 
 ## Repository Structure
 
-```
+```text
 infra/
   inventory/
     hosts.yml                 # Node IPs and group assignments

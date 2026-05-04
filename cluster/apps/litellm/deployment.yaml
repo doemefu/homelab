@@ -16,6 +16,10 @@ spec:
         app: litellm
     spec:
       enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: litellm
           # Pinned stable patch version — avoid 1.82.7 and 1.82.8 (malicious releases).
@@ -93,12 +97,20 @@ spec:
               mountPath: /app/proxy_config.yaml
               subPath: config.yaml
               readOnly: true
-          # LiteLLM -database image runs Alembic migrations on startup — first boot takes 60-120s.
+          # startupProbe covers the 60-120s Alembic migration window on first boot:
+          # 20s initial delay + 18 * 10s = 200s total budget before liveness/readiness kick in.
+          startupProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            failureThreshold: 18
+            initialDelaySeconds: 20
+            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health/liveliness
               port: 4000
-            initialDelaySeconds: 120
+            initialDelaySeconds: 0
             periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 3
@@ -106,7 +118,7 @@ spec:
             httpGet:
               path: /health/readiness
               port: 4000
-            initialDelaySeconds: 120
+            initialDelaySeconds: 0
             periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 3
@@ -117,6 +129,9 @@ spec:
             limits:
               cpu: 1000m
               memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
       volumes:
         - name: config-volume
           configMap:

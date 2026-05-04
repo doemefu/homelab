@@ -248,7 +248,6 @@ This routes public traffic from `https://n8n.furchert.ch` through Cloudflare Tun
 
 ## Dependencies
 - Existing Cloudflare Tunnel infrastructure
-- FluxCD GitOps setup
 - Longhorn storage class for PVC (default)
 - homelab-auth-service running in apps namespace
 - `apps` namespace must exist

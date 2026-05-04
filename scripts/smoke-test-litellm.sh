@@ -45,10 +45,10 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
 
 # 3. Models list
 echo "[3/5] Models list..."
-RESPONSE=$(curl -s "$BASE_URL/models" -H "Authorization: Bearer $MASTER_KEY")
-echo "$RESPONSE" | grep -q '"mistral-small"' && pass "GET /models contains mistral-small" || fail "mistral-small missing from /models response"
-echo "$RESPONSE" | grep -q '"mistral-large"' && pass "GET /models contains mistral-large" || fail "mistral-large missing from /models response"
-echo "$RESPONSE" | grep -q '"mistral-codestral"' && pass "GET /models contains mistral-codestral" || fail "mistral-codestral missing from /models response"
+RESPONSE=$(curl -s "$BASE_URL/v1/models" -H "Authorization: Bearer $MASTER_KEY")
+echo "$RESPONSE" | jq -e '.data[] | select(.id == "mistral-small")' > /dev/null && pass "GET /v1/models contains mistral-small" || fail "mistral-small missing from /v1/models response"
+echo "$RESPONSE" | jq -e '.data[] | select(.id == "mistral-large")' > /dev/null && pass "GET /v1/models contains mistral-large" || fail "mistral-large missing from /v1/models response"
+echo "$RESPONSE" | jq -e '.data[] | select(.id == "mistral-codestral")' > /dev/null && pass "GET /v1/models contains mistral-codestral" || fail "mistral-codestral missing from /v1/models response"
 
 # 4. Mistral Small completion
 echo "[4/5] Mistral Small completion..."

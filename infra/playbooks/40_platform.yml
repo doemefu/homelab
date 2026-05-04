@@ -216,6 +216,7 @@
                       permanent: true
                 metrics:
                   port: 9101
+                  exposedPort: 9101
                   expose:
                     default: true
               logs:

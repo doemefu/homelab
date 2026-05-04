@@ -74,6 +74,7 @@
           - n8n_encryption_key is defined and n8n_encryption_key | length > 0
           - auth_service_rsa_private_key is defined and auth_service_rsa_private_key | length > 0
           - auth_service_rsa_public_key is defined and auth_service_rsa_public_key | length > 0
+          - litellm_client_secret is defined and litellm_client_secret | length > 0
         fail_msg: >-
           One or more required SOPS variables are missing.
           Add them to infra/inventory/group_vars/all.sops.yml — see the header comment in this playbook.
@@ -248,13 +249,12 @@
     - name: LiteLLM — Prüfen dass alle benötigten SOPS-Variablen gesetzt sind
       ansible.builtin.assert:
         that:
-          - litellm_master_key | default('') | length > 0
+          - litellm_master_key is defined and litellm_master_key | length > 0
           - litellm_master_key is match('^sk-')
-          - litellm_salt_key | default('') | length > 0
-          - litellm_db_password | default('') | length > 0
-          - mistral_api_key | default('') | length > 0
-          - mistral_codestral_api_key | default('') | length > 0
-          - litellm_client_secret | default('') | length > 0
+          - litellm_salt_key is defined and litellm_salt_key | length > 0
+          - litellm_db_password is defined and litellm_db_password | length > 0
+          - mistral_api_key is defined and mistral_api_key | length > 0
+          - mistral_codestral_api_key is defined and mistral_codestral_api_key | length > 0
         fail_msg: >-
           One or more required LiteLLM SOPS variables are missing or invalid.
           litellm_master_key must start with 'sk-'.

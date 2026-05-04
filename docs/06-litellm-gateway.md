@@ -153,7 +153,7 @@ The homelab k3s cluster hosts several Java microservices (auth, device, data) an
 
 ## Decision
 
-Deploy LiteLLM on k3s as the homelab's AI gateway. All AI API calls from homelab consumers route through `https://litellm.furchert.ch` (external) or `litellm.litellm.svc.cluster.local:4000` (internal). No consumer service holds an external AI API key directly.
+Deploy LiteLLM on k3s as the homelab's AI gateway. All AI API calls from homelab consumers route through `https://ai.furchert.ch` (external) or `litellm.apps.svc.cluster.local:4000` (internal). No consumer service holds an external AI API key directly.
 
 ## Options Considered
 
@@ -266,10 +266,11 @@ The Postgres dependency is real but low-cost — the homelab already runs a Post
 │  │  Port 4000                                              │  │
 │  │  ┌─────────────────────────────────────────────────┐   │  │
 │  │  │  Model Router                                   │   │  │
-│  │  │  mistral-large  → Mistral API (cloud)           │   │  │
-│  │  │  mistral-small  → Mistral API (cloud)           │   │  │
-│  │  │  claude-*       → Anthropic API (cloud)         │   │  │
-│  │  │  ollama/*       → Ollama svc (future, cluster)  │   │  │
+│  │  │  mistral-large    → Mistral API (cloud)         │   │  │
+│  │  │  mistral-small    → Mistral API (cloud)         │   │  │
+│  │  │  mistral-codestral→ Mistral API (cloud)         │   │  │
+│  │  │  claude-*         → Anthropic (disabled)        │   │  │
+│  │  │  ollama/*         → Ollama svc (future)         │   │  │
 │  │  └─────────────────────────────────────────────────┘   │  │
 │  └──────────────────────────┬──────────────────────────────┘  │
 │                             │                                  │
@@ -284,7 +285,7 @@ The Postgres dependency is real but low-cost — the homelab already runs a Post
 │  └─────────────────────────────────────────────────────────┘  │
 │                                                               │
 │  ┌─────────────────────────────────────────────────────────┐  │
-│  │  Deployment: postgres (existing, namespace: default)    │  │
+│  │  Deployment: postgres (existing, namespace: apps)       │  │
 │  │  Database: litellm                                      │  │
 │  │  User: litellm                                          │  │
 │  └─────────────────────────────────────────────────────────┘  │
@@ -295,7 +296,7 @@ Internal service consumers (Phase 2):
 ┌──────────────────────────────────────────────────────────────┐
 │  auth-service / device-service / data-service                │
 │  → JWT from auth-service OIDC                                │
-│  → POST litellm.litellm.svc.cluster.local:4000/v1/chat/...  │
+│  → POST litellm.apps.svc.cluster.local:4000/v1/chat/...     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -437,7 +438,8 @@ graph LR
     LLM -- reads --> CM
     LLM -- SQL --> PG
     LLM -- HTTPS --> MistralAPI
-    LLM -- HTTPS --> AnthropicAPI
+    %% Anthropic intentionally disabled — routes not configured
+    %% LLM -- HTTPS --> AnthropicAPI
     AUTH -. Phase 2: JWT .-> LLM
     LLM -. Future .-> OLLAMA
 
@@ -540,11 +542,11 @@ graph LR
 
 - [ ] `kubectl -n litellm get pods` shows all pods Running
 - [ ] `curl https://litellm.furchert.ch/health` returns HTTP 200
-- [ ] `curl https://litellm.furchert.ch/models` returns the configured model list
-- [ ] Mistral and Anthropic completions succeed via the proxy (smoke test script passes)
+- [ ] `curl https://ai.furchert.ch/v1/models` returns the configured model list
+- [ ] Mistral completions succeed via the proxy (smoke test script passes; Anthropic disabled)
 - [ ] Unauthenticated requests return 401
-- [ ] Usage dashboard is accessible at `https://litellm.furchert.ch/ui`
-- [ ] All manifests committed to `homelab` repo under `kubernetes/litellm/`
+- [ ] Usage dashboard is accessible at `https://ai.furchert.ch/ui`
+- [ ] All manifests committed to `homelab` repo under `cluster/apps/litellm/`
 
 ---
 

@@ -4,7 +4,7 @@
 #
 # Prerequisites:
 #   - 50_apps_infra.yml completed (apps namespace + base infra)
-#   - Run 59_app_services.yml after this playbook to create/rotate n8n/auth secrets
+#   - 59_app_services.yml completed (n8n-secrets + homelab-auth-secrets created)
 #
 # Run: ansible-playbook infra/playbooks/52_n8n.yml
 - name: App Deployment — n8n

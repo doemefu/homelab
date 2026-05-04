@@ -16,17 +16,17 @@ data:
           model: mistral/mistral-small-latest
           api_key: os.environ/MISTRAL_API_KEY
 
-      - model_name: devstral
+      - model_name: mistral-devstral
         litellm_params:
           model: mistral/devstral-latest
           api_key: os.environ/MISTRAL_API_KEY
 
-      - model_name: magistral
+      - model_name: mistral-magistral
         litellm_params:
           model: mistral/magistral-medium-latest
           api_key: os.environ/MISTRAL_API_KEY
-          
-      - model_name: codestral
+
+      - model_name: mistral-codestral
         litellm_params:
           model: mistral/codestral-latest
           api_key: os.environ/MISTRAL_CODESTRAL_KEY

@@ -76,16 +76,17 @@
       delegate_to: localhost
 
     - name: LiteLLM Rollout warten (bis zu 600s — erste Ausführung startet Datenbankmigrationen)
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - rollout
-          - status
-          - deployment/litellm
-          - -n
-          - "{{ apps_namespace }}"
-          - --timeout=600s
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        name: litellm
+        namespace: "{{ apps_namespace }}"
+      register: litellm_deploy_info
+      until: >
+        litellm_deploy_info.resources | length > 0 and
+        litellm_deploy_info.resources[0].status.availableReplicas is defined and
+        litellm_deploy_info.resources[0].status.availableReplicas ==
+        litellm_deploy_info.resources[0].spec.replicas
+      retries: 60
+      delay: 10
       delegate_to: localhost
-      changed_when: false
