@@ -15,13 +15,16 @@
 # als values-Override injiziert (alertmanager_discord_webhook_url aus all.sops.yml).
 # Vorbedingung: alertmanager_discord_webhook_url in all.sops.yml gesetzt.
 #
-# Prometheus Storage: 10Gi Longhorn PVC, 14 Tage Retention.
+# Prometheus Storage: 20Gi Longhorn PVC, 14 Tage Retention.
 # Longhorn ist Default StorageClass — kein storageClassName Key nötig.
+# Hinweis: PVC-Resize nur via kubectl patch möglich (Helm kann StatefulSet-PVCs nicht resizen).
 #
 # Ressourcen: bewusst konservativ für ARM64 Pi-Hardware (raspi5: 8GB, raspi4: 4GB).
 
 prometheus:
   prometheusSpec:
+    nodeSelector:
+      kubernetes.io/arch: arm64
     retention: 14d
     storageSpec:
       volumeClaimTemplate:
@@ -29,7 +32,7 @@ prometheus:
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 10Gi
+              storage: 20Gi
     resources:
       requests:
         cpu: 200m
@@ -37,6 +40,15 @@ prometheus:
       limits:
         cpu: 1000m
         memory: 1Gi
+
+prometheus-node-exporter:
+  # kubeRBACProxy adds RBAC to the /metrics endpoint and sets host:127.0.0.1 on liveness/
+  # readiness probes (the only chart-supported mechanism — livenessProbe.httpGet.host is
+  # not templated). Defense-in-depth: probes work regardless of which node interface k3s
+  # registers with (MBA nodes originally registered via WiFi, now fixed to Ethernet via
+  # --node-ip in k3s-agent.service).
+  kubeRBACProxy:
+    enabled: true
 
 grafana:
   enabled: true
