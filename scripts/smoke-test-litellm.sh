@@ -30,17 +30,24 @@ fi
 command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not found."; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "Error: jq is required but not found. Install: brew install jq"; exit 1; }
 
+# All requests share these timeouts so a misconfigured DNS / Tunnel / stalled
+# upstream fails fast instead of hanging the run indefinitely.
+# Probe/list endpoints: 5s connect, 15s overall. Completion endpoints: 5s connect,
+# 60s overall (model inference can take >15s under load).
+CURL_QUICK=(--connect-timeout 5 --max-time 15)
+CURL_COMPLETION=(--connect-timeout 5 --max-time 60)
+
 echo "Smoke testing LiteLLM at: $BASE_URL"
 echo "---"
 
 # 1. Liveness probe
 echo "[1/5] Health check (liveness)..."
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/health/liveliness")
+STATUS=$(curl -s "${CURL_QUICK[@]}" -o /dev/null -w "%{http_code}" "$BASE_URL/health/liveliness")
 [[ "$STATUS" == "200" ]] && pass "GET /health/liveliness → $STATUS" || fail "GET /health/liveliness → $STATUS (expected 200)"
 
 # 2. Auth rejection — unauthenticated request must return 401
 echo "[2/5] Unauthenticated request rejection..."
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+STATUS=$(curl -s "${CURL_QUICK[@]}" -o /dev/null -w "%{http_code}" \
   -X POST "$BASE_URL/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{"model":"mistral-small","messages":[{"role":"user","content":"ping"}]}')
@@ -48,14 +55,14 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
 
 # 3. Models list
 echo "[3/5] Models list..."
-RESPONSE=$(curl -s "$BASE_URL/v1/models" -H "Authorization: Bearer $MASTER_KEY")
+RESPONSE=$(curl -s "${CURL_QUICK[@]}" "$BASE_URL/v1/models" -H "Authorization: Bearer $MASTER_KEY")
 echo "$RESPONSE" | jq -e '.data[] | select(.id == "mistral-small")' > /dev/null && pass "GET /v1/models contains mistral-small" || fail "mistral-small missing from /v1/models response"
 echo "$RESPONSE" | jq -e '.data[] | select(.id == "mistral-large")' > /dev/null && pass "GET /v1/models contains mistral-large" || fail "mistral-large missing from /v1/models response"
 echo "$RESPONSE" | jq -e '.data[] | select(.id == "mistral-codestral")' > /dev/null && pass "GET /v1/models contains mistral-codestral" || fail "mistral-codestral missing from /v1/models response"
 
 # 4. Mistral Small completion
 echo "[4/5] Mistral Small completion..."
-RESPONSE=$(curl -s -X POST "$BASE_URL/v1/chat/completions" \
+RESPONSE=$(curl -s "${CURL_COMPLETION[@]}" -X POST "$BASE_URL/v1/chat/completions" \
   -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"mistral-small","messages":[{"role":"user","content":"Reply with one word: pong"}],"max_tokens":10}')
@@ -63,7 +70,7 @@ echo "$RESPONSE" | grep -q '"choices"' && pass "Mistral Small completion → cho
 
 # 5. Mistral Codestral completion
 echo "[5/5] Mistral Codestral completion..."
-RESPONSE=$(curl -s -X POST "$BASE_URL/v1/chat/completions" \
+RESPONSE=$(curl -s "${CURL_COMPLETION[@]}" -X POST "$BASE_URL/v1/chat/completions" \
   -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"mistral-codestral","messages":[{"role":"user","content":"Reply with one word: pong"}],"max_tokens":10}')

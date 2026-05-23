@@ -23,6 +23,12 @@
 
 prometheus:
   prometheusSpec:
+    # arm64-only is intentional, not a resource-sizing constraint:
+    # when Prometheus' Longhorn PVC follows the pod onto an MBA (amd64) node it
+    # triggers a Longhorn Multi-Attach deadlock on subsequent rescheduling. Pinning
+    # to the arm64 Pis (raspi5 + raspi4) keeps the PVC stable. Trade-off: if both
+    # Pis are simultaneously Unschedulable, Prometheus stays Pending.
+    # See commit d51b6c6 for the original incident.
     nodeSelector:
       kubernetes.io/arch: arm64
     retention: 14d
