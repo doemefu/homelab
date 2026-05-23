@@ -15,13 +15,22 @@
 # als values-Override injiziert (alertmanager_discord_webhook_url aus all.sops.yml).
 # Vorbedingung: alertmanager_discord_webhook_url in all.sops.yml gesetzt.
 #
-# Prometheus Storage: 10Gi Longhorn PVC, 14 Tage Retention.
+# Prometheus Storage: 20Gi Longhorn PVC, 14 Tage Retention.
 # Longhorn ist Default StorageClass — kein storageClassName Key nötig.
+# Hinweis: PVC-Resize nur via kubectl patch möglich (Helm kann StatefulSet-PVCs nicht resizen).
 #
 # Ressourcen: bewusst konservativ für ARM64 Pi-Hardware (raspi5: 8GB, raspi4: 4GB).
 
 prometheus:
   prometheusSpec:
+    # arm64-only is intentional, not a resource-sizing constraint:
+    # when Prometheus' Longhorn PVC follows the pod onto an MBA (amd64) node it
+    # triggers a Longhorn Multi-Attach deadlock on subsequent rescheduling. Pinning
+    # to the arm64 Pis (raspi5 + raspi4) keeps the PVC stable. Trade-off: if both
+    # Pis are simultaneously Unschedulable, Prometheus stays Pending.
+    # See commit d51b6c6 for the original incident.
+    nodeSelector:
+      kubernetes.io/arch: arm64
     retention: 14d
     storageSpec:
       volumeClaimTemplate:
@@ -29,7 +38,7 @@ prometheus:
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 10Gi
+              storage: 20Gi
     resources:
       requests:
         cpu: 200m

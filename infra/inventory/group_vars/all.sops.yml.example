@@ -60,6 +60,71 @@ postgresql_replication_password: "<generieren: openssl rand -base64 24>"
 influxdb_admin_password: "<min 8 Zeichen>"
 influxdb_admin_token: "<generieren: openssl rand -hex 32>"
 
+# Homelab DB user — used by auth-service / device-service for `homelabdb`
+# Created idempotently by 59_app_services.yml on the in-cluster PostgreSQL.
+# Username must match: ^[a-z_][a-z0-9_]*$
+homelab_db_username: "homelab"
+homelab_db_password: "CHANGE_ME_openssl_rand_base64_24"
+
+# MQTT password for device-service (Mosquitto auth)
+# Placeholder until MQTT auth is enabled post-M6 — generate now to avoid empty value.
+# Generate: openssl rand -base64 24
+device_service_mqtt_password: "CHANGE_ME_openssl_rand_base64_24"
+
+# auth-service OAuth2 client secrets (per relying party)
+# Grafana: created in Grafana → Administration → Authentication → Generic OAuth
+# Home Assistant: created in HA → Settings → OAuth Clients
+# device-service / n8n / litellm: choose any random value (openssl rand -hex 32)
+# Note: 59_app_services.yml wraps these with "{noop}" before writing to the auth-service secret.
+auth_service_grafana_client_secret: "CHANGE_ME_grafana_client_secret"
+auth_service_ha_client_secret: "CHANGE_ME_homeassistant_client_secret"
+auth_service_device_service_client_secret: "CHANGE_ME_openssl_rand_hex_32"
+
+# auth-service RSA keypair used for JWT signing.
+# Generate once and paste both halves verbatim (PEM format, preserving line breaks):
+#   openssl genrsa -out /tmp/auth-rsa.pem 2048
+#   openssl rsa -in /tmp/auth-rsa.pem -pubout -out /tmp/auth-rsa-pub.pem
+#   cat /tmp/auth-rsa.pem        # → auth_service_rsa_private_key
+#   cat /tmp/auth-rsa-pub.pem    # → auth_service_rsa_public_key
+#   shred -u /tmp/auth-rsa.pem /tmp/auth-rsa-pub.pem
+auth_service_rsa_private_key: |
+  -----BEGIN RSA PRIVATE KEY-----
+  CHANGE_ME_paste_PEM_body_here
+  -----END RSA PRIVATE KEY-----
+auth_service_rsa_public_key: |
+  -----BEGIN PUBLIC KEY-----
+  CHANGE_ME_paste_PEM_body_here
+  -----END PUBLIC KEY-----
+
 # Sentry DSN — obtain from sentry.io project settings → Client Keys
 # One DSN shared across all three homelab microservices (auth, device, data)
 sentry_dsn: "https://REPLACE_ME@oXXXXXXXX.ingest.sentry.io/XXXXXXXX"
+
+# n8n OIDC client credentials and encryption key
+auth_service_n8n_client_secret: "CHANGE_ME_generate_secure_password"
+n8n_encryption_key: "CHANGE_ME_generate_secure_key_openssl_rand_hex_32"
+
+# LiteLLM AI Gateway credentials
+# litellm_master_key: bearer token for API access — share with Claude Code (ANTHROPIC_AUTH_TOKEN)
+#   Format: must start with "sk-"
+#   Generate: echo "sk-$(openssl rand -hex 16)"
+litellm_master_key: "sk-CHANGE_ME_openssl_rand_hex_16"
+
+# litellm_salt_key: used to encrypt virtual keys stored in the database.
+#   WARNING: this value is PERMANENT — changing it after first use makes all stored keys unrecoverable.
+#   Generate: openssl rand -hex 32
+litellm_salt_key: "CHANGE_ME_openssl_rand_hex_32"
+
+# litellm_db_password: Postgres password for the litellm database user
+#   Generate: openssl rand -hex 16
+litellm_db_password: "CHANGE_ME_openssl_rand_hex_16"
+
+# Mistral API key — from https://console.mistral.ai/api-keys
+mistral_api_key: "CHANGE_ME_mistral_api_key"
+
+# Dedicated Mistral key for the Codestral route (kept separate intentionally)
+mistral_codestral_api_key: "CHANGE_ME_mistral_codestral_api_key"
+
+# LiteLLM OIDC client secret — shared with auth-service for SSO UI login
+# Generate: openssl rand -hex 32
+litellm_client_secret: "CHANGE_ME_openssl_rand_hex_32"

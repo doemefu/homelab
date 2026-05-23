@@ -5,10 +5,11 @@
 # Voraussetzung: 40_platform.yml ausgeführt (cert-manager, Traefik, Cloudflare Tunnel laufen)
 # Voraussetzung: all.sops.yml enthält grafana_admin_password + alertmanager_discord_webhook_url
 #
-# ⚠️  WICHTIG: Dieser Playbook beinhaltet einen Helm-Deploy mit wait_timeout: 10m.
+# ⚠️  WICHTIG: Dieser Playbook beinhaltet einen Helm-Deploy mit wait_timeout: 20m.
 #    SSH-Tunnel-Verbindungen brechen bei langen Wartezeiten ab.
 #    → Entweder LAN-intern ausführen ODER SSH-Tunnel mit Keep-Alive starten:
 #      ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -fN -L 6443:192.168.1.61:6443 raspi5
+#    atomic: false — kein automatischer Rollback bei Timeout (verhindert pending-rollback Deadlock).
 #
 # Ausführen: ansible-playbook infra/playbooks/41_monitoring.yml
 - name: Monitoring — kube-prometheus-stack + ServiceMonitors
@@ -52,6 +53,47 @@
         kubectl --kubeconfig {{ kubeconfig }} get --raw=/readyz
       delegate_to: localhost
       changed_when: false
+
+    - name: Helm-Release Status ermitteln
+      ansible.builtin.command: >
+        {{ helm_binary }} status kube-prometheus-stack
+        --namespace monitoring
+        --kubeconfig {{ kubeconfig }}
+        --output json
+      delegate_to: localhost
+      register: helm_release_status_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Helm-Release Status als Fact setzen
+      ansible.builtin.set_fact:
+        helm_release_status: "{{ (helm_release_status_raw.stdout | default('{}', true)) | from_json }}"
+
+    # `helm rollback` on a release stuck in `pending-install` fails with
+    # "no deployed releases" because there is no prior revision to roll back to.
+    # Split the cleanup: rollback for pending-upgrade/pending-rollback,
+    # uninstall for pending-install.
+    - name: Stuck Helm-Release per rollback bereinigen (pending-upgrade / pending-rollback)
+      ansible.builtin.command: >
+        {{ helm_binary }} rollback kube-prometheus-stack
+        --namespace monitoring
+        --kubeconfig {{ kubeconfig }}
+      delegate_to: localhost
+      changed_when: true
+      when:
+        - helm_release_status.info is defined
+        - helm_release_status.info.status in ['pending-upgrade', 'pending-rollback']
+
+    - name: Stuck Helm-Release per uninstall bereinigen (pending-install)
+      ansible.builtin.command: >
+        {{ helm_binary }} uninstall kube-prometheus-stack
+        --namespace monitoring
+        --kubeconfig {{ kubeconfig }}
+      delegate_to: localhost
+      changed_when: true
+      when:
+        - helm_release_status.info is defined
+        - helm_release_status.info.status == 'pending-install'
 
     - name: Kube-Prometheus-Stack deployen
       kubernetes.core.helm:
@@ -106,8 +148,7 @@
                   equal:
                     - 'namespace'
         wait: true
-        wait_timeout: "10m"
-        atomic: true
+        wait_timeout: "20m"
       no_log: true
       delegate_to: localhost
 
