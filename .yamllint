@@ -1,0 +1,37 @@
+---
+# yamllint configuration
+# https://yamllint.readthedocs.io/en/stable/configuration.html
+#
+# Scope: cluster/, .github/, repo-root config YAML.
+# infra/ is excluded — ansible-lint runs its own internal yamllint there.
+# SOPS-encrypted and age key material is excluded so the linter never
+# parses or surfaces encrypted secret content.
+
+extends: default
+
+rules:
+  line-length:
+    max: 140
+    level: warning
+  # GitHub Actions uses `on:` as a top-level key which yamllint's default
+  # truthy check flags. Limit truthy checks to values only.
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  document-start: disable
+  # Generated/long Helm values files often have very long inline strings;
+  # warn rather than fail.
+  empty-lines:
+    max: 2
+
+ignore: |
+  infra/
+  cluster/flux-system/
+  .agent/
+  **/*.sops.yml
+  **/*.sops.yaml
+  .sops.yaml
+  **/*.age

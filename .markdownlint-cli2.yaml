@@ -1,0 +1,24 @@
+# markdownlint-cli2 configuration
+# https://github.com/DavidAnson/markdownlint-cli2#configuration
+#
+# Intentionally permissive: this PR adds the linter, it does not reformat the
+# 24 existing docs. Baseline failures are addressed in a follow-up unless they
+# are trivial.
+
+config:
+  # Line length — docs frequently wrap long URLs / tables; not worth enforcing.
+  MD013: false
+  # Inline HTML — used intentionally in several docs for callouts/tables.
+  MD033: false
+  # First-line H1 — some docs start with a YAML frontmatter or note block.
+  MD041: false
+  # Bare URLs are acceptable inline.
+  MD034: false
+
+globs:
+  - "**/*.md"
+
+ignores:
+  - ".agent/**"
+  - "node_modules/**"
+  - ".github/rulesets/README.md"

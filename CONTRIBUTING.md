@@ -13,7 +13,7 @@ Follow this loop for **every change** to this repository:
 3. **Respect ownership**: Flux-managed and Ansible-managed areas must not be mixed
 4. **Protect secrets**: Plaintext secrets never belong in Git; use SOPS-backed vars
 5. **Prove consistency**: Commands/URLs/ports in docs must match manifests/playbooks
-6. **Lint always**: Run `ansible-lint` before committing
+6. **Lint always**: At minimum `ansible-lint infra/`; CI runs the full suite (see "CI & Required Checks" below)
 7. **Verify idempotency**: Second Ansible run must produce 0 changes
 
 ---
@@ -483,3 +483,102 @@ rg --type yaml "pattern"
 4. **Architecture**: Always verify images support both architectures before deploying
 5. **Resource limits**: Always set for `apps` namespace. Check with `kubectl top pods -n apps`
 6. **Documentation consistency**: After any code change, verify all references in docs match
+
+---
+
+## CI & Required Checks
+
+Every push to a non-`main` branch and every PR targeting `main` runs the `CI`
+workflow (`.github/workflows/ci.yml`). It's a single workflow with discrete,
+self-descriptive jobs aggregated into one required `CI Summary` status check.
+
+### Job dependency graph
+
+```
+detect-changes  (Detect Changed Areas — dorny/paths-filter dispatcher)
+      │
+      ├─► lint-yaml                       (Lint YAML)
+      ├─► lint-markdown                   (Lint Markdown)
+      ├─► lint-shell                      (Lint Shell Scripts)
+      ├─► lint-workflows                  (Lint GitHub Workflows — actionlint)
+      ├─► scan-secrets                    (Scan for Secrets — gitleaks)
+      ├─► ansible-lint                    (Ansible Lint)
+      ├─► validate-kubernetes-manifests   (kustomize build → kubeconform)
+      └─► enforce-cluster-policies        (kustomize build → conftest)
+                          │
+                          ▼
+                   ci-summary  (CI Summary — required status check)
+```
+
+Path filtering keeps PRs fast: a docs-only change skips Kubernetes validation,
+an Ansible-only change skips kubeconform, and so on. `CI Summary` is the only
+check the branch ruleset requires; it passes when every dependency is
+`success` or `skipped` and fails on any `failure`/`cancelled`.
+
+### What each check enforces
+
+| Check | Enforces |
+|---|---|
+| Lint YAML | Repo-wide YAML style (`.yamllint`); `infra/` is excluded (ansible-lint runs its own). |
+| Lint Markdown | Doc style via `markdownlint-cli2` (`.markdownlint-cli2.yaml`). |
+| Lint Shell Scripts | `shellcheck` over `scripts/`. |
+| Lint GitHub Workflows | `actionlint` over `.github/workflows/`. |
+| Scan for Secrets | `gitleaks` with `.gitleaks.toml`; SOPS-encrypted files are allowlisted. |
+| Ansible Lint | `ansible-lint` (production profile) over `infra/`. |
+| Validate Kubernetes Manifests | `kustomize build` for each per-app overlay piped to `kubeconform` (strict + CRD catalog). |
+| Enforce Cluster Policies | Conftest/OPA policies in `policy/kubernetes/` enforcing the CLAUDE.md non-negotiables (no `:latest`, resource limits in `apps`, namespace allowlist, no `cluster-admin` for `apps` subjects). |
+
+### Reproducing each check locally
+
+```bash
+# YAML
+pip install "yamllint==1.35.1"
+yamllint -c .yamllint cluster/ .github/
+
+# Markdown
+npx markdownlint-cli2 "**/*.md"
+
+# Shell
+shellcheck scripts/*.sh
+
+# GitHub Actions workflows
+curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+  | sudo tar -xz -C /usr/local/bin actionlint
+actionlint
+
+# Secrets
+brew install gitleaks    # or: docker run --rm -v "$PWD:/src" zricethezav/gitleaks:latest detect -s /src
+gitleaks detect --config .gitleaks.toml --no-banner
+
+# Ansible
+ansible-lint infra/
+
+# Kubernetes schema validation
+brew install kustomize kubeconform
+for d in cluster/apps/auth-service cluster/apps/device-service \
+         cluster/apps/litellm cluster/apps/n8n cluster/apps; do
+  kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
+    -summary -verbose \
+    -schema-location default \
+    -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+done
+
+# Cluster policies
+brew install conftest
+conftest verify --policy policy/kubernetes/
+kustomize build cluster/apps | conftest test --policy policy/kubernetes/ -
+```
+
+### Branch ruleset
+
+`main` is protected by the committed GitHub ruleset at
+`.github/rulesets/main-branch.json`. It requires:
+
+- A pull request with at least one approving review (stale reviews dismissed on push).
+- Status checks `CI Summary` and `CodeQL` green, on a branch up-to-date with `main`.
+- No force-push, no branch deletion.
+
+Renaming the `CI Summary` or `CodeQL` job display names breaks the ruleset
+silently — see `.github/rulesets/README.md` for the name contract and the
+`gh api` commands to install/update the ruleset.
+

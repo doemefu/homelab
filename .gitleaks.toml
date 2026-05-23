@@ -1,0 +1,37 @@
+# gitleaks configuration
+# https://github.com/gitleaks/gitleaks/wiki/Configuration
+#
+# Extends the upstream default ruleset. Allowlists are deliberately narrow:
+# SOPS-encrypted files (binary-like) and a handful of repo files known to
+# contain non-secret placeholder strings that match gitleaks heuristics.
+
+[extend]
+useDefault = true
+
+# SOPS-encrypted secrets are encrypted at rest. Gitleaks may otherwise flag
+# their base64-ish bodies as high-entropy content.
+[[allowlists]]
+description = "SOPS-encrypted secret files and age key material"
+paths = [
+  '''(?i)(^|/)\.sops\.ya?ml$''',
+  '''(?i)\.sops\.ya?ml$''',
+  '''(?i)\.age$''',
+]
+
+# litellm ConfigMap references env vars via `api_key: os.environ/X` — no real
+# secret material, but the literal `api_key` adjacent to the variable name can
+# trip pattern-based detectors.
+[[allowlists]]
+description = "litellm config — environment-variable indirection, no real secrets"
+paths = [
+  '''cluster/apps/litellm/configmap\.yaml''',
+]
+
+# Flux ImageRepository YAMLs include commented-out kubectl example lines like
+# `export GHCR_PAT='<token-with-read:packages>'`. The angle-bracket placeholder
+# is a template, not a secret, but gitleaks' generic-token rule flags it.
+[[allowlists]]
+description = "Flux ImageRepository setup comments — placeholder tokens, not real secrets"
+paths = [
+  '''cluster/apps/[^/]+/imagerepo\.yaml''',
+]
