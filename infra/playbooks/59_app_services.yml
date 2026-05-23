@@ -210,6 +210,7 @@
             n8n-client-secret-authservice: "{noop}{{ auth_service_n8n_client_secret }}"
             n8n-client-secret: "{{ auth_service_n8n_client_secret }}"
             litellm-client-secret-authservice: "{noop}{{ litellm_client_secret }}"
+            furchert-ch-client-secret: "{noop}{{ auth_service_furchert_ch_client_secret }}"
       no_log: true
       delegate_to: localhost
 

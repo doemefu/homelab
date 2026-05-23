@@ -38,6 +38,5 @@ storage_backup_mount: "/mnt/backup"
 
 # Helm 3 Binary — kubernetes.core.helm unterstützt nur Helm <4.0.0
 # brew install helm@3
-# Intel-Mac:       /usr/local/opt/helm@3/bin/helm  (Default)
-# Apple Silicon:   /opt/homebrew/opt/helm@3/bin/helm
-helm_binary: "/usr/local/opt/helm@3/bin/helm"
+# Auto-detected from controller PATH so the same value works on Intel- and Apple-Silicon Macs.
+helm_binary: "{{ lookup('ansible.builtin.pipe', 'command -v helm') }}"
