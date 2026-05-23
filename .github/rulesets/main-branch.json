@@ -1,5 +1,5 @@
 {
-  "name": "main-branch-protection",
+  "name": "main",
   "target": "branch",
   "enforcement": "active",
   "bypass_actors": [],
@@ -12,6 +12,31 @@
   "rules": [
     { "type": "deletion" },
     { "type": "non_fast_forward" },
+    {
+      "type": "copilot_code_review",
+      "parameters": {
+        "review_on_push": true,
+        "review_draft_pull_requests": false
+      }
+    },
+    {
+      "type": "code_scanning",
+      "parameters": {
+        "code_scanning_tools": [
+          {
+            "tool": "CodeQL",
+            "security_alerts_threshold": "medium_or_higher",
+            "alerts_threshold": "errors"
+          }
+        ]
+      }
+    },
+    {
+      "type": "code_quality",
+      "parameters": {
+        "severity": "errors"
+      }
+    },
     {
       "type": "pull_request",
       "parameters": {
