@@ -3,7 +3,7 @@
 This document defines all **integration interfaces** this infrastructure platform exposes to external services, applications, and developers. Use this to understand how to connect with, consume from, or deploy onto this platform.
 
 > **For deploying YOUR apps on this platform**: See **[APP-DEPLOYMENT.md](APP-DEPLOYMENT.md)**
-> **For platform contracts and source-of-truth locations**: See **[INTERFACES.md](INTERFACES.md)**
+> **For operating the cluster**: See **[DEPLOYMENT.md](DEPLOYMENT.md)**
 
 ---
 
@@ -137,8 +137,8 @@ All services are discoverable via Kubernetes internal DNS.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health/liveliness` | Liveness probe (120s initial delay) |
-| GET | `/health/readiness` | Readiness probe (120s initial delay) |
+| GET | `/health/liveliness` | Liveness probe (startupProbe covers boot; ~200s budget on first start) |
+| GET | `/health/readiness` | Readiness probe (startupProbe covers boot; 0s initial delay once started) |
 | GET | `/v1/models` | List available model routes |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat completions |
 | GET | `/ui` | Web dashboard |
@@ -147,7 +147,7 @@ All services are discoverable via Kubernetes internal DNS.
 - `mistral-large` → `mistral-large-latest`
 - `mistral-small` → `mistral-small-latest`
 - `mistral-devstral` → `devstral-latest`
-- `mistral-magistral` → `magistral-latest`
+- `mistral-magistral` → `mistral/magistral-medium-latest`
 - `mistral-codestral` → `codestral-latest` (uses dedicated `MISTRAL_CODESTRAL_KEY`)
 
 **OIDC Integration**: LiteLLM UI and API use auth-service for SSO login:
@@ -204,7 +204,7 @@ Real-time IoT device management service.
 6. Flux Kustomization applies the updated manifests from `k8s/`
 
 **Required Files** in `cluster/apps/<app>/`:
-```
+```text
 cluster/apps/<app>/
   kustomization.yaml      # Lists all CRDs for this app
   source.yaml            # GitRepository pointing to app repo
@@ -497,7 +497,7 @@ docker buildx imagetools inspect <image>:<tag> | grep Platform
 ```
 
 Expected output includes both:
-```
+```text
 Platform: linux/amd64
 Platform: linux/arm64
 ```
