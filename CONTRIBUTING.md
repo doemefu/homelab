@@ -210,9 +210,9 @@ ansible-playbook infra/playbooks/00_bootstrap.yml \
 
 ### Worklog Requirement
 
-**Every change** to this repository MUST have a corresponding worklog in `.agent/worklogs/`.
+**Every change** to this repository MUST have a corresponding worklog in `.claude/worklogs/`.
 
-Worklog template: `.agent/worklog-template.md`
+Worklog template: `.claude/worklog-template.md`
 
 ### Version Pinning
 

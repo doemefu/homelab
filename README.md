@@ -295,8 +295,7 @@ docs/                        # Architecture and planning documents
 scripts/                     # Utility scripts
   smoke-test-litellm.sh       # LiteLLM health and endpoint verification
 
-.agent/                       # Agent workflow files
-.claude/                      # Claude agent configurations
+.claude/                      # Claude agent configuration (workflow rules, agents, worklogs, memory)
 .github/                      # GitHub workflows
 ```
 

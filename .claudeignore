@@ -1,4 +1,4 @@
-# Secrets — niemals in Kontext laden
+# Secrets — never load into context
 *.sops.yaml
 *.age
 *_secret*
@@ -7,13 +7,13 @@
 .env
 .env.*
 
-# Worklogs (gross, selten relevant)
-.agent/worklogs/
+# Worklogs (large, rarely relevant)
+.claude/worklogs/
 
 # Git internals
 .git/
 
-# Generierte / temporäre Files
+# Generated / temporary files
 *.retry
 __pycache__/
 *.pyc
