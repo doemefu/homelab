@@ -1,0 +1,262 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+# Mirrors the auth-service pattern: cancels older runs on the same PR (or branch
+# for non-PR pushes) without referencing untrusted head_ref content.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast change-area dispatcher. Every heavier job conditions on its outputs.
+  # Negation patterns (`!...`) explicitly exclude SOPS-encrypted secrets and
+  # the generated Flux gotk bundle so we never lint/validate them.
+  # ---------------------------------------------------------------------------
+  detect-changes:
+    name: Detect Changed Areas
+    runs-on: ubuntu-latest
+    outputs:
+      ansible: ${{ steps.filter.outputs.ansible }}
+      cluster: ${{ steps.filter.outputs.cluster }}
+      policy: ${{ steps.filter.outputs.policy }}
+      yaml: ${{ steps.filter.outputs.yaml }}
+      shell: ${{ steps.filter.outputs.shell }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            ansible:
+              - 'infra/**'
+              - '!infra/**/*.sops.yml'
+              - '!infra/**/*.sops.yaml'
+            cluster:
+              - 'cluster/**'
+              - '!cluster/**/*.sops.yml'
+              - '!cluster/**/*.sops.yaml'
+            policy:
+              - 'policy/**'
+            yaml:
+              - '**/*.yml'
+              - '**/*.yaml'
+              - '!infra/**'
+              - '!**/*.sops.yml'
+              - '!**/*.sops.yaml'
+              - '!.sops.yaml'
+              - '!cluster/flux-system/**'
+            shell:
+              - 'scripts/**/*.sh'
+            workflows:
+              - '.github/workflows/**'
+
+  # ---------------------------------------------------------------------------
+  # Lint: cheap, fast, parallel. Each is its own status check so PR reviewers
+  # see exactly what failed.
+  # ---------------------------------------------------------------------------
+  lint-yaml:
+    name: Lint YAML
+    needs: detect-changes
+    if: needs.detect-changes.outputs.yaml == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install yamllint
+        run: pip install "yamllint==1.35.1"
+      - name: Run yamllint
+        # Lint the whole repo; .yamllint's `ignore:` carves out infra/,
+        # cluster/flux-system/, SOPS-encrypted files, and age keys. Keeping
+        # the scope here matches what the `yaml` change filter triggers on.
+        run: yamllint -c .yamllint .
+
+  lint-shell:
+    name: Lint Shell Scripts
+    needs: detect-changes
+    if: needs.detect-changes.outputs.shell == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: ./scripts
+
+  lint-workflows:
+    name: Lint GitHub Workflows
+    needs: detect-changes
+    if: needs.detect-changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install actionlint (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin actionlint
+      - name: Run actionlint
+        run: actionlint -color
+
+  # ---------------------------------------------------------------------------
+  # Ansible lint (migrated from the standalone ansible-lint.yml workflow).
+  # ---------------------------------------------------------------------------
+  ansible-lint:
+    name: Ansible Lint
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ansible == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install ansible-lint and ansible-core
+        run: pip install "ansible-lint==25.12.2" "ansible-core==2.20.4"
+      - name: Install Ansible collections
+        run: ansible-galaxy collection install -r infra/requirements.yml
+      - name: Run ansible-lint
+        run: ansible-lint infra/
+
+  # ---------------------------------------------------------------------------
+  # Kubernetes schema validation. Iterates only the per-app overlays — does NOT
+  # include cluster/flux-system/ (generated gotk bundle, huge and noisy).
+  # ---------------------------------------------------------------------------
+  validate-kubernetes-manifests:
+    name: Validate Kubernetes Manifests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cluster == 'true'
+    runs-on: ubuntu-latest
+    env:
+      KUSTOMIZE_VERSION: v5.4.3
+      KUBECONFORM_VERSION: v0.6.7
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install kustomize (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kustomize
+      - name: Install kubeconform (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+      - name: Validate each per-app overlay
+        run: |
+          set -euo pipefail
+          status=0
+          for d in cluster/apps/auth-service \
+                   cluster/apps/device-service \
+                   cluster/apps/litellm \
+                   cluster/apps/n8n \
+                   cluster/apps; do
+            echo "::group::kubeconform $d"
+            if ! kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
+                  -summary -verbose \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; then
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+  # ---------------------------------------------------------------------------
+  # Conftest/OPA policies that encode CLAUDE.md non-negotiables. Triggered by
+  # cluster/** OR policy/** changes (a policy edit must rerun its own gate).
+  # ---------------------------------------------------------------------------
+  enforce-cluster-policies:
+    name: Enforce Cluster Policies
+    needs: detect-changes
+    if: |
+      needs.detect-changes.outputs.cluster == 'true' ||
+      needs.detect-changes.outputs.policy == 'true'
+    runs-on: ubuntu-latest
+    env:
+      KUSTOMIZE_VERSION: v5.4.3
+      CONFTEST_VERSION: 0.56.0
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install kustomize (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kustomize
+      - name: Install conftest (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+      - name: Verify policy unit tests
+        # `verify` walks every *_test.rego file regardless of package, so it
+        # doesn't need --all-namespaces. The per-file packages
+        # (kubernetes.images / kubernetes.resources / kubernetes.namespaces /
+        # kubernetes.rbac) just keep test fixtures from cross-coupling — see
+        # policy/kubernetes/README.md.
+        run: conftest verify --policy policy/kubernetes/
+      - name: Enforce policies against rendered manifests
+        run: |
+          set -euo pipefail
+          status=0
+          for d in cluster/apps/auth-service \
+                   cluster/apps/device-service \
+                   cluster/apps/litellm \
+                   cluster/apps/n8n \
+                   cluster/apps; do
+            echo "::group::conftest $d"
+            if ! kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -; then
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+  # ---------------------------------------------------------------------------
+  # Single aggregate status check — this is the only check the branch ruleset
+  # requires. Passes if every dependency is success OR skipped; fails if any
+  # is failure or cancelled.
+  # ---------------------------------------------------------------------------
+  ci-summary:
+    name: CI Summary
+    if: always()
+    needs:
+      - detect-changes
+      - lint-yaml
+      - lint-shell
+      - lint-workflows
+      - ansible-lint
+      - validate-kubernetes-manifests
+      - enforce-cluster-policies
+    runs-on: ubuntu-latest
+    env:
+      # `needs` results are controlled by GitHub Actions itself
+      # (one of: success/failure/skipped/cancelled), not user input.
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        run: |
+          set -eu
+          echo "$NEEDS_JSON" | jq .
+          if echo "$NEEDS_JSON" \
+             | jq -e 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled")' \
+             >/dev/null; then
+            echo "::error::At least one CI job failed or was cancelled."
+            exit 1
+          fi
+          echo "All required jobs succeeded or were skipped."
