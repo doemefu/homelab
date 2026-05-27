@@ -39,3 +39,6 @@ infra/inventory/group_vars/secrets.sops.yml.plaintext
 .idea/
 .vscode/
 /macbook/
+/docs/legacy/
+/docs/plans/
+/docs/superpowers/

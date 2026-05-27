@@ -67,7 +67,7 @@ ansible-playbook infra/playbooks/40_platform.yml
 # 5) Monitoring: kube-prometheus-stack
 ansible-playbook infra/playbooks/41_monitoring.yml
 
-# 6) Shared app infrastructure: PostgreSQL 17, InfluxDB 2, Mosquito 2
+# 6) Shared app infrastructure: PostgreSQL 17, InfluxDB 2, Mosquitto 2
 ansible-playbook infra/playbooks/50_apps_infra.yml
 
 # 7) App secrets and bootstrap (must run before 52 and 53)

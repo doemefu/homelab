@@ -258,7 +258,7 @@ The Postgres dependency is real but low-cost — the homelab already runs a Post
 └───────────────────────────────┬───────────────────────────────┘
                                 │ Tunnel (encrypted)
 ┌───────────────────────────────▼───────────────────────────────┐
-│  k3s Cluster — namespace: litellm                             │
+│  k3s Cluster — namespace: apps                                │
 │                                                               │
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │  Deployment: litellm                                    │  │
@@ -354,7 +354,7 @@ model_list:
 
   - model_name: mistral-codestral
     litellm_params:
-      model: mistral/mistral-codestral-latest
+      model: mistral/codestral-latest
       api_key: os.environ/MISTRAL_CODESTRAL_KEY
 
   # Placeholder — enable when Ollama is deployed on MacBook Air node
@@ -416,13 +416,11 @@ graph LR
     end
 
     subgraph k3s Cluster
-        subgraph litellm namespace
+        subgraph apps namespace
             LLM[litellm pod\n:4000]
             CFD[cloudflared pod]
             SEC[Secret\nkeys + DB creds]
             CM[ConfigMap\nmodel routing]
-        end
-        subgraph default namespace
             PG[(Postgres\nDB: litellm)]
         end
         subgraph future

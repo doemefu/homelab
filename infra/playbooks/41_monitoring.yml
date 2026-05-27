@@ -54,21 +54,46 @@
       delegate_to: localhost
       changed_when: false
 
-    - name: Stuck Helm-Release bereinigen (pending-upgrade / pending-rollback)
+    - name: Helm-Release Status ermitteln
+      ansible.builtin.command: >
+        {{ helm_binary }} status kube-prometheus-stack
+        --namespace monitoring
+        --kubeconfig {{ kubeconfig }}
+        --output json
+      delegate_to: localhost
+      register: helm_release_status_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Helm-Release Status als Fact setzen
+      ansible.builtin.set_fact:
+        helm_release_status: "{{ (helm_release_status_raw.stdout | default('{}', true)) | from_json }}"
+
+    # `helm rollback` on a release stuck in `pending-install` fails with
+    # "no deployed releases" because there is no prior revision to roll back to.
+    # Split the cleanup: rollback for pending-upgrade/pending-rollback,
+    # uninstall for pending-install.
+    - name: Stuck Helm-Release per rollback bereinigen (pending-upgrade / pending-rollback)
       ansible.builtin.command: >
         {{ helm_binary }} rollback kube-prometheus-stack
         --namespace monitoring
         --kubeconfig {{ kubeconfig }}
       delegate_to: localhost
       changed_when: true
-      vars:
-        _status: "{{ lookup('pipe',
-          helm_binary ~ ' status kube-prometheus-stack'
-          ~ ' --namespace monitoring'
-          ~ ' --kubeconfig ' ~ kubeconfig
-          ~ ' --output json 2>/dev/null || echo \\'{}\\''
-          ) | from_json }}"
-      when: _status.info is defined and _status.info.status in ['pending-upgrade', 'pending-rollback', 'pending-install']
+      when:
+        - helm_release_status.info is defined
+        - helm_release_status.info.status in ['pending-upgrade', 'pending-rollback']
+
+    - name: Stuck Helm-Release per uninstall bereinigen (pending-install)
+      ansible.builtin.command: >
+        {{ helm_binary }} uninstall kube-prometheus-stack
+        --namespace monitoring
+        --kubeconfig {{ kubeconfig }}
+      delegate_to: localhost
+      changed_when: true
+      when:
+        - helm_release_status.info is defined
+        - helm_release_status.info.status == 'pending-install'
 
     - name: Kube-Prometheus-Stack deployen
       kubernetes.core.helm:

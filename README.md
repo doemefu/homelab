@@ -9,9 +9,15 @@ This is the **Infrastructure-as-Code** repository for a heterogeneous Kubernetes
 ### Network Topology
 
 ```text
-Internet → Cloudflare Tunnel → cloudflared (in-cluster) → Traefik → Services
-                           ↓
-                    LAN (192.168.1.0/24)
+Internet → Cloudflare Tunnel → cloudflared (in-cluster) → ClusterIP Services
+                                       │                  (per-host routes in
+                                       │                   infra/playbooks/40_platform.yml)
+                                       ▼
+                                LAN (192.168.1.0/24)
+
+Traefik handles in-cluster Ingress only (cert-manager-issued TLS, intra-LAN
+hostnames). Public hostnames bypass Traefik — Cloudflare Tunnel routes them
+directly to the backing Service per the rules in 40_platform.yml.
 ```
 
 ### Node Inventory
@@ -289,8 +295,7 @@ docs/                        # Architecture and planning documents
 scripts/                     # Utility scripts
   smoke-test-litellm.sh       # LiteLLM health and endpoint verification
 
-.agent/                       # Agent workflow files
-.claude/                      # Claude agent configurations
+.claude/                      # Claude agent configuration (workflow rules, agents, worklogs, memory)
 .github/                      # GitHub workflows
 ```
 

@@ -136,7 +136,7 @@ ansible-playbook infra/playbooks/<playbook>.yml -l <node>
 ```bash
 # Verify referenced facts against source files
 # Search for references in docs:
-rg -n "playbook|host|port|service>" OVERVIEW.md INTERFACES.md DEPLOYMENT.md APP-DEPLOYMENT.md
+rg -n "playbook|host|port|service" README.md INTERFACES.md DEPLOYMENT.md APP-DEPLOYMENT.md
 
 # Verify those references exist in actual files:
 rg -n "<same_pattern>" infra/playbooks/ cluster/apps/ cluster/values/ infra/inventory/
@@ -210,9 +210,9 @@ ansible-playbook infra/playbooks/00_bootstrap.yml \
 
 ### Worklog Requirement
 
-**Every change** to this repository MUST have a corresponding worklog in `.agent/worklogs/`.
+**Every change** to this repository MUST have a corresponding worklog in `.claude/worklogs/`.
 
-Worklog template: `.agent/worklog-template.md`
+Worklog template: `.claude/worklog-template.md`
 
 ### Version Pinning
 
@@ -253,9 +253,9 @@ Each file has a specific purpose to prevent drift:
 
 | File | Responsibility | What belongs here |
 |------|---------------|-------------------|
-| **OVERVIEW.md** | Platform context | What this repo is, architecture, features, public URLs, APIs, status, repo structure |
+| **README.md** | Platform context | What this repo is, architecture, features, public URLs, APIs, status, repo structure |
 | **INTERFACES.md** | Integration contracts | How services interact with the platform, namespace contract, service discovery, API/auth interfaces |
-| **DEVELOPMENT.md** | Contributor workflow | This file — how to work on the repo, local setup, Ansible workflow, style guides |
+| **CONTRIBUTING.md** | Contributor workflow | This file — how to work on the repo, local setup, Ansible workflow, style guides |
 | **DEPLOYMENT.md** | Cluster operations | How to deploy/operate the cluster, prerequisites, step-by-step, health checks, troubleshooting |
 | **APP-DEPLOYMENT.md** | App developer guide | How external developers deploy THEIR apps on this platform |
 
