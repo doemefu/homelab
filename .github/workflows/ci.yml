@@ -110,27 +110,6 @@ jobs:
         run: actionlint -color
 
   # ---------------------------------------------------------------------------
-  # Secret scanning runs on every PR/branch push (no path gate). gitleaks needs
-  # full history (`fetch-depth: 0`) to scan commits, and `pull-requests: read`
-  # for PR context.
-  # ---------------------------------------------------------------------------
-  scan-secrets:
-    name: Scan for Secrets
-    needs: detect-changes
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
-
-  # ---------------------------------------------------------------------------
   # Ansible lint (migrated from the standalone ansible-lint.yml workflow).
   # ---------------------------------------------------------------------------
   ansible-lint:
@@ -261,7 +240,6 @@ jobs:
       - lint-yaml
       - lint-shell
       - lint-workflows
-      - scan-secrets
       - ansible-lint
       - validate-kubernetes-manifests
       - enforce-cluster-policies

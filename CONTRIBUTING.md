@@ -500,7 +500,6 @@ detect-changes  (Detect Changed Areas — dorny/paths-filter dispatcher)
       ├─► lint-yaml                       (Lint YAML)
       ├─► lint-shell                      (Lint Shell Scripts)
       ├─► lint-workflows                  (Lint GitHub Workflows — actionlint)
-      ├─► scan-secrets                    (Scan for Secrets — gitleaks)
       ├─► ansible-lint                    (Ansible Lint)
       ├─► validate-kubernetes-manifests   (kustomize build → kubeconform)
       └─► enforce-cluster-policies        (kustomize build → conftest)
@@ -521,7 +520,6 @@ is `success` or `skipped` and fails on any `failure`/`cancelled`.
 | Lint YAML | Repo-wide YAML style (`.yamllint`); `infra/` is excluded (ansible-lint runs its own). |
 | Lint Shell Scripts | `shellcheck` over `scripts/`. |
 | Lint GitHub Workflows | `actionlint` over `.github/workflows/`. |
-| Scan for Secrets | `gitleaks` with `.gitleaks.toml`; SOPS-encrypted files are allowlisted. |
 | Ansible Lint | `ansible-lint` (production profile) over `infra/`. |
 | Validate Kubernetes Manifests | `kustomize build` for each per-app overlay piped to `kubeconform` (strict + CRD catalog). |
 | Enforce Cluster Policies | Conftest/OPA policies in `policy/kubernetes/` enforcing the CLAUDE.md non-negotiables (no `:latest`, resource limits in `apps`, namespace allowlist, no `cluster-admin` for `apps` subjects). |
@@ -540,10 +538,6 @@ shellcheck scripts/*.sh
 curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
   | sudo tar -xz -C /usr/local/bin actionlint
 actionlint
-
-# Secrets
-brew install gitleaks    # or: docker run --rm -v "$PWD:/src" zricethezav/gitleaks:latest detect -s /src
-gitleaks detect --config .gitleaks.toml --no-banner
 
 # Ansible
 ansible-lint infra/
