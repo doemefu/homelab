@@ -10,7 +10,10 @@ on:
 
 jobs:
   analyze:
-    name: Analyze (actions)
+    # Display name kept stable as "CodeQL" — referenced by
+    # .github/rulesets/main-branch.json as a required status check.
+    # Do not rename without updating the ruleset.
+    name: CodeQL
     runs-on: ubuntu-latest
     permissions:
       security-events: write
