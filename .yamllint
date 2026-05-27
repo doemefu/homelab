@@ -2,8 +2,11 @@
 # yamllint configuration
 # https://yamllint.readthedocs.io/en/stable/configuration.html
 #
-# Scope: cluster/, .github/, repo-root config YAML.
+# Scope: everything under the repo root except the directories listed in
+# `ignore:` below. CI invokes `yamllint -c .yamllint .`, so the scope here
+# is the single source of truth.
 # infra/ is excluded — ansible-lint runs its own internal yamllint there.
+# cluster/flux-system/ is excluded — generated gotk bundle, not hand-edited.
 # SOPS-encrypted and age key material is excluded so the linter never
 # parses or surfaces encrypted secret content.
 

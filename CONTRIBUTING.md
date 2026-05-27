@@ -498,7 +498,6 @@ self-descriptive jobs aggregated into one required `CI Summary` status check.
 detect-changes  (Detect Changed Areas — dorny/paths-filter dispatcher)
       │
       ├─► lint-yaml                       (Lint YAML)
-      ├─► lint-markdown                   (Lint Markdown)
       ├─► lint-shell                      (Lint Shell Scripts)
       ├─► lint-workflows                  (Lint GitHub Workflows — actionlint)
       ├─► scan-secrets                    (Scan for Secrets — gitleaks)
@@ -510,17 +509,16 @@ detect-changes  (Detect Changed Areas — dorny/paths-filter dispatcher)
                    ci-summary  (CI Summary — required status check)
 ```
 
-Path filtering keeps PRs fast: a docs-only change skips Kubernetes validation,
-an Ansible-only change skips kubeconform, and so on. `CI Summary` is the only
-check the branch ruleset requires; it passes when every dependency is
-`success` or `skipped` and fails on any `failure`/`cancelled`.
+Path filtering keeps PRs fast: a YAML-only change skips Ansible Lint and
+kubeconform, an Ansible-only change skips kubeconform, and so on. `CI Summary`
+is the only check the branch ruleset requires; it passes when every dependency
+is `success` or `skipped` and fails on any `failure`/`cancelled`.
 
 ### What each check enforces
 
 | Check | Enforces |
 |---|---|
 | Lint YAML | Repo-wide YAML style (`.yamllint`); `infra/` is excluded (ansible-lint runs its own). |
-| Lint Markdown | Doc style via `markdownlint-cli2` (`.markdownlint-cli2.yaml`). |
 | Lint Shell Scripts | `shellcheck` over `scripts/`. |
 | Lint GitHub Workflows | `actionlint` over `.github/workflows/`. |
 | Scan for Secrets | `gitleaks` with `.gitleaks.toml`; SOPS-encrypted files are allowlisted. |
@@ -533,10 +531,7 @@ check the branch ruleset requires; it passes when every dependency is
 ```bash
 # YAML
 pip install "yamllint==1.35.1"
-yamllint -c .yamllint cluster/ .github/
-
-# Markdown
-npx markdownlint-cli2 "**/*.md"
+yamllint -c .yamllint .
 
 # Shell
 shellcheck scripts/*.sh
