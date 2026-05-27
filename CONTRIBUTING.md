@@ -222,6 +222,35 @@ Worklog template: `.claude/worklog-template.md`
 - Container images: Pinned tags in deployment manifests
 - Python packages: `infra/requirements.yml`
 
+### Helm Chart Version Tracking (Dependabot Bumps)
+
+Helm chart versions live inline in Ansible playbooks under
+`infra/playbooks/` (look for `chart_version:`). Dependabot can't read
+those — its `helm` ecosystem only parses `Chart.yaml` `dependencies:`
+blocks. We bridge the gap with a tracking-only umbrella chart at
+`.github/helm-tracking/Chart.yaml`.
+
+**When Dependabot opens a chart-bump PR** (it touches only
+`.github/helm-tracking/Chart.yaml`):
+
+1. Read the comment above the bumped dependency — it names the
+   `infra/playbooks/<file>.yml` that holds the real pin.
+2. In the same PR, update the matching `chart_version: "..."` line in
+   that playbook.
+3. Skim the chart's upstream release notes for breaking changes
+   (`https://github.com/<owner>/<chart>/releases` or the chart
+   repository's index).
+4. If the chart ships CRDs (cert-manager, kube-prometheus-stack,
+   longhorn), check the chart's upgrade notes for required CRD
+   updates and apply them before the playbook run.
+5. Merge, then run the relevant playbook
+   (`ansible-playbook infra/playbooks/<file>.yml -l <node>`) to pick
+   up the new chart.
+
+**Never install or render** `.github/helm-tracking/Chart.yaml` — it is
+metadata for Dependabot only. The header of that file documents the
+full rationale.
+
 ### IP Addresses
 
 - Node IPs are **static or DHCP-reserved** in `infra/inventory/hosts.yml`

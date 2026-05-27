@@ -1,0 +1,96 @@
+# Helm-chart version tracking manifest — DO NOT INSTALL, DO NOT RENDER.
+#
+# Purpose
+# -------
+# Our cluster's Helm chart versions are pinned inline inside Ansible
+# playbooks (`infra/playbooks/*.yml`, look for `chart_version:`). That is
+# where the cluster reads them from. Dependabot's `helm` ecosystem,
+# however, can only read versions out of a Chart.yaml `dependencies:`
+# block — it does not scan arbitrary YAML. This file exists *solely*
+# to give Dependabot something to scan; it is a tracking artifact, not
+# a real Helm chart.
+#
+# How it works
+# ------------
+# 1. Dependabot polls each `repository:` listed below for new chart
+#    releases (config: `.github/dependabot.yml`, ecosystem `helm`,
+#    directory `/.github/helm-tracking`).
+# 2. When a new version drops, Dependabot opens a PR that bumps the
+#    `version:` field for that dependency *in this file*.
+# 3. You — the human reviewing the PR — copy the new version into the
+#    corresponding `chart_version: "..."` line in the relevant playbook
+#    under `infra/playbooks/` (see mapping in the comment on each entry
+#    below), commit the playbook change to the same PR, and merge.
+# 4. The next `ansible-playbook ... -l <node>` run picks up the new
+#    chart version. This file does **not** drive any install — Helm
+#    never sees it.
+#
+# Why not just put the versions in the playbook and let Renovate read
+# them? Renovate can do that with `customManagers`, but we'd be adding
+# a second bot just for one file pattern. Dependabot-with-umbrella is
+# the cheaper trade-off; the cost is one manual sync step per bump.
+#
+# Why this file lives under `.github/` rather than `cluster/`
+# -----------------------------------------------------------
+# - It is bot metadata, not deployable infrastructure.
+# - `cluster/` is rendered by `kustomize build`, validated by
+#   `kubeconform`, and policy-checked by `conftest`. Keeping the
+#   tracking chart out of that tree means none of those tools have to
+#   special-case it.
+# - Co-locating with `.github/dependabot.yml` makes the relationship
+#   between the two files obvious to future maintainers.
+#
+# Maintenance
+# -----------
+# - When a new chart is adopted in a playbook, add a matching entry
+#   here in the same PR. When a chart is removed, delete the entry.
+# - The umbrella metadata (apiVersion/name/version/appVersion) is
+#   placeholder content for Dependabot's parser — do not invent
+#   semantics for it.
+---
+apiVersion: v2
+name: homelab-charts-tracked
+description: |
+  Version-tracking-only umbrella chart consumed by Dependabot. NEVER
+  installed by Helm. See the header comment in this file for the full
+  workflow.
+type: application
+version: 0.0.0
+appVersion: "0"
+
+dependencies:
+  # Distributed block storage. Drives StorageClass `longhorn`.
+  # Sync target: `infra/playbooks/30_longhorn.yml` → `chart_version:`
+  - name: longhorn
+    version: "1.7.2"
+    repository: "https://charts.longhorn.io"
+
+  # TLS issuance (Let's Encrypt).
+  # Sync target: `infra/playbooks/40_platform.yml` → `chart_version:` (cert-manager)
+  - name: cert-manager
+    version: "v1.17.1"
+    repository: "https://charts.jetstack.io"
+
+  # Outbound tunnel to Cloudflare; only ingress path from the public internet.
+  # Sync target: `infra/playbooks/40_platform.yml` → `chart_version:` (cloudflare-tunnel-remote)
+  - name: cloudflare-tunnel-remote
+    version: "0.1.2"
+    repository: "https://cloudflare.github.io/helm-charts"
+
+  # Prometheus + Alertmanager + Grafana bundle.
+  # Sync target: `infra/playbooks/41_monitoring.yml` → `chart_version:`
+  - name: kube-prometheus-stack
+    version: "69.3.1"
+    repository: "https://prometheus-community.github.io/helm-charts"
+
+  # Time-series DB for device-service metrics.
+  # Sync target: `infra/playbooks/50_apps_infra.yml` → `chart_version:` (influxdb2)
+  - name: influxdb2
+    version: "2.1.2"
+    repository: "https://helm.influxdata.com/"
+
+  # Home Assistant (Docker on mba1 — chart kept tracked in case we migrate to k3s).
+  # Sync target: `infra/playbooks/51_homeassistant.yml` → `chart_version:`
+  - name: home-assistant
+    version: "0.3.51"
+    repository: "https://pajikos.github.io/home-assistant-helm-chart/"
