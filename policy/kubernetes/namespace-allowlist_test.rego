@@ -1,4 +1,4 @@
-package main
+package kubernetes.namespaces
 
 test_allow_apps_namespace {
     result := deny with input as {

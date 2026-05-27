@@ -1,4 +1,4 @@
-package main
+package kubernetes.rbac
 
 # Forbid granting cluster-admin to any subject in the `apps` namespace.
 #

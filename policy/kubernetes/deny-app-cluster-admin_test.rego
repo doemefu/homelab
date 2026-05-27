@@ -1,4 +1,4 @@
-package main
+package kubernetes.rbac
 
 test_deny_crb_apps_sa_cluster_admin {
     result := deny with input as {

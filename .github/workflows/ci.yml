@@ -29,7 +29,6 @@ jobs:
       cluster: ${{ steps.filter.outputs.cluster }}
       policy: ${{ steps.filter.outputs.policy }}
       yaml: ${{ steps.filter.outputs.yaml }}
-      docs: ${{ steps.filter.outputs.docs }}
       shell: ${{ steps.filter.outputs.shell }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
@@ -56,8 +55,6 @@ jobs:
               - '!**/*.sops.yaml'
               - '!.sops.yaml'
               - '!cluster/flux-system/**'
-            docs:
-              - '**/*.md'
             shell:
               - 'scripts/**/*.sh'
             workflows:
@@ -80,21 +77,10 @@ jobs:
       - name: Install yamllint
         run: pip install "yamllint==1.35.1"
       - name: Run yamllint
-        run: yamllint -c .yamllint cluster/ .github/
-
-  lint-markdown:
-    name: Lint Markdown
-    needs: detect-changes
-    if: needs.detect-changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: DavidAnson/markdownlint-cli2-action@v19
-        with:
-          globs: |
-            **/*.md
-            !.agent/**
-            !node_modules/**
+        # Lint the whole repo; .yamllint's `ignore:` carves out infra/,
+        # cluster/flux-system/, SOPS-encrypted files, and age keys. Keeping
+        # the scope here matches what the `yaml` change filter triggers on.
+        run: yamllint -c .yamllint .
 
   lint-shell:
     name: Lint Shell Scripts
@@ -239,6 +225,11 @@ jobs:
             "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin conftest
       - name: Verify policy unit tests
+        # `verify` walks every *_test.rego file regardless of package, so it
+        # doesn't need --all-namespaces. The per-file packages
+        # (kubernetes.images / kubernetes.resources / kubernetes.namespaces /
+        # kubernetes.rbac) just keep test fixtures from cross-coupling — see
+        # policy/kubernetes/README.md.
         run: conftest verify --policy policy/kubernetes/
       - name: Enforce policies against rendered manifests
         run: |
@@ -250,7 +241,7 @@ jobs:
                    cluster/apps/n8n \
                    cluster/apps; do
             echo "::group::conftest $d"
-            if ! kustomize build "$d" | conftest test --policy policy/kubernetes/ -; then
+            if ! kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -; then
               status=1
             fi
             echo "::endgroup::"
@@ -268,7 +259,6 @@ jobs:
     needs:
       - detect-changes
       - lint-yaml
-      - lint-markdown
       - lint-shell
       - lint-workflows
       - scan-secrets

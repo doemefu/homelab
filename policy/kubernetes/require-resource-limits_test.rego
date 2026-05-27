@@ -1,4 +1,4 @@
-package main
+package kubernetes.resources
 
 test_deny_missing_limits_in_apps {
     result := deny with input as {

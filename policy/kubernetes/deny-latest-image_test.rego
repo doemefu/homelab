@@ -1,4 +1,4 @@
-package main
+package kubernetes.images
 
 test_deny_explicit_latest {
     result := deny with input as {
@@ -75,4 +75,40 @@ test_cronjob_latest_denied {
         }}}}},
     }
     count(result) == 1
+}
+
+# Regression: a registry with a port number contains `:`, but the tag
+# (if any) lives in the *last* path segment. Naive `contains(image, ":")`
+# treated this image as explicitly tagged and let it through.
+test_deny_registry_port_implicit_latest {
+    result := deny with input as {
+        "kind": "Deployment",
+        "metadata": {"name": "x", "namespace": "apps"},
+        "spec": {"template": {"spec": {"containers": [
+            {"name": "c", "image": "registry.example.com:5000/repo/image"},
+        ]}}},
+    }
+    count(result) == 1
+}
+
+test_allow_registry_port_with_pinned_tag {
+    result := deny with input as {
+        "kind": "Deployment",
+        "metadata": {"name": "x", "namespace": "apps"},
+        "spec": {"template": {"spec": {"containers": [
+            {"name": "c", "image": "registry.example.com:5000/repo/image:1.0"},
+        ]}}},
+    }
+    count(result) == 0
+}
+
+test_allow_registry_port_with_digest {
+    result := deny with input as {
+        "kind": "Deployment",
+        "metadata": {"name": "x", "namespace": "apps"},
+        "spec": {"template": {"spec": {"containers": [
+            {"name": "c", "image": "registry.example.com:5000/repo/image@sha256:abcdef"},
+        ]}}},
+    }
+    count(result) == 0
 }

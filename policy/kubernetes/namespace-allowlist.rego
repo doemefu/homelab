@@ -1,4 +1,4 @@
-package main
+package kubernetes.namespaces
 
 # Allow namespaced objects only in known namespaces. Cluster-scoped kinds
 # (which carry no namespace) are exempt by guard.

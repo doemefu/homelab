@@ -1,4 +1,4 @@
-package main
+package kubernetes.images
 
 # Forbid container images that resolve to :latest at runtime.
 #
@@ -40,16 +40,26 @@ all_containers[c] {
     c := input.spec.jobTemplate.spec.template.spec.initContainers[_]
 }
 
-# Explicit :latest tag.
-is_latest(image) {
-    endswith(image, ":latest")
+# The image-reference grammar (`[registry[:port]/]repo[/...]/name[:tag][@digest]`)
+# means the only authoritative place to look for a tag is the *last* path
+# segment. Checking for `:` anywhere in the string would let
+# `registry:5000/repo/image` slip past as "explicitly tagged" when it's
+# actually implicit `:latest`.
+last_segment(image) := s {
+    parts := split(image, "/")
+    s := parts[count(parts) - 1]
 }
 
-# Implicit :latest — no tag and no digest. `foo` or `foo/bar` with no `:` and
-# no `@` resolves to :latest on pull.
+# Explicit :latest in the last segment.
 is_latest(image) {
-    not contains(image, ":")
     not contains(image, "@")
+    endswith(last_segment(image), ":latest")
+}
+
+# Implicit :latest — last segment has no `:` (no tag), no digest.
+is_latest(image) {
+    not contains(image, "@")
+    not contains(last_segment(image), ":")
 }
 
 deny[msg] {

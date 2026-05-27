@@ -1,4 +1,4 @@
-package main
+package kubernetes.resources
 
 # Require every container in the `apps` namespace to declare both
 # resources.requests and resources.limits.
