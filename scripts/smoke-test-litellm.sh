@@ -42,7 +42,7 @@ echo "---"
 
 # 1. Liveness probe
 echo "[1/5] Health check (liveness)..."
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/health/liveliness")
+STATUS=$(curl -s "${CURL_QUICK[@]}" -o /dev/null -w "%{http_code}" "$BASE_URL/health/liveliness")
 if [[ "$STATUS" == "200" ]]; then
   pass "GET /health/liveliness → $STATUS"
 else
@@ -63,7 +63,7 @@ fi
 
 # 3. Models list
 echo "[3/5] Models list..."
-RESPONSE=$(curl -s "$BASE_URL/v1/models" -H "Authorization: Bearer $MASTER_KEY")
+RESPONSE=$(curl -s "${CURL_QUICK[@]}" "$BASE_URL/v1/models" -H "Authorization: Bearer $MASTER_KEY")
 for model in mistral-small mistral-large mistral-codestral; do
   if echo "$RESPONSE" | jq -e --arg id "$model" '.data[] | select(.id == $id)' > /dev/null; then
     pass "GET /v1/models contains $model"

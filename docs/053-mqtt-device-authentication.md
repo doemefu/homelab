@@ -4,8 +4,8 @@
 
 **Status:** draft
 **Cross-references:**
-- `../../auth-service/docs/SPEC-iot-device-clients.md` — token issuer
-- `../../device-service/SPEC-device-registration.md` — orchestrator that provisions device clients
+- [`homelab-auth-service` › `docs/SPEC-iot-device-clients.md`](https://github.com/doemefu/homelab-auth-service/blob/main/docs/SPEC-iot-device-clients.md) — token issuer
+- [`homelab-device-service` › `SPEC-device-registration.md`](https://github.com/doemefu/homelab-device-service/blob/main/SPEC-device-registration.md) — orchestrator that provisions device clients
 
 ---
 
@@ -126,6 +126,11 @@ Applied only when `device_id = backend`. The plugin syntax varies — confirm in
 Currently `type: LoadBalancer` exposes port 1883 cluster-externally. After this change, anonymous connects are rejected, but **plaintext JWT-in-password over port 1883 is still TLS-less**. For a homelab LAN this is acceptable; for any deployment where 1883 is reachable from beyond the LAN, add `listener 8883` with TLS (cert-manager-issued certificate).
 
 **Out of scope for this spec.** Note as a follow-up: `cert-manager`-issued cert + TLS listener.
+
+**Mandatory until TLS is enabled:** because the JWT travels in the MQTT password in
+cleartext over port 1883, the broker must not be reachable beyond the trusted LAN. Before
+rollout, restrict the `LoadBalancer` to LAN ranges (`spec.loadBalancerSourceRanges`) or make
+the Service internal-only / firewall the port — this is a hard guard, not a follow-up note.
 
 ### 6. Idempotency + rollout
 

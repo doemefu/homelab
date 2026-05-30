@@ -93,4 +93,6 @@ dependencies:
   # Sync target: `infra/playbooks/51_homeassistant.yml` → `chart_version:`
   - name: home-assistant
     version: "0.3.51"
-    repository: "https://pajikos.github.io/home-assistant-helm-chart/"
+    # pajikos.github.io 301-redirects index.yaml to this host; point directly
+    # at the redirect target so Dependabot never relies on redirect handling.
+    repository: "https://blog.pavelsklenar.com/home-assistant-helm-chart/"

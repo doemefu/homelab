@@ -18,3 +18,20 @@ deny[msg] {
         [input.kind, input.metadata.name, s.kind, s.name],
     )
 }
+
+# A RoleBinding's ServiceAccount subject without an explicit `namespace` field
+# implicitly belongs to the binding's own namespace. The rule above keys off
+# `s.namespace`, so it would miss such a subject in an `apps` RoleBinding —
+# catch it here.
+deny[msg] {
+    input.kind == "RoleBinding"
+    input.metadata.namespace == "apps"
+    input.roleRef.name == "cluster-admin"
+    s := input.subjects[_]
+    s.kind == "ServiceAccount"
+    not s.namespace
+    msg := sprintf(
+        "%s/%s grants cluster-admin to ServiceAccount %q (implicit namespace 'apps') — forbidden",
+        [input.kind, input.metadata.name, s.name],
+    )
+}

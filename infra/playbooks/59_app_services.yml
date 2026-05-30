@@ -75,6 +75,7 @@
           - auth_service_rsa_private_key is defined and auth_service_rsa_private_key | length > 0
           - auth_service_rsa_public_key is defined and auth_service_rsa_public_key | length > 0
           - litellm_client_secret is defined and litellm_client_secret | length > 0
+          - auth_service_furchert_ch_client_secret is defined and auth_service_furchert_ch_client_secret | length > 0
         fail_msg: >-
           One or more required SOPS variables are missing.
           Add them to infra/inventory/group_vars/all.sops.yml — see the header comment in this playbook.

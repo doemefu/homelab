@@ -33,7 +33,7 @@ rules:
 ignore: |
   infra/
   cluster/flux-system/
-  .agent/
+  .claude/
   **/*.sops.yml
   **/*.sops.yaml
   .sops.yaml

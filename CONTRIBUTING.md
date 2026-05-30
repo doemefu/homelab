@@ -560,8 +560,8 @@ is `success` or `skipped` and fails on any `failure`/`cancelled`.
 pip install "yamllint==1.35.1"
 yamllint -c .yamllint .
 
-# Shell
-shellcheck scripts/*.sh
+# Shell — CI runs shellcheck over the whole scripts/ dir (scandir: ./scripts)
+find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
 
 # GitHub Actions workflows
 curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
@@ -581,10 +581,13 @@ for d in cluster/apps/auth-service cluster/apps/device-service \
     -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 done
 
-# Cluster policies
+# Cluster policies — CI evaluates each per-app overlay with --all-namespaces
 brew install conftest
 conftest verify --policy policy/kubernetes/
-kustomize build cluster/apps | conftest test --policy policy/kubernetes/ -
+for d in cluster/apps/auth-service cluster/apps/device-service \
+         cluster/apps/litellm cluster/apps/n8n cluster/apps; do
+  kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -
+done
 ```
 
 ### Branch ruleset
