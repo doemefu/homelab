@@ -9,3 +9,23 @@ updates:
     directory: "/infra"
     schedule:
       interval: weekly
+
+  # Helm chart version tracking.
+  #
+  # Dependabot's `helm` ecosystem can only read versions out of a
+  # Chart.yaml `dependencies:` block — it does NOT scan arbitrary YAML
+  # for `chart_version:` keys. Our actual chart pins live inline in
+  # Ansible playbooks under `infra/playbooks/`. To bridge that gap we
+  # keep a tracking-only umbrella chart at `.github/helm-tracking/`
+  # whose sole purpose is to give Dependabot something to scan.
+  #
+  # When Dependabot opens a PR bumping a chart version in
+  # `.github/helm-tracking/Chart.yaml`, the human reviewer is
+  # responsible for also bumping the matching `chart_version: "..."`
+  # line in the playbook listed in that dependency's comment, in the
+  # same PR. See the header of `.github/helm-tracking/Chart.yaml` for
+  # the full workflow and rationale.
+  - package-ecosystem: helm
+    directory: "/.github/helm-tracking"
+    schedule:
+      interval: weekly

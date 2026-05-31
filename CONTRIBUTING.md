@@ -13,7 +13,7 @@ Follow this loop for **every change** to this repository:
 3. **Respect ownership**: Flux-managed and Ansible-managed areas must not be mixed
 4. **Protect secrets**: Plaintext secrets never belong in Git; use SOPS-backed vars
 5. **Prove consistency**: Commands/URLs/ports in docs must match manifests/playbooks
-6. **Lint always**: Run `ansible-lint` before committing
+6. **Lint always**: At minimum `ansible-lint infra/`; CI runs the full suite (see "CI & Required Checks" below)
 7. **Verify idempotency**: Second Ansible run must produce 0 changes
 
 ---
@@ -210,9 +210,9 @@ ansible-playbook infra/playbooks/00_bootstrap.yml \
 
 ### Worklog Requirement
 
-**Every change** to this repository MUST have a corresponding worklog in `.agent/worklogs/`.
+**Every change** to this repository MUST have a corresponding worklog in `.claude/worklogs/`.
 
-Worklog template: `.agent/worklog-template.md`
+Worklog template: `.claude/worklog-template.md`
 
 ### Version Pinning
 
@@ -221,6 +221,35 @@ Worklog template: `.agent/worklog-template.md`
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
 - Container images: Pinned tags in deployment manifests
 - Python packages: `infra/requirements.yml`
+
+### Helm Chart Version Tracking (Dependabot Bumps)
+
+Helm chart versions live inline in Ansible playbooks under
+`infra/playbooks/` (look for `chart_version:`). Dependabot can't read
+those — its `helm` ecosystem only parses `Chart.yaml` `dependencies:`
+blocks. We bridge the gap with a tracking-only umbrella chart at
+`.github/helm-tracking/Chart.yaml`.
+
+**When Dependabot opens a chart-bump PR** (it touches only
+`.github/helm-tracking/Chart.yaml`):
+
+1. Read the comment above the bumped dependency — it names the
+   `infra/playbooks/<file>.yml` that holds the real pin.
+2. In the same PR, update the matching `chart_version: "..."` line in
+   that playbook.
+3. Skim the chart's upstream release notes for breaking changes
+   (`https://github.com/<owner>/<chart>/releases` or the chart
+   repository's index).
+4. If the chart ships CRDs (cert-manager, kube-prometheus-stack,
+   longhorn), check the chart's upgrade notes for required CRD
+   updates and apply them before the playbook run.
+5. Merge, then run the relevant playbook
+   (`ansible-playbook infra/playbooks/<file>.yml -l <node>`) to pick
+   up the new chart.
+
+**Never install or render** `.github/helm-tracking/Chart.yaml` — it is
+metadata for Dependabot only. The header of that file documents the
+full rationale.
 
 ### IP Addresses
 
@@ -483,3 +512,94 @@ rg --type yaml "pattern"
 4. **Architecture**: Always verify images support both architectures before deploying
 5. **Resource limits**: Always set for `apps` namespace. Check with `kubectl top pods -n apps`
 6. **Documentation consistency**: After any code change, verify all references in docs match
+
+---
+
+## CI & Required Checks
+
+Every push to a non-`main` branch and every PR targeting `main` runs the `CI`
+workflow (`.github/workflows/ci.yml`). It's a single workflow with discrete,
+self-descriptive jobs aggregated into one required `CI Summary` status check.
+
+### Job dependency graph
+
+```
+detect-changes  (Detect Changed Areas — dorny/paths-filter dispatcher)
+      │
+      ├─► lint-yaml                       (Lint YAML)
+      ├─► lint-shell                      (Lint Shell Scripts)
+      ├─► lint-workflows                  (Lint GitHub Workflows — actionlint)
+      ├─► ansible-lint                    (Ansible Lint)
+      ├─► validate-kubernetes-manifests   (kustomize build → kubeconform)
+      └─► enforce-cluster-policies        (kustomize build → conftest)
+                          │
+                          ▼
+                   ci-summary  (CI Summary — required status check)
+```
+
+Path filtering keeps PRs fast: a YAML-only change skips Ansible Lint and
+kubeconform, an Ansible-only change skips kubeconform, and so on. `CI Summary`
+is the only check the branch ruleset requires; it passes when every dependency
+is `success` or `skipped` and fails on any `failure`/`cancelled`.
+
+### What each check enforces
+
+| Check | Enforces |
+|---|---|
+| Lint YAML | Repo-wide YAML style (`.yamllint`); `infra/` is excluded (ansible-lint runs its own). |
+| Lint Shell Scripts | `shellcheck` over `scripts/`. |
+| Lint GitHub Workflows | `actionlint` over `.github/workflows/`. |
+| Ansible Lint | `ansible-lint` (production profile) over `infra/`. |
+| Validate Kubernetes Manifests | `kustomize build` for each per-app overlay piped to `kubeconform` (strict + CRD catalog). |
+| Enforce Cluster Policies | Conftest/OPA policies in `policy/kubernetes/` enforcing the CLAUDE.md non-negotiables (no `:latest`, resource limits in `apps`, namespace allowlist, no `cluster-admin` for `apps` subjects). |
+
+### Reproducing each check locally
+
+```bash
+# YAML
+pip install "yamllint==1.35.1"
+yamllint -c .yamllint .
+
+# Shell — CI runs shellcheck over the whole scripts/ dir (scandir: ./scripts)
+find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
+
+# GitHub Actions workflows
+curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+  | sudo tar -xz -C /usr/local/bin actionlint
+actionlint
+
+# Ansible
+ansible-lint infra/
+
+# Kubernetes schema validation
+brew install kustomize kubeconform
+for d in cluster/apps/auth-service cluster/apps/device-service \
+         cluster/apps/litellm cluster/apps/n8n cluster/apps; do
+  kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
+    -summary -verbose \
+    -schema-location default \
+    -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+done
+
+# Cluster policies — CI evaluates each per-app overlay with --all-namespaces
+brew install conftest
+conftest verify --policy policy/kubernetes/
+for d in cluster/apps/auth-service cluster/apps/device-service \
+         cluster/apps/litellm cluster/apps/n8n cluster/apps; do
+  kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -
+done
+```
+
+### Branch ruleset
+
+`main` is protected by the committed GitHub ruleset at
+`.github/rulesets/main-branch.json`. It requires:
+
+- A pull request with at least one approving review (stale reviews dismissed on push).
+- Status checks `CI Summary` and `CodeQL` green, on a branch up-to-date with `main`.
+- No force-push, no branch deletion.
+
+Renaming the `CI Summary` or `CodeQL` job display names breaks the ruleset
+silently — see `.github/rulesets/README.md` for the name contract and the
+`gh api` commands to install/update the ruleset.
+
