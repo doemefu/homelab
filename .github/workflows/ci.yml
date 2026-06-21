@@ -32,7 +32,7 @@ jobs:
       shell: ${{ steps.filter.outputs.shell }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: filter
         uses: dorny/paths-filter@v4
         with:
@@ -70,7 +70,7 @@ jobs:
     if: needs.detect-changes.outputs.yaml == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.12"
@@ -88,7 +88,7 @@ jobs:
     if: needs.detect-changes.outputs.shell == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ludeeus/action-shellcheck@2.0.0
         with:
           scandir: ./scripts
@@ -99,7 +99,7 @@ jobs:
     if: needs.detect-changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install actionlint (pinned)
         run: |
           set -euo pipefail
@@ -118,7 +118,7 @@ jobs:
     if: needs.detect-changes.outputs.ansible == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.12"
@@ -142,7 +142,7 @@ jobs:
       KUSTOMIZE_VERSION: v5.4.3
       KUBECONFORM_VERSION: v0.6.7
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install kustomize (pinned)
         run: |
           set -euo pipefail
@@ -190,7 +190,7 @@ jobs:
       KUSTOMIZE_VERSION: v5.4.3
       CONFTEST_VERSION: 0.56.0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install kustomize (pinned)
         run: |
           set -euo pipefail
