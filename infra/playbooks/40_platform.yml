@@ -165,6 +165,9 @@
                 service: "http://n8n.apps.svc.cluster.local:80"
               - hostname: "ai.furchert.ch"
                 service: "http://litellm.apps.svc.cluster.local:4000"
+              # Apex only — www.furchert.ch is a Cloudflare Redirect Rule (301 → apex), not a tunnel route.
+              - hostname: "furchert.ch"
+                service: "http://furchert-ch.apps.svc.cluster.local:3000"
               - service: "http_status:404"
 
     - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)

@@ -1,0 +1,24 @@
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageUpdateAutomation
+metadata:
+  name: furchert-ch
+  namespace: flux-system
+spec:
+  interval: 5m
+  sourceRef:
+    kind: GitRepository
+    name: furchert-ch
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        email: flux@users.noreply.github.com
+        name: Flux
+      messageTemplate: "chore: update furchert-ch image to {{range $_, $changes := .Changed.Objects}}{{range $change := $changes}}{{$change.NewValue}} {{end}}{{end}}"
+    push:
+      branch: main
+  update:
+    path: ./k8s
+    strategy: Setters

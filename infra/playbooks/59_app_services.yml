@@ -16,6 +16,8 @@
 #   auth_service_ha_client_secret:            <from Home Assistant → Settings → OAuth Clients>
 #   auth_service_device_service_client_secret: <choose a random secret (plain, no {noop} prefix)>
 #   auth_service_n8n_client_secret:           <choose a random secret for n8n OIDC client>
+#   auth_service_furchert_ch_client_secret:   <random secret for furchert-ch OIDC client (plain, no {noop}); auth-service gets "{noop}<value>", furchert-ch gets "<value>">
+#   furchert_ch_auth_secret:                  <Auth.js session secret, e.g. openssl rand -base64 33>
 #   n8n_encryption_key:                       <32+ char random key, e.g. openssl rand -hex 32>
 #       auth-service receives "{noop}<value>" (prefix added by playbook)
 #       device-service receives "<value>" (plain, as OAuth2 client-secret)
@@ -76,6 +78,7 @@
           - auth_service_rsa_public_key is defined and auth_service_rsa_public_key | length > 0
           - litellm_client_secret is defined and litellm_client_secret | length > 0
           - auth_service_furchert_ch_client_secret is defined and auth_service_furchert_ch_client_secret | length > 0
+          - furchert_ch_auth_secret is defined and furchert_ch_auth_secret | length > 0
         fail_msg: >-
           One or more required SOPS variables are missing.
           Add them to infra/inventory/group_vars/all.sops.yml — see the header comment in this playbook.
@@ -212,6 +215,24 @@
             n8n-client-secret: "{{ auth_service_n8n_client_secret }}"
             litellm-client-secret-authservice: "{noop}{{ litellm_client_secret }}"
             furchert-ch-client-secret: "{noop}{{ auth_service_furchert_ch_client_secret }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: Furchert-ch-secrets anlegen (Auth.js session + OIDC client secret)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: furchert-ch-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            auth-secret: "{{ furchert_ch_auth_secret }}"
+            # Plain client secret — must equal the plaintext stored "{noop}"-prefixed for the
+            # furchert-ch OIDC client in homelab-auth-secrets above, so they match by construction.
+            oidc-client-secret: "{{ auth_service_furchert_ch_client_secret }}"
       no_log: true
       delegate_to: localhost
 
