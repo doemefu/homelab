@@ -112,6 +112,7 @@ All external access is via Cloudflare Tunnel. Canonical hostnames are configured
 | `https://device.furchert.ch` | Service API | `device-service.apps.svc:8081` | 8081 | IoT device management service |
 | `https://n8n.furchert.ch` | Web UI + Webhooks | `n8n.apps.svc:80` | 80 | Workflow automation platform (container: 5678) |
 | `https://ai.furchert.ch` | OpenAI-compatible API + UI | `litellm.apps.svc:4000` | 4000 | LiteLLM AI gateway |
+| `https://furchert.ch` | Web UI | `furchert-ch.apps.svc:3000` | 3000 | Public site (Next.js); apex only — `www.furchert.ch` is a Cloudflare 301 redirect to apex, not a tunnel route |
 
 ### OIDC/OAuth2 Endpoints (Auth Service)
 
@@ -258,6 +259,7 @@ cluster/
       imagepolicy.yaml         # ImagePolicy for tag filtering
       imageupdate.yaml         # ImageUpdateAutomation for write-back
     device-service/            # Same structure as auth-service
+    furchert-ch/               # Same structure as auth-service
     n8n/                       # Ansible-managed manifests
       deployment.yaml
       service.yaml
