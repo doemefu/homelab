@@ -218,7 +218,7 @@
       no_log: true
       delegate_to: localhost
 
-    - name: Furchert-ch-secrets anlegen (Auth.js session + OIDC client secret)
+    - name: Create furchert-ch-secrets (Auth.js session + OIDC client secret)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:

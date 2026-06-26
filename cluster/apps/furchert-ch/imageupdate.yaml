@@ -16,7 +16,9 @@ spec:
       author:
         email: flux@users.noreply.github.com
         name: Flux
-      messageTemplate: "chore: update furchert-ch image to {{range $_, $changes := .Changed.Objects}}{{range $change := $changes}}{{$change.NewValue}} {{end}}{{end}}"
+      messageTemplate: >-
+        chore: update furchert-ch image to
+        {{range $_, $changes := .Changed.Objects}}{{range $change := $changes}}{{$change.NewValue}} {{end}}{{end}}
     push:
       branch: main
   update:
