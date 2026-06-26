@@ -45,8 +45,15 @@ spec:
               value: "n8n.furchert.ch"
             - name: N8N_PROTOCOL
               value: "https"
-            - name: N8N_WEBHOOK_URL
+            # Behind the Cloudflare Tunnel + Traefik, n8n is reached on the
+            # standard HTTPS port. Set these explicitly so the OAuth callback
+            # URL is built from the public host, not from N8N_PORT (avoids :5678).
+            - name: WEBHOOK_URL
               value: "https://n8n.furchert.ch/"
+            - name: N8N_EDITOR_BASE_URL
+              value: "https://n8n.furchert.ch/"
+            - name: N8N_PROXY_HOPS
+              value: "1"
             - name: N8N_SSO_MANAGED_BY_ENV
               value: "true"
             - name: N8N_SSO_OIDC_LOGIN_ENABLED

@@ -3,3 +3,4 @@ kind: Kustomization
 resources:
   - device-service
   - auth-service
+  - furchert-ch
