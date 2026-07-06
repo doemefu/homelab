@@ -96,7 +96,7 @@
               spec:
                 containers:
                   - name: postgresql
-                    image: postgres:17-alpine
+                    image: pgvector/pgvector:0.8.4-pg17
                     env:
                       - name: POSTGRES_PASSWORD
                         valueFrom:

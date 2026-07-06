@@ -278,6 +278,9 @@
           - litellm_db_password is defined and litellm_db_password | length > 0
           - mistral_api_key is defined and mistral_api_key | length > 0
           - mistral_codestral_api_key is defined and mistral_codestral_api_key | length > 0
+          - litellm_gemini_api_key is defined and litellm_gemini_api_key | length > 0
+          - litellm_anthropic_api_key is defined and litellm_anthropic_api_key | length > 0
+          - mistral_vibe_api_key is defined and mistral_vibe_api_key | length > 0
         fail_msg: >-
           One or more required LiteLLM SOPS variables are missing or invalid.
           litellm_master_key must start with 'sk-'.
@@ -371,6 +374,9 @@
             DATABASE_URL: "postgresql://litellm:{{ litellm_db_password }}@postgresql.apps.svc.cluster.local:5432/litellm"
             MISTRAL_API_KEY: "{{ mistral_api_key }}"
             MISTRAL_CODESTRAL_KEY: "{{ mistral_codestral_api_key }}"
+            GEMINI_API_KEY: "{{ litellm_gemini_api_key }}"
+            ANTHROPIC_API_KEY: "{{ litellm_anthropic_api_key }}"
+            MISTRAL_VIBE_API_KEY: "{{ mistral_vibe_api_key }}"
             LITELLM_OIDC_CLIENT_SECRET: "{{ litellm_client_secret }}"
       no_log: true
       delegate_to: localhost

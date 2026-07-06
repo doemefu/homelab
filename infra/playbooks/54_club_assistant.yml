@@ -1,0 +1,200 @@
+---
+# Club Assistant: Open WebUI deployment + database provisioning
+# ======================================================================
+#
+# Namespace: apps
+# Public endpoint: https://club.furchert.ch (via Cloudflare Tunnel — configured in
+#                  40_platform.yml; see 40_platform_cf-route.patch.md)
+#
+# Prerequisites (must complete before running this playbook):
+#   - 50_apps_infra.yml completed (apps namespace + PostgreSQL running)
+#   - 50_apps_infra.yml image updated to pgvector/pgvector:0.8.4-pg17
+#     (see 50_apps_infra_pgvector.patch.md — required for AC-0.6)
+#   - infrastructure/cluster/apps/open-webui/{deployment,service,pvc}.yaml present
+#     in the infrastructure repo
+#
+# Required SOPS variables (add once via: sops infra/inventory/group_vars/all.sops.yml):
+#   club_assistant_db_password:   <openssl rand -hex 16>   # Postgres password for club_assistant role
+#   litellm_club_key:             sk-<openssl rand -hex 16> # LiteLLM bearer key scoped to club models
+#
+# Run order:
+#   1. ansible-playbook infra/playbooks/59_app_services.yml   # prerequisite secrets baseline
+#   2. ansible-playbook infra/playbooks/54_club_assistant.yml # this file (DB + secrets + deploy)
+#   3. ansible-playbook infra/playbooks/40_platform.yml       # CF Tunnel ingress route
+#
+# Idempotent: running twice produces zero changes on second run.
+#
+# Run: ansible-playbook infra/playbooks/54_club_assistant.yml
+
+- name: App Deployment — Club Assistant (Open WebUI + database)
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    apps_namespace: apps
+    postgresql_pod: postgresql-0
+
+  tasks:
+
+    # ── Namespace ──────────────────────────────────────────────────────────────
+
+    - name: Apps Namespace sicherstellen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ apps_namespace }}"
+      delegate_to: localhost
+
+    # ── Kubernetes manifests ───────────────────────────────────────────────────
+    # Apply order: PVC first (Deployment needs the claim to exist), then
+    # Deployment, then Service. Paths resolve to cluster/apps/open-webui/ relative
+    # to the playbook location (same convention as 53_litellm.yml).
+
+    - name: Open WebUI PVC anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/open-webui/pvc.yaml"
+      delegate_to: localhost
+
+    - name: Open WebUI Deployment anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/open-webui/deployment.yaml"
+      delegate_to: localhost
+
+    - name: Open WebUI Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ playbook_dir }}/../../cluster/apps/open-webui/service.yaml"
+      delegate_to: localhost
+
+    # ── Database provisioning ──────────────────────────────────────────────────
+    # Pattern copied from 59_app_services.yml L287–376 (LiteLLM DB block).
+    # Role: club_assistant · Database: club_assistant
+
+    - name: Club Assistant — Prüfen dass alle benötigten SOPS-Variablen gesetzt sind
+      ansible.builtin.assert:
+        that:
+          - club_assistant_db_password is defined and club_assistant_db_password | length > 0
+          - litellm_club_key is defined and litellm_club_key | length > 0
+          - litellm_club_key is match('^sk-')
+        fail_msg: >-
+          One or more required club_assistant SOPS variables are missing or invalid.
+          litellm_club_key must start with 'sk-'.
+          Add them to infra/inventory/group_vars/all.sops.yml via:
+            sops infra/inventory/group_vars/all.sops.yml
+      delegate_to: localhost
+
+    - name: Club Assistant PostgreSQL user anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='club_assistant'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE club_assistant WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_club_assistant_create_user
+      changed_when: "'CREATE ROLE' in pg_club_assistant_create_user.stdout"
+
+    - name: Club Assistant PostgreSQL user Passwort setzen/aktualisieren
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - psql
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ 'club_assistant' | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ club_assistant_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Club Assistant Datenbank anlegen (falls nicht vorhanden)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='club_assistant'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE club_assistant OWNER club_assistant"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_club_assistant_create_db
+      changed_when: "'CREATE DATABASE' in pg_club_assistant_create_db.stdout"
+
+    # SECURITY (review 2026-07-06): litellm_club_key MUST be a LiteLLM *virtual
+    # key* scoped to the club-* model aliases only (create via the LiteLLM
+    # dashboard/API in Phase 0b) and MUST NEVER be the LiteLLM master key.
+    # A master key here would hand a root-running, publicly-routed Open WebUI
+    # full gateway/admin access — ship-blocking at apply time.
+    - name: Club Assistant secrets anlegen (DATABASE_URL + LITELLM_CLUB_KEY)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: club-assistant-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            DATABASE_URL: "postgresql://club_assistant:{{ club_assistant_db_password }}@postgresql.apps.svc.cluster.local:5432/club_assistant"
+            LITELLM_CLUB_KEY: "{{ litellm_club_key }}"
+      no_log: true
+      delegate_to: localhost
+
+    # ── Wait for rollout ───────────────────────────────────────────────────────
+
+    - name: Open WebUI Rollout warten (bis zu 300s)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        name: open-webui
+        namespace: "{{ apps_namespace }}"
+      register: owui_deploy_info
+      until: >
+        owui_deploy_info.resources | length > 0 and
+        owui_deploy_info.resources[0].status.availableReplicas is defined and
+        owui_deploy_info.resources[0].status.availableReplicas ==
+        owui_deploy_info.resources[0].spec.replicas
+      retries: 30
+      delay: 10
+      delegate_to: localhost

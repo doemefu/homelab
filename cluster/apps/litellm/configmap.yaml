@@ -31,7 +31,77 @@ data:
           model: mistral/codestral-latest
           api_key: os.environ/MISTRAL_CODESTRAL_KEY
 
-      # Anthropic routes are intentionally disabled for now.
+      # ---- Club Assistant routes (D3/D14, docs/02 §6) ----
+      # See club_assist/k8s/litellm-values/config-additions.yaml for full evidence/rationale.
+      # Provider routes: max_budget here is a BACKSTOP only — the club-* aliases below
+      # carry the primary, tighter per-alias budgets for normal traffic.
+      - model_name: gemini-flash
+        litellm_params:
+          model: gemini/gemini-3.5-flash
+          api_key: os.environ/GEMINI_API_KEY
+          max_budget: 5
+          budget_duration: 30d
+
+      - model_name: gemini-pro
+        litellm_params:
+          model: gemini/gemini-2.5-pro
+          api_key: os.environ/GEMINI_API_KEY
+          max_budget: 5
+          budget_duration: 30d
+
+      # Anthropic parked for now (D21, 2026-07-06): claude-sonnet route removed;
+      # club-complex runs on Mistral Large (largest contingent). Re-enable by adding
+      # an anthropic/... route here — the ANTHROPIC_API_KEY env plumbing stays in place
+      # (SOPS placeholder).
+
+      # Task-class aliases (docs/02 §6 routing table; prompt designs reference these
+      # model_name values as their LiteLLM target — never a bare provider model string).
+      - model_name: club-classify
+        litellm_params:
+          model: mistral/mistral-small-latest
+          api_key: os.environ/MISTRAL_API_KEY
+          max_budget: 1.5
+          budget_duration: 30d
+
+      - model_name: club-extract
+        litellm_params:
+          model: mistral/mistral-small-latest
+          api_key: os.environ/MISTRAL_API_KEY
+          max_budget: 1.5
+          budget_duration: 30d
+
+      - model_name: club-draft
+        litellm_params:
+          model: gemini/gemini-3.5-flash
+          api_key: os.environ/GEMINI_API_KEY
+          max_budget: 5
+          budget_duration: 30d
+
+      - model_name: club-draft-long
+        litellm_params:
+          model: gemini/gemini-2.5-pro
+          api_key: os.environ/GEMINI_API_KEY
+          max_budget: 3
+          budget_duration: 30d
+
+      # D21 (2026-07-06): complex reasoning on Mistral 3.5 ("Vibe" — Mistral's most
+      # capable model, Dominic's call) while Anthropic is parked. Pinned dated ID
+      # mistral-medium-3-5 (= mistral-medium-latest today; 262k ctx, $1.5/$7.5 per M).
+      - model_name: club-complex
+        litellm_params:
+          model: mistral/mistral-medium-3-5
+          api_key: os.environ/MISTRAL_VIBE_API_KEY
+          max_budget: 15
+          budget_duration: 30d
+
+      # placeholder until D5 embedding freeze in Phase 1; dimension 1024 (mistral-embed) —
+      # NOTE: sql/*.sql migrations currently assume vector(1536); reconcile at D5.
+      - model_name: club-embed
+        litellm_params:
+          model: mistral/mistral-embed
+          api_key: os.environ/MISTRAL_API_KEY
+          max_budget: 3
+          budget_duration: 30d
 
       # Placeholder — uncomment when Ollama is deployed on MacBook Air node
       # - model_name: ollama/llama3
