@@ -115,10 +115,18 @@
                     resources:
                       requests:
                         cpu: 100m
-                        memory: 256Mi
+                        # memory request doubled alongside the limit below to preserve
+                        # the existing 1:2 request:limit ratio (unchanged convention).
+                        memory: 512Mi
                       limits:
                         cpu: 500m
-                        memory: 512Mi
+                        # Raised 512Mi -> 1Gi: 2026-07-08 OOMKill of postgresql-0 under
+                        # club-assistant pgvector bulk-insert load (HNSW index maintenance
+                        # + large statements during the Drive corpus backfill). Vector
+                        # workloads keep growing with the club-assistant roadmap (chunks
+                        # corpus ~20k+ rows now, facts/embeddings in Phase 2).
+                        # See club-assistant worklog 20260708-121500-phase1-drive-backfill-c5f8.
+                        memory: 1Gi
                   - name: postgres-exporter
                     image: prometheuscommunity/postgres-exporter:v0.15.0
                     env:

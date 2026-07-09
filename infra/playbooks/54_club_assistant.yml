@@ -16,6 +16,9 @@
 # Required SOPS variables (add once via: sops infra/inventory/group_vars/all.sops.yml):
 #   club_assistant_db_password:   <openssl rand -hex 16>   # Postgres password for club_assistant role
 #   litellm_club_key:             sk-<openssl rand -hex 16> # LiteLLM bearer key scoped to club models
+#   n8n_club_api_key:             <n8n public API key>     # n8n public API key WITH an expiry date set,
+#                                                           # used by export/backup tooling to call the
+#                                                           # n8n public API (workflow export, backups)
 #
 # Run order:
 #   1. ansible-playbook infra/playbooks/59_app_services.yml   # prerequisite secrets baseline
@@ -82,9 +85,12 @@
           - club_assistant_db_password is defined and club_assistant_db_password | length > 0
           - litellm_club_key is defined and litellm_club_key | length > 0
           - litellm_club_key is match('^sk-')
+          - n8n_club_api_key is defined and n8n_club_api_key | length > 0
         fail_msg: >-
           One or more required club_assistant SOPS variables are missing or invalid.
           litellm_club_key must start with 'sk-'.
+          n8n_club_api_key must be a real n8n public API key created WITH an expiry date
+          (n8n Settings → API), not a long-lived/no-expiry key.
           Add them to infra/inventory/group_vars/all.sops.yml via:
             sops infra/inventory/group_vars/all.sops.yml
       delegate_to: localhost
@@ -165,7 +171,7 @@
     # dashboard/API in Phase 0b) and MUST NEVER be the LiteLLM master key.
     # A master key here would hand a root-running, publicly-routed Open WebUI
     # full gateway/admin access — ship-blocking at apply time.
-    - name: Club Assistant secrets anlegen (DATABASE_URL + LITELLM_CLUB_KEY)
+    - name: Club Assistant secrets anlegen (DATABASE_URL + LITELLM_CLUB_KEY + N8N_API_KEY)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -178,6 +184,7 @@
           stringData:
             DATABASE_URL: "postgresql://club_assistant:{{ club_assistant_db_password }}@postgresql.apps.svc.cluster.local:5432/club_assistant"
             LITELLM_CLUB_KEY: "{{ litellm_club_key }}"
+            N8N_API_KEY: "{{ n8n_club_api_key }}"
       no_log: true
       delegate_to: localhost
 

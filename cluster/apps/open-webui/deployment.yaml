@@ -133,9 +133,12 @@ spec:
           securityContext:
             # runAsNonRoot / runAsUser 1000 NOT set — see SECURITY DEVIATION above.
             # Container runs as UID 0 by default (upstream published image).
-            # capabilities: drop [ALL] deliberately NOT set yet — 0b test candidate
-            # (root startup may need CAP_CHOWN); add after verifying on the cluster.
             allowPrivilegeEscalation: false
+            # Verified live 2026-07-07 (Phase 0c): pod boots and serves with ALL
+            # capabilities dropped (PVC already initialized; no CAP_CHOWN needed).
+            capabilities:
+              drop:
+                - ALL
             seccompProfile:
               type: RuntimeDefault
       volumes:
