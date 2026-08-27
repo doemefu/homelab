@@ -114,6 +114,23 @@ data:
           max_budget: 15
           budget_duration: 30d
 
+      # D48 (2026-08-25, Phase 3): sparring chat on Claude Sonnet 5 via LiteLLM (first Anthropic route since D21).
+      # Exact model id (no dated snapshot exists for the Claude 5 family; re-verify at the quarterly model review).
+      # Prompt caching: cache_control injected on the system message (static sparring prompt, D32 byte-stable).
+      # Sonnet 5 rejects sampling parameters (400 "temperature is deprecated for this model", observed live
+      # 2026-08-25 on the first chat turn); the global LITELLM_DROP_PARAMS only drops provider-unsupported keys,
+      # so the route drops them explicitly — clients (the n8n OpenAI Chat Model node) may still send them.
+      - model_name: club-sparring
+        litellm_params:
+          model: anthropic/claude-sonnet-5
+          api_key: os.environ/ANTHROPIC_API_KEY
+          max_budget: 15
+          budget_duration: 30d
+          additional_drop_params: ["temperature", "top_p"]
+          cache_control_injection_points:
+            - location: message
+              role: system
+
       # placeholder until D5 embedding freeze in Phase 1; dimension 1024 (mistral-embed) —
       # NOTE: sql/*.sql migrations currently assume vector(1536); reconcile at D5.
       - model_name: club-embed
