@@ -36,7 +36,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | `platform` | Cluster infrastructure (cert-manager, cloudflared, Traefik) | Ansible |
 | `longhorn-system` | Longhorn distributed storage | Helm (k3s) |
 | `monitoring` | Prometheus, Grafana, Alertmanager, ServiceMonitors | Ansible/Helm |
-| `apps` | Application workloads + shared infrastructure (PostgreSQL, InfluxDB, Mosquitto, n8n, LiteLLM) | Mixed |
+| `apps` | Application workloads + shared infrastructure (PostgreSQL, InfluxDB, Mosquitto, n8n, LiteLLM, Open WebUI) | Mixed |
 | `homeassistant` | Home Assistant | Ansible/Helm |
 | `flux-system` | Flux CD controllers | Flux (self-managed) |
 
@@ -71,14 +71,15 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **DNS**: Cloudflare-managed domains
 
 ### Application Infrastructure (Shared Services in `apps` namespace)
-- **PostgreSQL**: v17 (with postgres-exporter)
+- **PostgreSQL**: v17 (pgvector 0.8.6-pg17 image, with postgres-exporter v0.20.1)
 - **InfluxDB**: v2.x (with 30d retention, `homelab` org)
-- **Mosquitto**: v2.x MQTT broker (with mosquitto-exporter)
+- **Mosquitto**: v2.1.2-alpine MQTT broker (with mosquitto-exporter v0.6.3)
 
 ### Application Runtimes
 - **Home Assistant**: Deployed in `homeassistant` namespace with hostNetwork
 - **n8n**: v2.36.8 (workflow automation, Ansible-managed)
-- **LiteLLM**: v1.98.0 (AI gateway, OpenAI-compatible, Ansible-managed)
+- **LiteLLM**: v1.98.0 (AI gateway, OpenAI-compatible, non-root image, Ansible-managed)
+- **Open WebUI (Club Assistant)**: v0.11.1 (chat UI, Ansible-managed via `54_club_assistant.yml`, public at `club.furchert.ch`)
 
 ---
 
@@ -91,7 +92,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **Storage** | Longhorn as default StorageClass (RF=2), local-path as non-default fallback | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` |
 | **Observability** | kube-prometheus-stack, ServiceMonitors, Alertmanager→Discord | `infra/playbooks/41_monitoring.yml`, `cluster/values/kube-prometheus-stack.yaml` |
 | **Shared Infrastructure** | PostgreSQL 17, InfluxDB 2, Mosquitto 2 (+ exporters) | `infra/playbooks/50_apps_infra.yml`, `cluster/values/{postgresql,influxdb2}.yaml` |
-| **App Runtimes** | Home Assistant, n8n, LiteLLM | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml` |
+| **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
 | **GitOps** | Flux CD sync + image automation for auth-service/device-service | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service}` |
 | **Backup** | Restic-based node backups (daily 03:00 on raspi5) | `infra/roles/storage/`, `infra/playbooks/10_base.yml` |
@@ -112,6 +113,7 @@ All external access is via Cloudflare Tunnel. Canonical hostnames are configured
 | `https://device.furchert.ch` | Service API | `device-service.apps.svc:8081` | 8081 | IoT device management service |
 | `https://n8n.furchert.ch` | Web UI + Webhooks | `n8n.apps.svc:80` | 80 | Workflow automation platform (container: 5678) |
 | `https://ai.furchert.ch` | OpenAI-compatible API + UI | `litellm.apps.svc:4000` | 4000 | LiteLLM AI gateway |
+| `https://club.furchert.ch` | Web UI | `open-webui.apps.svc:80` | 80 | Club Assistant (Open WebUI) chat UI (container: 8080) |
 | `https://furchert.ch` | Web UI | `furchert-ch.apps.svc:3000` | 3000 | Public site (Next.js); apex only — `www.furchert.ch` is a Cloudflare 301 redirect to apex, not a tunnel route |
 
 ### OIDC/OAuth2 Endpoints (Auth Service)
@@ -234,6 +236,7 @@ infra/
     51_homeassistant.yml      # Home Assistant deployment
     52_n8n.yml                 # n8n deployment (Ansible-managed)
     53_litellm.yml            # LiteLLM deployment (Ansible-managed)
+    54_club_assistant.yml     # Open WebUI / Club Assistant deployment (Ansible-managed)
     59_app_services.yml       # App secrets and bootstrap (auth, n8n, litellm)
   roles/
     base/                     # Hostname, timezone, NTP, packages, unattended-upgrades
@@ -267,6 +270,11 @@ cluster/
       kustomization.yaml
     litellm/                   # Ansible-managed manifests
       configmap.yaml
+      deployment.yaml
+      service.yaml
+      kustomization.yaml
+    open-webui/                # Ansible-managed manifests (Club Assistant)
+      pvc.yaml
       deployment.yaml
       service.yaml
       kustomization.yaml

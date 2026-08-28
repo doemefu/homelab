@@ -41,6 +41,7 @@ Follow this loop for **every change** to this repository:
 | Home Assistant | `infra/playbooks/51_homeassistant.yml`, `cluster/values/home-assistant.yaml` | `51_homeassistant.yml` |
 | n8n runtime | `infra/playbooks/52_n8n.yml`, `cluster/apps/n8n/` | `52_n8n.yml` |
 | LiteLLM runtime | `infra/playbooks/53_litellm.yml`, `cluster/apps/litellm/` | `53_litellm.yml` |
+| Open WebUI / Club Assistant runtime | `infra/playbooks/54_club_assistant.yml`, `cluster/apps/open-webui/` | `54_club_assistant.yml` |
 | App secrets / DB bootstrap | `infra/playbooks/59_app_services.yml` | `59_app_services.yml` |
 | Flux GitOps | `cluster/apps/{auth-service,device-service}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
 | Node inventory / IPs | `infra/inventory/hosts.yml` | - |
@@ -265,13 +266,14 @@ full rationale.
 |----------|-------|-------|
 | n8n resources | Ansible (`52_n8n.yml`) | Add to `cluster/apps/kustomization.yaml` |
 | LiteLLM resources | Ansible (`53_litellm.yml`) | Add to `cluster/apps/kustomization.yaml` |
+| Open WebUI (Club Assistant) resources | Ansible (`54_club_assistant.yml`) | Add to `cluster/apps/kustomization.yaml` |
 | Flux resources | Flux CD | Manually `kubectl apply` |
 | App secrets | Ansible (`59_app_services.yml`) | Commit plaintext to git |
 
 ### Standard App Ownership
 
 - **Flux-managed**: `auth-service`, `device-service`
-- **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, PostgreSQL, InfluxDB, Mosquitto
+- **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, `open-webui` (Club Assistant), PostgreSQL, InfluxDB, Mosquitto
 - **Platform-managed**: cert-manager, cloudflared, Traefik, Longhorn, kube-prometheus-stack
 
 ---

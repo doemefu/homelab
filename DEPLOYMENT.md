@@ -77,6 +77,7 @@ ansible-playbook infra/playbooks/59_app_services.yml
 ansible-playbook infra/playbooks/51_homeassistant.yml
 ansible-playbook infra/playbooks/52_n8n.yml
 ansible-playbook infra/playbooks/53_litellm.yml
+ansible-playbook infra/playbooks/54_club_assistant.yml
 
 # 9) Re-apply platform playbook to ensure Cloudflare Tunnel has all routes
 ansible-playbook infra/playbooks/40_platform.yml
@@ -1031,6 +1032,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `51_homeassistant.yml` | Home Assistant | 3-5 min | Yes |
 | `52_n8n.yml` | n8n deployment | 2-3 min | Yes |
 | `53_litellm.yml` | LiteLLM deployment | 3-5 min | Yes |
+| `54_club_assistant.yml` | Open WebUI (Club Assistant) deployment + DB provisioning | 3–5 min | Yes |
 | `59_app_services.yml` | App secrets and bootstrap | 2-3 min | Yes |
 
 ---
