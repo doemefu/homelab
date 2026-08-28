@@ -41,6 +41,7 @@ Follow this loop for **every change** to this repository:
 | Home Assistant | `infra/playbooks/51_homeassistant.yml`, `cluster/values/home-assistant.yaml` | `51_homeassistant.yml` |
 | n8n runtime | `infra/playbooks/52_n8n.yml`, `cluster/apps/n8n/` | `52_n8n.yml` |
 | LiteLLM runtime | `infra/playbooks/53_litellm.yml`, `cluster/apps/litellm/` | `53_litellm.yml` |
+| Open WebUI / Club Assistant runtime | `infra/playbooks/54_club_assistant.yml`, `cluster/apps/open-webui/` | `54_club_assistant.yml` |
 | App secrets / DB bootstrap | `infra/playbooks/59_app_services.yml` | `59_app_services.yml` |
 | Flux GitOps | `cluster/apps/{auth-service,device-service}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
 | Node inventory / IPs | `infra/inventory/hosts.yml` | - |
@@ -265,13 +266,14 @@ full rationale.
 |----------|-------|-------|
 | n8n resources | Ansible (`52_n8n.yml`) | Add to `cluster/apps/kustomization.yaml` |
 | LiteLLM resources | Ansible (`53_litellm.yml`) | Add to `cluster/apps/kustomization.yaml` |
+| Open WebUI (Club Assistant) resources | Ansible (`54_club_assistant.yml`) | Add to `cluster/apps/kustomization.yaml` |
 | Flux resources | Flux CD | Manually `kubectl apply` |
 | App secrets | Ansible (`59_app_services.yml`) | Commit plaintext to git |
 
 ### Standard App Ownership
 
 - **Flux-managed**: `auth-service`, `device-service`
-- **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, PostgreSQL, InfluxDB, Mosquitto
+- **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, `open-webui` (Club Assistant), PostgreSQL, InfluxDB, Mosquitto
 - **Platform-managed**: cert-manager, cloudflared, Traefik, Longhorn, kube-prometheus-stack
 
 ---
@@ -512,6 +514,11 @@ rg --type yaml "pattern"
 4. **Architecture**: Always verify images support both architectures before deploying
 5. **Resource limits**: Always set for `apps` namespace. Check with `kubectl top pods -n apps`
 6. **Documentation consistency**: After any code change, verify all references in docs match
+7. **Stale `helm_repository` entries**: `kubernetes.core.helm_repository` (collection >=6.5.0)
+   strips the trailing slash from `repo_url` and hard-fails ("Repository already have a
+   repository named influxdata") if the locally cached Helm repo entry still has one — this hits
+   `50_apps_infra.yml`'s InfluxData repo task on every run until fixed. Fix:
+   `helm repo remove influxdata && helm repo add influxdata https://helm.influxdata.com`
 
 ---
 
@@ -574,7 +581,8 @@ ansible-lint infra/
 # Kubernetes schema validation
 brew install kustomize kubeconform
 for d in cluster/apps/auth-service cluster/apps/device-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps; do
+         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps; do
   kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
     -summary -verbose \
     -schema-location default \
@@ -585,7 +593,8 @@ done
 brew install conftest
 conftest verify --policy policy/kubernetes/
 for d in cluster/apps/auth-service cluster/apps/device-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps; do
+         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps; do
   kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -
 done
 ```

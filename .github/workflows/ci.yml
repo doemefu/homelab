@@ -163,6 +163,7 @@ jobs:
                    cluster/apps/device-service \
                    cluster/apps/litellm \
                    cluster/apps/n8n \
+                   cluster/apps/open-webui \
                    cluster/apps; do
             echo "::group::kubeconform $d"
             if ! kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
@@ -218,6 +219,7 @@ jobs:
                    cluster/apps/device-service \
                    cluster/apps/litellm \
                    cluster/apps/n8n \
+                   cluster/apps/open-webui \
                    cluster/apps; do
             echo "::group::conftest $d"
             if ! kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -; then

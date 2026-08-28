@@ -51,6 +51,7 @@ All external access goes through Cloudflare Tunnel. Public hostnames are **centr
 | `device.furchert.ch` | `http://device-service.apps.svc.cluster.local:8081` | HTTP | device-service | IoT device management |
 | `n8n.furchert.ch` | `http://n8n.apps.svc.cluster.local:80` | HTTP | n8n | Workflow automation (container: 5678) |
 | `ai.furchert.ch` | `http://litellm.apps.svc.cluster.local:4000` | HTTP | LiteLLM | AI gateway, OpenAI-compatible |
+| `club.furchert.ch` | `http://open-webui.apps.svc.cluster.local:80` | HTTP | Open WebUI (Club Assistant) | Chat UI (container: 8080) |
 
 ### Adding a New Public Endpoint
 
@@ -224,7 +225,7 @@ cluster/apps/<app>/
 
 ### Ansible-Managed Applications
 
-**Applications**: `n8n`, `litellm`, `homeassistant`
+**Applications**: `n8n`, `litellm`, `homeassistant`, `open-webui` (Club Assistant)
 
 **Ownership Guardrails** (enforced via CLAUDE.md and CONTRIBUTING.md):
 - Do NOT add `n8n` or `litellm` to `cluster/apps/kustomization.yaml`
@@ -233,6 +234,7 @@ cluster/apps/<app>/
   - n8n: `infra/playbooks/52_n8n.yml` + `59_app_services.yml`
   - LiteLLM: `infra/playbooks/53_litellm.yml` + `59_app_services.yml`
   - Home Assistant: `infra/playbooks/51_homeassistant.yml`
+  - Open WebUI (Club Assistant): `infra/playbooks/54_club_assistant.yml` + `59_app_services.yml`
 - App secrets are provisioned via `infra/playbooks/59_app_services.yml` from SOPS variables
 
 ### Shared App Infrastructure
