@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: apps
+  labels:
+    app: open-webui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: open-webui
+          # Pinned version: v0.10.2 (released 2026-07-01, latest stable as of 2026-07-06)
+          # Multi-arch evidence (verified 2026-07-06 via GHCR anonymous-token API against
+          #   ghcr.io/v2/open-webui/open-webui/manifests/v0.10.2, index digest
+          #   sha256:9fcea9c6e32ab60b0498f3986c6cdf651ddbe61db48d2213a3d28048ddd673d4):
+          #   manifest list contains linux/amd64 (sha256:1e65dff0...ce8e4) and
+          #   linux/arm64 (sha256:0d58a667...b81e3) image manifests for this exact tag.
+          #
+          # ┌─────────────────────────────────────────────────────────────────────────┐
+          # │  SECURITY DEVIATION — CONTAINER RUNS AS ROOT (UID 0)                   │
+          # │                                                                         │
+          # │  Platform convention: runAsNonRoot:true + runAsUser/Group:1000.        │
+          # │  This cannot be applied here. The official pre-built GHCR image is     │
+          # │  built with Dockerfile ARGs UID=0 / GID=0 (the upstream defaults).     │
+          # │  The published image therefore runs as UID 0 (root). Setting            │
+          # │  runAsNonRoot:true causes Kubernetes to reject the pod at admission.   │
+          # │                                                                         │
+          # │  Mitigation in place: allowPrivilegeEscalation:false (prevents         │
+          # │  setuid/capability escalation even from a root process).               │
+          # │                                                                         │
+          # │  Path to full compliance: open-webui supports non-root operation via   │
+          # │  build args (UID/GID). A custom image build (--build-arg UID=1000      │
+          # │  --build-arg GID=1000) would allow runAsNonRoot:true. Track this in   │
+          # │  docs/02 §11 (decision log) before Phase 1 close (AC-0.x pending).    │
+          # │  Monitor upstream for a future release that ships non-root by default. │
+          # └─────────────────────────────────────────────────────────────────────────┘
+          image: ghcr.io/open-webui/open-webui:v0.10.2
+          ports:
+            - containerPort: 8080
+          env:
+            - name: TZ
+              value: "Europe/Zurich"
+            - name: WEBUI_URL
+              value: "https://club.furchert.ch"
+            # SAFE-BY-DEFAULT: signup disabled. For the very first login (0b),
+            # temporarily set "true", log in, immediately revert to "false" and
+            # re-apply BEFORE the Cloudflare route to club.furchert.ch is
+            # added — this ordering is mandatory (security review 2026-07-06:
+            # public open-registration window otherwise).
+            - name: ENABLE_SIGNUP
+              value: "false"
+            # Env is the single source of truth: without this, Open WebUI persists
+            # connection settings (incl. the API key as first seen — then a placeholder)
+            # into its DB on first boot and ignores later env changes (PersistentConfig).
+            - name: ENABLE_PERSISTENT_CONFIG
+              value: "false"
+            - name: ENABLE_OPENAI_API
+              value: "true"
+            # Use the OpenAI-compatible endpoint (LiteLLM) for RAG embeddings instead
+            # of loading a local sentence-transformers model — saves ~1Gi RAM at boot
+            # (1Gi limit was OOMKilled on first boot 2026-07-06) and keeps embedding
+            # traffic on the club-embed alias (D5/D14).
+            - name: RAG_EMBEDDING_ENGINE
+              value: "openai"
+            - name: RAG_EMBEDDING_MODEL
+              value: "club-embed"
+            - name: OPENAI_API_BASE_URL
+              value: "http://litellm.apps.svc.cluster.local:4000/v1"
+            - name: OPENAI_API_KEY
+              # secret created in Phase 0b via 59_app_services pattern (playbook
+              # 54_club_assistant.yml); the pipe-to-n8n function arrives in Phase 3
+              valueFrom:
+                secretKeyRef:
+                  name: club-assistant-secrets
+                  key: LITELLM_CLUB_KEY
+          livenessProbe:
+            # /health is the confirmed liveness endpoint; returns {"status": true}
+            # Evidence: @app.get('/health') in backend/open_webui/main.py
+            # /ready also exists as a deeper readiness check (DB + Redis); /health
+            # is preferred for liveness since it is always fast and stateless.
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # first boot initializes the SQLite DB and may pull models/assets;
+            # allow ~5 min before the kubelet declares failure
+            failureThreshold: 30
+          volumeMounts:
+            - name: open-webui-data
+              mountPath: /app/backend/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              # 1Gi OOMKilled during first boot (local embedding model load,
+              # 2026-07-06); 2Gi is within the platform's amd64 heavy-workload
+              # ceiling (APP-DEPLOYMENT.md)
+              memory: 2Gi
+          securityContext:
+            # runAsNonRoot / runAsUser 1000 NOT set — see SECURITY DEVIATION above.
+            # Container runs as UID 0 by default (upstream published image).
+            allowPrivilegeEscalation: false
+            # Verified live 2026-07-07 (Phase 0c): pod boots and serves with ALL
+            # capabilities dropped (PVC already initialized; no CAP_CHOWN needed).
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: open-webui-data
+          persistentVolumeClaim:
+            claimName: open-webui-data

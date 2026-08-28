@@ -342,6 +342,45 @@ ingress:
 
 Then: `ansible-playbook infra/playbooks/40_platform.yml`
 
+#### Off-LAN kubectl / Ansible Access (Port-Forward over the Tunnel)
+
+When you are **not on the home LAN**, the k3s API (`192.168.1.61:6443`) is unreachable
+directly. Open a persistent SSH local port-forward through the Cloudflare Access SSH proxy,
+then point kubectl at the local end.
+
+1. Open the forward in its own terminal and leave it running (`-N` = no remote shell, just
+   hold the tunnel open):
+
+   ```bash
+   ssh -i ~/.ssh/homelab \
+     -o ProxyCommand="cloudflared access ssh --hostname %h" \
+     -N -L 6443:localhost:6443 \
+     ansible@ssh.furchert.ch
+   ```
+
+2. Use a kubeconfig context whose server is `https://127.0.0.1:6443` (the `tunnel` context in
+   `~/.kube/config`):
+
+   ```bash
+   export KUBECONFIG=~/.kube/config
+   kubectl config use-context tunnel
+   kubectl get pods -n apps        # verify it reaches the cluster
+   ```
+
+> **Gotcha — playbooks hardcode the LAN kubeconfig.** Playbooks that shell out to `kubectl`
+> (e.g. `infra/playbooks/59_app_services.yml`) set `kubeconfig: ~/.kube/homelab.yaml`, which
+> points at the LAN IP `192.168.1.61:6443` and fails off-LAN with
+> `dial tcp 192.168.1.61:6443: connect: network is unreachable`. Override the var to use the
+> tunnel context instead (the task sets only `KUBECONFIG`, so it honours that file's
+> current-context — set it to `tunnel` first as above):
+>
+> ```bash
+> ansible-playbook infra/playbooks/59_app_services.yml -e kubeconfig="$HOME/.kube/config"
+> ```
+>
+> Keep the `-N -L …` terminal running for the whole playbook run — if the forward drops, the
+> playbook fails the same way.
+
 ---
 
 ### Monitoring (Prometheus + Grafana)
