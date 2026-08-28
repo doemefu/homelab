@@ -533,10 +533,13 @@ Use this runbook whenever bumping a pinned image tag for one of these five compo
 practice.** Never point an older image at a database/PVC a newer image has already migrated —
 restore the pre-upgrade backup first, then roll the image back.
 
+Run these blocks with `set -euo pipefail`; a zero-byte backup file means the exec failed.
+
 #### Backup directory convention
 
 ```bash
 mkdir -p -m 700 ~/homelab-backups/$(date +%F)
+chmod 700 ~/homelab-backups ~/homelab-backups/$(date +%F)  # -m only applies to dirs mkdir creates, not pre-existing ones
 ```
 
 These dumps can contain credentials/PII — keep them local-only (never commit, never upload) and
@@ -544,22 +547,52 @@ delete the directory once the new version has run cleanly through a burn-in peri
 
 #### Open WebUI (SQLite DB + vector DB + uploads)
 
+Known regressions on Open WebUI v0.11.x (unfixed in any released tag, 2026-08-28): toggling a
+model's enable/disable switch in Admin > Models permanently deletes it (open-webui#29036 et al.)
+— manage models in LiteLLM instead; Workspace > Knowledge page hangs (open-webui#29104) — use
+chat/REST for RAG checks.
+
+Quiesce before backing up the PVC — a live pod can still be writing to SQLite/`vector_db` mid-copy:
+
+```bash
+kubectl -n apps scale deploy/open-webui --replicas=0
+kubectl -n apps wait --for=delete pod -l app=open-webui --timeout=120s
+kubectl -n apps run open-webui-backup-helper --image=busybox:1.37.0 --restart=Never \
+  --override-type=merge \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.37.0","command":["sleep","3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"open-webui-data"}}]}}'
+kubectl -n apps wait --for=condition=Ready pod/open-webui-backup-helper --timeout=60s
+kubectl -n apps exec open-webui-backup-helper -c helper -- tar czf - -C /data . > ~/homelab-backups/$(date +%F)/open-webui-data.tgz
+tar tzf ~/homelab-backups/$(date +%F)/open-webui-data.tgz | head -3
+kubectl -n apps delete pod open-webui-backup-helper
+```
+
+Re-run the rollout (`ansible-playbook infra/playbooks/54_club_assistant.yml` after bumping the
+image tag) to scale the Deployment back up with the new image — do not `scale --replicas=1`
+manually onto the old image.
+
+Optional no-downtime pre-copy of `webui.db` only, useful if you want a snapshot *before* scaling
+to 0 (e.g. to diff schema before/after):
+
 ```bash
 POD=$(kubectl -n apps get pod -l app=open-webui -o jsonpath='{.items[0].metadata.name}')
 kubectl -n apps exec "$POD" -- python3 -c \
   "import sqlite3; s=sqlite3.connect('/app/backend/data/webui.db'); d=sqlite3.connect('/app/backend/data/webui.db.bak'); s.backup(d); d.close()"
 kubectl -n apps cp "apps/$POD:/app/backend/data/webui.db.bak" ~/homelab-backups/$(date +%F)/open-webui-webui.db.bak
 kubectl -n apps exec "$POD" -- rm -f /app/backend/data/webui.db.bak
-kubectl -n apps exec "$POD" -- tar --ignore-failed-read -czf /tmp/open-webui-data.tgz -C /app/backend/data vector_db uploads
-kubectl -n apps cp "apps/$POD:/tmp/open-webui-data.tgz" ~/homelab-backups/$(date +%F)/open-webui-data.tgz
-kubectl -n apps exec "$POD" -- rm -f /tmp/open-webui-data.tgz
+ls -lh ~/homelab-backups/$(date +%F)/open-webui-webui.db.bak
 ```
+
+This pre-copy covers `webui.db` only, not `vector_db`/`uploads` — it does not replace the quiesced
+`open-webui-data.tgz` backup above. If you restore from it alone, it must be copied back as
+`/app/backend/data/webui.db` specifically, with any `webui.db-wal` / `webui.db-shm` files next to
+it removed first.
 
 #### LiteLLM (Postgres `litellm` database)
 
 ```bash
 kubectl -n apps exec postgresql-0 -c postgresql -- \
   pg_dump -U postgres -Fc litellm > ~/homelab-backups/$(date +%F)/litellm.dump
+pg_restore -l ~/homelab-backups/$(date +%F)/litellm.dump | head -5
 ```
 
 #### n8n (workflow/credential export + full PVC)
@@ -568,13 +601,19 @@ kubectl -n apps exec postgresql-0 -c postgresql -- \
 POD=$(kubectl -n apps get pod -l app=n8n -o jsonpath='{.items[0].metadata.name}')
 kubectl -n apps exec "$POD" -- n8n export:workflow --backup --output=/home/node/.n8n/backups/pre-upgrade/
 kubectl -n apps exec "$POD" -- n8n export:credentials --backup --output=/home/node/.n8n/backups/pre-upgrade/
+# Restorable only with the same N8N_ENCRYPTION_KEY (Secret n8n-secrets) — do not rotate it
+# between backup and restore.
 # never add --decrypted here — that writes plaintext credential secrets to disk
+kubectl -n apps exec "$POD" -- ls -lh /home/node/.n8n/backups/pre-upgrade/
 
 kubectl -n apps scale deploy/n8n --replicas=0
+kubectl -n apps wait --for=delete pod -l app=n8n --timeout=120s
 kubectl -n apps run n8n-backup-helper --image=busybox:1.37.0 --restart=Never \
+  --override-type=merge \
   --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.37.0","command":["sleep","3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"n8n-data"}}]}}'
 kubectl -n apps wait --for=condition=Ready pod/n8n-backup-helper --timeout=60s
-kubectl -n apps exec n8n-backup-helper -- tar czf - -C /data . > ~/homelab-backups/$(date +%F)/n8n-data.tgz
+kubectl -n apps exec n8n-backup-helper -c helper -- tar czf - -C /data . > ~/homelab-backups/$(date +%F)/n8n-data.tgz
+tar tzf ~/homelab-backups/$(date +%F)/n8n-data.tgz | head -3
 kubectl -n apps delete pod n8n-backup-helper
 kubectl -n apps scale deploy/n8n --replicas=1
 ```
@@ -582,8 +621,10 @@ kubectl -n apps scale deploy/n8n --replicas=1
 #### PostgreSQL (all databases, before an image bump)
 
 ```bash
-kubectl -n apps exec postgresql-0 -- pg_dumpall -U postgres > ~/homelab-backups/$(date +%F)/pg-all.sql
-kubectl -n apps exec postgresql-0 -- pg_dump -U postgres -Fc club_assistant > ~/homelab-backups/$(date +%F)/club_assistant.dump
+kubectl -n apps exec postgresql-0 -c postgresql -- pg_dumpall -U postgres > ~/homelab-backups/$(date +%F)/pg-all.sql
+grep -c '^CREATE DATABASE' ~/homelab-backups/$(date +%F)/pg-all.sql
+kubectl -n apps exec postgresql-0 -c postgresql -- pg_dump -U postgres -Fc club_assistant > ~/homelab-backups/$(date +%F)/club_assistant.dump
+pg_restore -l ~/homelab-backups/$(date +%F)/club_assistant.dump | head -5
 ```
 
 #### Longhorn volume snapshot (optional, whole-PVC, faster restore)
@@ -613,19 +654,62 @@ Stateless — no backup needed. Rollback is an image-tag revert only (see below)
 - **Image-only revert** (no DB touched): `kubectl -n apps set image deployment/<name> <name>=<old-image>`,
   or revert the tag in git (`cluster/apps/<app>/deployment.yaml`, `cluster/values/cloudflared.yaml`,
   `infra/playbooks/50_apps_infra.yml`) with `git revert` and re-run the matching playbook.
-- **Open WebUI / n8n data restore**: scale the Deployment to 0, start a helper pod mounting the same
-  PVC, `kubectl cp` the backup back in, `tar xzf ... -C <mount>`, delete the helper, scale back to 1.
-- **LiteLLM**: recreate the database before restoring — do not `pg_restore` over an already-migrated
-  schema:
+- **Open WebUI restore**: scale to 0, start the same helper pod as the backup step above (PVC
+  `open-webui-data`, `--override-type=merge`), then **clear the volume before extracting** so
+  files written after the backup are removed:
   ```bash
+  kubectl -n apps scale deploy/open-webui --replicas=0
+  kubectl -n apps run open-webui-backup-helper --image=busybox:1.37.0 --restart=Never \
+    --override-type=merge \
+    --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.37.0","command":["sleep","3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"open-webui-data"}}]}}'
+  kubectl -n apps wait --for=condition=Ready pod/open-webui-backup-helper --timeout=60s
+  kubectl -n apps exec open-webui-backup-helper -c helper -- sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; true'
+  kubectl -n apps cp ~/homelab-backups/<date>/open-webui-data.tgz open-webui-backup-helper:/tmp/open-webui-data.tgz -c helper
+  kubectl -n apps exec open-webui-backup-helper -c helper -- tar xzf /tmp/open-webui-data.tgz -C /data
+  kubectl -n apps delete pod open-webui-backup-helper
+  kubectl -n apps scale deploy/open-webui --replicas=1
+  ```
+  (equivalently: `find /data -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} +` instead
+  of the glob). If only the no-downtime `webui.db` pre-copy was taken (no `open-webui-data.tgz`),
+  it must be copied back as `/app/backend/data/webui.db` specifically through a live pod
+  (`kubectl cp`, not the helper's `/data` mount), with any `webui.db-wal` / `webui.db-shm` files
+  removed first. The full-PVC Longhorn snapshot (see above) is the alternative when a full
+  quiesced restore is preferred over `tar`.
+- **n8n restore**: scale to 0, start a helper pod mounting `n8n-data` (same `--override-type=merge`
+  shape as the backup helper above), `kubectl cp` the backup back in, `kubectl exec
+  n8n-backup-helper -c helper -- tar xzf /tmp/n8n-data.tgz -C /data`, delete the helper, scale back
+  to 1.
+- **LiteLLM**: stop the workload and recreate the database before restoring — do not `pg_restore`
+  over an already-migrated schema:
+  ```bash
+  kubectl -n apps scale deploy/litellm --replicas=0
+  kubectl -n apps wait --for=delete pod -l app=litellm --timeout=120s
+  # fallback if the wait times out (a stuck connection can block DROP DATABASE):
+  kubectl -n apps exec -it postgresql-0 -c postgresql -- psql -U postgres -c \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='litellm';"
   kubectl -n apps exec -it postgresql-0 -c postgresql -- psql -U postgres -c "DROP DATABASE litellm;"
   kubectl -n apps exec -it postgresql-0 -c postgresql -- psql -U postgres -c "CREATE DATABASE litellm OWNER litellm;"
   kubectl -n apps cp ~/homelab-backups/<date>/litellm.dump postgresql-0:/tmp/litellm.dump -c postgresql
   kubectl -n apps exec postgresql-0 -c postgresql -- pg_restore -U postgres -d litellm --no-owner --role=litellm /tmp/litellm.dump
+  kubectl -n apps scale deploy/litellm --replicas=1
   ```
-- **PostgreSQL image revert**: safe as a plain image-tag revert only while `ALTER EXTENSION vector
-  UPDATE;` has not yet been run against `club_assistant` — once run, restore `club_assistant.dump`
-  first (the underlying PG minor bump is on-disk compatible either way; the extension version is not).
+- **PostgreSQL image revert** — pick the path that matches how far the upgrade progressed:
+  - (a) **Tag revert only**, safe while `ALTER EXTENSION vector UPDATE;` has **not** yet been run
+    against `club_assistant` (the underlying PG minor bump is on-disk compatible either way).
+  - (b) **After** `ALTER EXTENSION vector UPDATE;` has run: revert the image tag first, then
+    restore `club_assistant` under the older image:
+    ```bash
+    kubectl -n apps exec -it postgresql-0 -c postgresql -- psql -U postgres -c "DROP DATABASE club_assistant;"
+    kubectl -n apps exec -it postgresql-0 -c postgresql -- psql -U postgres -c "CREATE DATABASE club_assistant OWNER club_assistant;"
+    kubectl -n apps cp ~/homelab-backups/<date>/club_assistant-pre-<date>.dump postgresql-0:/tmp/club_assistant.dump -c postgresql
+    kubectl -n apps exec postgresql-0 -c postgresql -- pg_restore -U postgres -d club_assistant --no-owner --role=club_assistant /tmp/club_assistant.dump
+    kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d club_assistant -c "SELECT extversion FROM pg_extension WHERE extname='vector';"
+    ```
+    Verify `extversion` matches the older image's bundled pgvector build before starting the
+    workloads back up.
+  - (c) **Full-PVC alternative**: scale the `postgresql` StatefulSet to 0 and revert the
+    pre-upgrade Longhorn snapshot of `data-postgresql-0` (see the Longhorn snapshot subsection
+    above), then scale back up under the older image.
 
 ---
 
