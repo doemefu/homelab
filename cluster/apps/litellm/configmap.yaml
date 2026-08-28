@@ -81,7 +81,7 @@ data:
       # OCR backfill (468 PDFs, $0.91) proved out mistral-ocr; this route is
       # for the future recurring OCR drain, which calls LiteLLM's native
       # /v1/ocr endpoint (BerriAI/litellm PR #15571, in this deployment's
-      # v1.83.7-stable.patch.1) with a scoped virtual key — never the
+      # v1.98.0) with a scoped virtual key — never the
       # provider master key. Dated snapshot per G2 (no -latest).
       - model_name: club-ocr
         litellm_params:
