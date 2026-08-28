@@ -16,20 +16,20 @@ spec:
         app: litellm
     spec:
       enableServiceLinks: false
-      # Non-root (runAsUser 1000) removed 2026-07-06: the upstream litellm-database
-      # image is not non-root-capable — prisma's query engine fails with
-      # NotConnectedError even with a writable HOME, and no non_root variant exists
-      # for 1.83.x (registry checked). This restores the posture the working 68-day
-      # deployment always had. Retry when upstream ships a non_root -database image.
+      # Non-root restored 2026-08-29: upstream fixed the prisma-engine NotConnectedError
+      # across v1.94.0/v1.95.0/v1.97.0
+      # (engines baked at a fixed, world-readable /opt/prisma path, HOME=/app baked in and writable, USER 65534).
+      # litellm-non_root bundles the same Prisma/Postgres support as litellm-database (no separate -database-non_root image exists).
+      # Verified 2026-08-29 by a pull test on the cluster: uid=65534(nobody), HOME=/app writable — research-litellm.md §B.
       containers:
         - name: litellm
           # Avoid 1.82.7 and 1.82.8 (malicious releases on PyPI, March 2026).
-          # The -database variant auto-migrates Postgres schema on startup.
+          # The non_root image auto-migrates the Postgres schema on startup (prisma migrate deploy).
           # Pinned v1.98.0 (2026-08-23). No '-stable' suffix since v1.84.0 (weekly releases bump MINOR).
           # Fixes CVE-2026-49468 (critical host-header auth bypass) + 4 further advisories since 1.83.7.
-          # Multi-arch: linux/amd64 + linux/arm64. Index digest:
-          # sha256:5ead13edd4efd89f32dab349c1f19447d395affca53f3aeae00f5e6e01b8c08d
-          image: docker.litellm.ai/berriai/litellm-database:v1.98.0
+          # Multi-arch: linux/amd64 + linux/arm64. Digest prefix confirmed by cluster pull test:
+          # sha256:157aaf0a519713663ec6abefe73fa48bf12f638b...
+          image: docker.litellm.ai/berriai/litellm-non_root:v1.98.0
           args:
             - "--config"
             - "/app/proxy_config.yaml"
@@ -80,13 +80,6 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: MISTRAL_VIBE_API_KEY
-            # Required for non-root (runAsUser 1000): prisma writes its binary cache
-            # to $HOME/.cache; without HOME it resolves to '/' (not writable) and the
-            # pod crashloops on "prisma migrate deploy" (observed 2026-07-06; same
-            # failure as the 7-day-old stale RS — the v1.83.7+non-root spec had never
-            # successfully rolled out).
-            - name: HOME
-              value: "/tmp"
             - name: GENERIC_TIMEZONE
               value: "Europe/Zurich"
             - name: TZ
@@ -159,6 +152,9 @@ spec:
               cpu: 1000m
               memory: 2Gi
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
             allowPrivilegeEscalation: false
       volumes:
         - name: config-volume

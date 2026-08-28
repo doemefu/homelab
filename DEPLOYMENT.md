@@ -595,6 +595,9 @@ kubectl -n apps exec postgresql-0 -c postgresql -- \
 pg_restore -l ~/homelab-backups/$(date +%F)/litellm.dump | head -5
 ```
 
+Since PR-2 (2026-08-29), the LiteLLM container image is `litellm-non_root` and runs as uid 65534
+instead of root — this does not change the backup/restore procedure above in any way.
+
 #### n8n (workflow/credential export + full PVC)
 
 ```bash
@@ -648,6 +651,31 @@ Revert: scale the workload to 0 replicas, then use the Longhorn UI
 #### cloudflared
 
 Stateless — no backup needed. Rollback is an image-tag revert only (see below).
+
+#### mosquitto (persistence DB, nice-to-have)
+
+```bash
+MPOD=$(kubectl -n apps get pod -l app=mosquitto -o jsonpath='{.items[0].metadata.name}')
+# Force a persistence save first (mosquitto writes mosquitto.db only periodically / on close)
+kubectl -n apps exec "$MPOD" -- kill -USR1 1 && sleep 2
+kubectl -n apps cp "apps/$MPOD:/mosquitto/data/mosquitto.db" ~/homelab-backups/$(date +%F)/mosquitto.db
+ls -l ~/homelab-backups/$(date +%F)/mosquitto.db
+```
+
+Persistence format is identical across the pinned tags (`MOSQ_DB_VERSION` unchanged), so this
+backup is a nice-to-have, not a hard prerequisite. Rollback is a plain image-tag revert
+(`git revert` the mosquitto commit + re-run `ansible-playbook infra/playbooks/50_apps_infra.yml`)
+— no data restore step is needed.
+
+A mosquitto restart briefly drops device-service's MQTT connection. After any mosquitto rollout
+(forward or rollback), confirm it reconnects:
+
+```bash
+kubectl -n apps logs deploy/device-service --since=5m | grep -i mqtt
+```
+
+If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps rollout restart
+deploy/device-service`, then re-check the logs.
 
 #### Restore paths
 

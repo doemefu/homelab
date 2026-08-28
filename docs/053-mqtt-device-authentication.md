@@ -21,7 +21,7 @@ This resolves the post-M6 task tracked in `.claude/memory/project_post_m6_items.
 
 See `infra/playbooks/50_apps_infra.yml` lines 205–310:
 
-- `eclipse-mosquitto:2.0.22` deployed with `allow_anonymous true`.
+- `eclipse-mosquitto:2.1.2-alpine` deployed with `allow_anonymous true`.
 - Single shared `backend` MQTT user **planned but not yet enforced** — devices and device-service all connect anonymously today.
 - Service exposed as `LoadBalancer` on port 1883.
 - ACL not configured. Persistence in `mosquitto-data` PVC.
@@ -39,7 +39,7 @@ The base `eclipse-mosquitto` image has no JWT support — a plugin is required.
 | Option | Pros | Cons |
 |--------|------|------|
 | [`iegomez/mosquitto-go-auth`](https://github.com/iegomez/mosquitto-go-auth) (custom image) | Active, multi-arch (`arm64` + `amd64`), supports JWKS via `jwt` backend with `mode=remote`+`local`, ACL via local file or DB | Not an official image — pin to specific tag; rebuild from source if compromise concerns |
-| Custom Dockerfile FROM `eclipse-mosquitto:2.0.22` + compile [`mosquitto-jwt-auth`](https://github.com/wiomoc/mosquitto-jwt-auth) | Official base, smaller, focused | More maintenance — rebuild on every Mosquitto patch release |
+| Custom Dockerfile FROM `eclipse-mosquitto:2.1.2-alpine` + compile [`mosquitto-jwt-auth`](https://github.com/wiomoc/mosquitto-jwt-auth) | Official base, smaller, focused | More maintenance — rebuild on every Mosquitto patch release |
 
 **Recommended:** `iegomez/mosquitto-go-auth:3.0.0` (or latest pinned at plan time). Multi-arch is critical (raspi5 = arm64, mba1 = amd64). Verify image manifest with `docker manifest inspect` before committing the tag.
 
@@ -48,7 +48,7 @@ The base `eclipse-mosquitto` image has no JWT support — a plugin is required.
 In `50_apps_infra.yml`, change:
 
 ```yaml
-image: "eclipse-mosquitto:2.0.22"
+image: "eclipse-mosquitto:2.1.2-alpine"
 ```
 
 to the chosen plugin image. Add `MOSQUITTO_GO_AUTH_*` env vars or a richer config (plugin image expects an extended `mosquitto.conf`).
