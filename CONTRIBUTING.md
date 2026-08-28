@@ -514,6 +514,11 @@ rg --type yaml "pattern"
 4. **Architecture**: Always verify images support both architectures before deploying
 5. **Resource limits**: Always set for `apps` namespace. Check with `kubectl top pods -n apps`
 6. **Documentation consistency**: After any code change, verify all references in docs match
+7. **Stale `helm_repository` entries**: `kubernetes.core.helm_repository` (collection >=6.5.0)
+   strips the trailing slash from `repo_url` and hard-fails ("Repository already have a
+   repository named influxdata") if the locally cached Helm repo entry still has one — this hits
+   `50_apps_infra.yml`'s InfluxData repo task on every run until fixed. Fix:
+   `helm repo remove influxdata && helm repo add influxdata https://helm.influxdata.com`
 
 ---
 

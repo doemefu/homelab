@@ -427,6 +427,13 @@ Expected UP targets:
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
 
+> **Note:** `postgres-exporter` v0.20.1 (the pinned version in `50_apps_infra.yml`) does not
+> expose `pg_stat_checkpointer_*` metrics by default — no `--collector.*` flags are set on the
+> exporter container, so that collector stays off. The PG17 `column "checkpoints_timed" does not
+> exist` error seen with the older v0.15.0 exporter is gone (v0.20.1 understands the PG17
+> `pg_stat_checkpointer` view), but do not expect checkpoint metrics in Prometheus without
+> explicitly enabling that collector.
+
 #### ServiceMonitors
 
 ```bash
@@ -485,6 +492,23 @@ ansible-playbook infra/playbooks/59_app_services.yml
 kubectl rollout restart deployment/n8n -n apps
 ```
 
+#### Upgrade
+
+1. Update the image tag in `cluster/apps/n8n/deployment.yaml` to the new pinned version
+2. Re-run: `ansible-playbook infra/playbooks/52_n8n.yml`
+3. Confirm: `kubectl -n apps rollout status deployment/n8n --timeout=10m`
+
+n8n's TypeORM migrations against its SQLite database are forward-only in practice — back up the
+`n8n-data` PVC per the n8n backup steps in the [Backup & rollback](#backup--rollback-for-image-updates-open-webui-litellm-n8n-postgresql-cloudflared)
+runbook below before upgrading, and never point an older image at a database a newer image has
+already migrated.
+
+> **Note:** n8n 2.36.8's `/rest/settings` reports `sso.oidc.loginEnabled: false` /
+> `enterprise.oidc: false` even though env-managed OIDC (`N8N_SSO_MANAGED_BY_ENV`,
+> `N8N_SSO_OIDC_*`) is applied and the n8n log shows "OIDC login is enabled — applying OIDC SSO
+> env vars" — the OIDC login button appears to be gated by an unlicensed enterprise feature flag.
+> This was not verified end-to-end; verify with an actual login attempt before relying on it.
+
 ---
 
 ### LiteLLM
@@ -524,6 +548,13 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 2. Check [LiteLLM release notes](https://github.com/BerriAI/litellm/releases) — avoid known malicious versions (e.g., 1.82.7, 1.82.8)
 3. Re-run: `ansible-playbook infra/playbooks/53_litellm.yml`
 4. Confirm: `kubectl rollout status deployment/litellm -n apps`
+
+> **Why step 4 matters:** the playbook's own rollout-wait task ("LiteLLM Rollout warten") polls
+> `status.availableReplicas == spec.replicas`, which is already true from the *old* pod under the
+> Deployment's default `RollingUpdate` strategy — it does not gate on the new pod actually coming
+> up. The playbook can report success while the old image is still serving. Always confirm the
+> new image landed with `kubectl -n apps rollout status deploy/litellm --timeout=10m` rather than
+> trusting the playbook's "changed" result alone.
 
 ---
 
@@ -570,6 +601,18 @@ kubectl -n apps delete pod open-webui-backup-helper
 Re-run the rollout (`ansible-playbook infra/playbooks/54_club_assistant.yml` after bumping the
 image tag) to scale the Deployment back up with the new image — do not `scale --replicas=1`
 manually onto the old image.
+
+> **Gotcha:** never run `ansible-playbook infra/playbooks/54_club_assistant.yml --check` while
+> Open WebUI is scaled to 0. The playbook's rollout-wait task ("Open WebUI Rollout warten") polls
+> `status.availableReplicas == spec.replicas` with `retries: 30` / `delay: 10` (a 300s budget).
+> `--check` mode never actually applies the Deployment back to `replicas: 1`, so the condition
+> never becomes true and the play stalls through the full 300s retry budget before failing.
+> Observed 2026-08-29: a `--check` run against a scaled-to-0 Deployment stalled through that
+> budget as part of an observed ~12 min Open WebUI downtime window; `kubectl apply -f
+> cluster/apps/open-webui/{pvc,deployment,service}.yaml` recovered it directly, and the playbook
+> re-run afterwards reported `changed=0` (idempotent). For a scaled-to-0 restore or upgrade,
+> apply the manifests directly with `kubectl apply` first, then run `54_club_assistant.yml`
+> afterwards for idempotency — never use `--check` as the first step while replicas=0.
 
 Optional no-downtime pre-copy of `webui.db` only, useful if you want a snapshot *before* scaling
 to 0 (e.g. to diff schema before/after):
