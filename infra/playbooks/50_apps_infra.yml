@@ -279,7 +279,12 @@
               spec:
                 containers:
                   - name: mosquitto
-                    image: "eclipse-mosquitto:2.0.22"
+                    # Pinned 2.1.2-alpine (2026-06-22). The bare tag 2.1.2 does not exist on
+                    # Docker Hub (docker-library official-images manifest). Persistence format
+                    # identical (MOSQ_DB_VERSION=6 in 2.0.22 and 2.1.2), same Alpine base; none
+                    # of our config directives are deprecated in 2.1. max_packet_size default is
+                    # now 2 MB.
+                    image: "eclipse-mosquitto:2.1.2-alpine"
                     ports:
                       - containerPort: 1883
                     volumeMounts:
