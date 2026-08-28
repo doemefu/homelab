@@ -139,7 +139,7 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 | Longhorn              | 1.7.2        |
 | cert-manager          | v1.17.1      |
 | kube-prometheus-stack | 69.3.1       |
-| cloudflared           | 2025.2.1     |
+| cloudflared           | 2026.8.2     |
 
 ---
 

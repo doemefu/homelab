@@ -1,6 +1,9 @@
 ---
 # cloudflared Helm Values
 # Chart: cloudflare/cloudflare-tunnel-remote 0.1.2
+# Image: cloudflare/cloudflared 2026.8.2 (2026-08-14, amd64+arm64). Chart 0.1.2 is still the latest
+# (index checked 2026-08-28). 2026.8.0-.2 = HTTP path-normalization security fixes; since 2026.4.0
+# --edge-ip-version defaults to auto (chart exposes no extraArgs to pin it).
 # Repo:  https://cloudflare.github.io/helm-charts
 #
 # tunnelToken: wird von 40_platform.yml aus all.sops.yml injiziert — nicht hier hinterlegen
@@ -25,7 +28,7 @@
 # Sicherheitsprinzip: alles was nicht explizit gelistet ist → 404, nie → Traefik
 
 image:
-  tag: "2025.2.1"  # gepinnt — nie latest
+  tag: "2026.8.2"  # pinned — never latest
 
 replicaCount: 1
 

@@ -96,7 +96,10 @@
               spec:
                 containers:
                   - name: postgresql
-                    image: pgvector/pgvector:0.8.4-pg17
+                    # pgvector 0.8.6-pg17 (2026-08-13, PostgreSQL 17.11): bug-fix release; extension objects
+                    # stay at the installed version until ALTER EXTENSION vector UPDATE is run per database
+                    # (club_assistant only)
+                    image: pgvector/pgvector:0.8.6-pg17
                     env:
                       - name: POSTGRES_PASSWORD
                         valueFrom:
@@ -128,7 +131,10 @@
                         # See club-assistant worklog 20260708-121500-phase1-drive-backfill-c5f8.
                         memory: 1Gi
                   - name: postgres-exporter
-                    image: prometheuscommunity/postgres-exporter:v0.15.0
+                    # postgres-exporter v0.20.1 (2026-07-08): supports PG17 pg_stat_checkpointer (fixes
+                    # 'column "checkpoints_timed" does not exist'); v0.20.0 flag/metric renames
+                    # (replication_slot*) do not affect this config (no flags set)
+                    image: prometheuscommunity/postgres-exporter:v0.20.1
                     env:
                       - name: DATA_SOURCE_URI
                         value: "localhost:5432/postgres?sslmode=disable"

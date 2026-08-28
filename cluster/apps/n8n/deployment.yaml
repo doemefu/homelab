@@ -23,8 +23,11 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: n8n
-          # Pinned version with multi-arch support (linux/arm64 + linux/amd64)
-          image: n8nio/n8n:2.17.1
+          # Pinned 2.36.8 (2026-08-28; 2.37.x is beta). Node 24.18.1 / Alpine 3.24, multi-arch
+          # amd64+arm64 (Docker Hub manifest). ~13–15 SQLite migrations since 2.17.1 (additive
+          # except two Drop* on unrelated feature tables), forward-only: PVC backup before rollout
+          # (DEPLOYMENT.md).
+          image: n8nio/n8n:2.36.8
           ports:
             - containerPort: 5678
           env:
@@ -83,6 +86,8 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
+          # startupProbe budget ≈ 10 min: the 727 MB SQLite DB must run ~15 migrations on
+          # first boot of 2.36.8; liveness must not kill the pod mid-migration.
           startupProbe:
             httpGet:
               path: /healthz
@@ -90,7 +95,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 15
+            failureThreshold: 59
           volumeMounts:
             - name: n8n-data
               mountPath: /home/node/.n8n
