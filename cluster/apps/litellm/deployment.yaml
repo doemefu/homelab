@@ -23,7 +23,7 @@ spec:
       # deployment always had. Retry when upstream ships a non_root -database image.
       containers:
         - name: litellm
-          # Pinned stable patch version — avoid 1.82.7 and 1.82.8 (malicious releases).
+          # Avoid 1.82.7 and 1.82.8 (malicious releases on PyPI, March 2026).
           # The -database variant auto-migrates Postgres schema on startup.
           # Pinned v1.98.0 (2026-08-23). No '-stable' suffix since v1.84.0 (weekly releases bump MINOR).
           # Fixes CVE-2026-49468 (critical host-header auth bypass) + 4 further advisories since 1.83.7.
@@ -124,8 +124,10 @@ spec:
               subPath: config.yaml
               readOnly: true
           # startupProbe budget: 20 s initial delay + 58 × 10 s ≈ 10 min — covers the Prisma migration
-          # jump 1.83.7 → 1.98.0 (~15 minor versions); matches the 600 s wait in 53_litellm.yml. A
-          # kubelet kill mid-migration can leave _prisma_migrations inconsistent (P3009).
+          # jump 1.83.7 → 1.98.0 (~15 minor versions). Roll out with 'kubectl -n apps rollout status
+          # deploy/litellm --timeout=10m' — the playbook's availableReplicas wait does not gate on the
+          # new pod under the default RollingUpdate strategy. A kubelet kill mid-migration can leave
+          # the Prisma migration state inconsistent.
           startupProbe:
             httpGet:
               path: /health/liveliness

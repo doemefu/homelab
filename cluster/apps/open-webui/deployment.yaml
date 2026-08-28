@@ -92,6 +92,9 @@ spec:
                 secretKeyRef:
                   name: club-assistant-secrets
                   key: LITELLM_CLUB_KEY
+          # Known regressions on v0.11.0/v0.11.1 (unfixed in any released tag, 2026-08-28): toggling a model's
+          # enable/disable switch in Admin > Models permanently deletes it (open-webui#29036 et al.) — manage models
+          # in LiteLLM instead; Workspace > Knowledge page hangs (open-webui#29104) — use chat/REST for RAG checks.
           livenessProbe:
             # /health is the confirmed liveness endpoint; returns {"status": true}
             # Evidence: @app.get('/health') in backend/open_webui/main.py
@@ -120,7 +123,8 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             # first boot initializes the SQLite DB and may pull models/assets;
-            # allow ~5 min before the kubelet declares failure
+            # allow ~5 min before the kubelet declares failure (310 s is enough: 10 alembic
+            # migrations on an 872 KB SQLite DB; n8n/LiteLLM got 600 s for much larger migrations)
             failureThreshold: 30
           volumeMounts:
             - name: open-webui-data

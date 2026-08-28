@@ -9,7 +9,7 @@
 # Prerequisites (must complete before running this playbook):
 #   - 50_apps_infra.yml completed (apps namespace + PostgreSQL running)
 #   - 50_apps_infra.yml image updated to pgvector/pgvector:0.8.6-pg17
-#     (see 50_apps_infra_pgvector.patch.md — required for AC-0.6)
+#     (required for AC-0.6)
 #   - infrastructure/cluster/apps/open-webui/{deployment,service,pvc}.yaml present
 #     in the infrastructure repo
 #

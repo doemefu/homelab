@@ -333,7 +333,7 @@ flowchart TD
 
 | Resource | Namespace | Notes |
 |---|---|---|
-| `deployment.yaml` | apps | LiteLLM v1.83.7-stable.patch.1; 1 replica; resource limits: 256Mi/500m |
+| `deployment.yaml` | apps | LiteLLM v1.98.0; 1 replica; resource limits: 256Mi/500m |
 | `configmap.yaml` | apps | LiteLLM model routing config (YAML). Ollama entry commented out as placeholder. Anthropic routes disabled. |
 | `service.yaml` | apps | ClusterIP :4000 |
 | Secrets provisioned | apps | MISTRAL_API_KEY, MISTRAL_CODESTRAL_KEY (for Codestral routes), LITELLM_MASTER_KEY, DATABASE_URL |
