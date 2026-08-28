@@ -526,6 +526,109 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 
 ---
 
+### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
+
+Use this runbook whenever bumping a pinned image tag for one of these five components. Rule:
+**Open WebUI's alembic, LiteLLM's prisma, and n8n's TypeORM migrations are forward-only in
+practice.** Never point an older image at a database/PVC a newer image has already migrated —
+restore the pre-upgrade backup first, then roll the image back.
+
+#### Backup directory convention
+
+```bash
+mkdir -p -m 700 ~/homelab-backups/$(date +%F)
+```
+
+These dumps can contain credentials/PII — keep them local-only (never commit, never upload) and
+delete the directory once the new version has run cleanly through a burn-in period.
+
+#### Open WebUI (SQLite DB + vector DB + uploads)
+
+```bash
+POD=$(kubectl -n apps get pod -l app=open-webui -o jsonpath='{.items[0].metadata.name}')
+kubectl -n apps exec "$POD" -- python3 -c \
+  "import sqlite3; s=sqlite3.connect('/app/backend/data/webui.db'); d=sqlite3.connect('/app/backend/data/webui.db.bak'); s.backup(d); d.close()"
+kubectl -n apps cp "apps/$POD:/app/backend/data/webui.db.bak" ~/homelab-backups/$(date +%F)/open-webui-webui.db.bak
+kubectl -n apps exec "$POD" -- rm -f /app/backend/data/webui.db.bak
+kubectl -n apps exec "$POD" -- tar --ignore-failed-read -czf /tmp/open-webui-data.tgz -C /app/backend/data vector_db uploads
+kubectl -n apps cp "apps/$POD:/tmp/open-webui-data.tgz" ~/homelab-backups/$(date +%F)/open-webui-data.tgz
+kubectl -n apps exec "$POD" -- rm -f /tmp/open-webui-data.tgz
+```
+
+#### LiteLLM (Postgres `litellm` database)
+
+```bash
+kubectl -n apps exec postgresql-0 -c postgresql -- \
+  pg_dump -U postgres -Fc litellm > ~/homelab-backups/$(date +%F)/litellm.dump
+```
+
+#### n8n (workflow/credential export + full PVC)
+
+```bash
+POD=$(kubectl -n apps get pod -l app=n8n -o jsonpath='{.items[0].metadata.name}')
+kubectl -n apps exec "$POD" -- n8n export:workflow --backup --output=/home/node/.n8n/backups/pre-upgrade/
+kubectl -n apps exec "$POD" -- n8n export:credentials --backup --output=/home/node/.n8n/backups/pre-upgrade/
+# never add --decrypted here — that writes plaintext credential secrets to disk
+
+kubectl -n apps scale deploy/n8n --replicas=0
+kubectl -n apps run n8n-backup-helper --image=busybox:1.37.0 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.37.0","command":["sleep","3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"n8n-data"}}]}}'
+kubectl -n apps wait --for=condition=Ready pod/n8n-backup-helper --timeout=60s
+kubectl -n apps exec n8n-backup-helper -- tar czf - -C /data . > ~/homelab-backups/$(date +%F)/n8n-data.tgz
+kubectl -n apps delete pod n8n-backup-helper
+kubectl -n apps scale deploy/n8n --replicas=1
+```
+
+#### PostgreSQL (all databases, before an image bump)
+
+```bash
+kubectl -n apps exec postgresql-0 -- pg_dumpall -U postgres > ~/homelab-backups/$(date +%F)/pg-all.sql
+kubectl -n apps exec postgresql-0 -- pg_dump -U postgres -Fc club_assistant > ~/homelab-backups/$(date +%F)/club_assistant.dump
+```
+
+#### Longhorn volume snapshot (optional, whole-PVC, faster restore)
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: longhorn.io/v1beta2
+kind: Snapshot
+metadata:
+  name: pre-upgrade-<component>
+  namespace: longhorn-system
+spec:
+  volume: <pvc-volume-name>   # kubectl -n apps get pvc <name> -o jsonpath='{.spec.volumeName}'
+  createSnapshot: true
+EOF
+```
+
+Revert: scale the workload to 0 replicas, then use the Longhorn UI
+(`kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80`) to revert the volume.
+
+#### cloudflared
+
+Stateless — no backup needed. Rollback is an image-tag revert only (see below).
+
+#### Restore paths
+
+- **Image-only revert** (no DB touched): `kubectl -n apps set image deployment/<name> <name>=<old-image>`,
+  or revert the tag in git (`cluster/apps/<app>/deployment.yaml`, `cluster/values/cloudflared.yaml`,
+  `infra/playbooks/50_apps_infra.yml`) with `git revert` and re-run the matching playbook.
+- **Open WebUI / n8n data restore**: scale the Deployment to 0, start a helper pod mounting the same
+  PVC, `kubectl cp` the backup back in, `tar xzf ... -C <mount>`, delete the helper, scale back to 1.
+- **LiteLLM**: recreate the database before restoring — do not `pg_restore` over an already-migrated
+  schema:
+  ```bash
+  kubectl -n apps exec -it postgresql-0 -c postgresql -- psql -U postgres -c "DROP DATABASE litellm;"
+  kubectl -n apps exec -it postgresql-0 -c postgresql -- psql -U postgres -c "CREATE DATABASE litellm OWNER litellm;"
+  kubectl -n apps cp ~/homelab-backups/<date>/litellm.dump postgresql-0:/tmp/litellm.dump -c postgresql
+  kubectl -n apps exec postgresql-0 -c postgresql -- pg_restore -U postgres -d litellm --no-owner --role=litellm /tmp/litellm.dump
+  ```
+- **PostgreSQL image revert**: safe as a plain image-tag revert only while `ALTER EXTENSION vector
+  UPDATE;` has not yet been run against `club_assistant` — once run, restore `club_assistant.dump`
+  first (the underlying PG minor bump is on-disk compatible either way; the extension version is not).
+
+---
+
 ### Flux CD (GitOps)
 
 #### Status

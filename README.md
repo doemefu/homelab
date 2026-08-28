@@ -77,8 +77,8 @@ directly to the backing Service per the rules in 40_platform.yml.
 
 ### Application Runtimes
 - **Home Assistant**: Deployed in `homeassistant` namespace with hostNetwork
-- **n8n**: v2.17.1 (workflow automation, Ansible-managed)
-- **LiteLLM**: v1.83.7-stable.patch.1 (AI gateway, OpenAI-compatible, Ansible-managed)
+- **n8n**: v2.36.8 (workflow automation, Ansible-managed)
+- **LiteLLM**: v1.98.0 (AI gateway, OpenAI-compatible, Ansible-managed)
 
 ---
 
