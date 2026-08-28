@@ -655,7 +655,11 @@ Stateless — no backup needed. Rollback is an image-tag revert only (see below)
 #### mosquitto (persistence DB, nice-to-have)
 
 ```bash
-kubectl -n apps cp "apps/$(kubectl -n apps get pod -l app=mosquitto -o jsonpath='{.items[0].metadata.name}'):/mosquitto/data/mosquitto.db" ~/homelab-backups/$(date +%F)/mosquitto.db
+MPOD=$(kubectl -n apps get pod -l app=mosquitto -o jsonpath='{.items[0].metadata.name}')
+# Force a persistence save first (mosquitto writes mosquitto.db only periodically / on close)
+kubectl -n apps exec "$MPOD" -- kill -USR1 1 && sleep 2
+kubectl -n apps cp "apps/$MPOD:/mosquitto/data/mosquitto.db" ~/homelab-backups/$(date +%F)/mosquitto.db
+ls -l ~/homelab-backups/$(date +%F)/mosquitto.db
 ```
 
 Persistence format is identical across the pinned tags (`MOSQ_DB_VERSION` unchanged), so this
