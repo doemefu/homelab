@@ -8,7 +8,7 @@
 
 ## Repo Overview
 
-Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacBook Airs). Provisions all nodes via Ansible, installs and configures k3s, deploys platform services (Traefik, cert-manager, Longhorn, cloudflared, kube-prometheus-stack), and provides app-deployment scaffolding for the namespace `apps` — including the self-hosted apps that run there: Home Assistant, n8n, LiteLLM, Open WebUI, and the club-assistant platform stack (`51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml`).
+Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacBook Airs). Provisions all nodes via Ansible, installs and configures k3s, deploys platform services (Traefik, cert-manager, Longhorn, cloudflared, kube-prometheus-stack), and provides app-deployment scaffolding for the namespace `apps` — including the self-hosted apps that run there: n8n, LiteLLM, Open WebUI, and the club-assistant platform stack (`52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml`) — plus Home Assistant, which runs in its own `homeassistant` namespace (`51_homeassistant.yml`).
 
 **This repo is:**
 - IaC for OS provisioning, hardening, k3s, storage, networking, monitoring, backups
