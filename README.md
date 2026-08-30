@@ -246,7 +246,6 @@ infra/
     k3s/                      # k3s server + agent install
     longhorn_prereqs/         # open-iscsi, nfs-common, kernel modules
     observability_agent/      # Node Exporter preparation (placeholder)
-    docker/                   # Docker CE for Home Assistant host
 
 cluster/
   flux-system/                # Flux CD bootstrap and GitOps sync
