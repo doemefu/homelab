@@ -105,7 +105,7 @@ All services are discoverable via Kubernetes internal DNS.
 | Service | FQDN | Port | Metrics Port | Authentication | Notes |
 |---------|------|------|---------------|----------------|-------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar |
-| InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 8086 | 80 | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention |
+| InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |
 | LiteLLM | `litellm.apps.svc.cluster.local` | 4000 | - | Bearer `LITELLM_MASTER_KEY` | OpenAI-compatible AI gateway |
@@ -287,7 +287,7 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 | `n8n-secrets` | `apps` | n8n encryption key | n8n | Rotate via `59_app_services.yml`, restart n8n deployment |
 | `litellm-secrets` | `apps` | LiteLLM master key, salt key, DB password, Mistral API keys | LiteLLM | **`litellm_salt_key` MUST NEVER rotate** — invalidates all virtual keys in DB |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
-| `influxdb2-secret` | `apps` | InfluxDB admin password, token | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
+| `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `cloudflare-api-token` | `platform` | Cloudflare API token | cert-manager DNS-01 challenges | Set in `40_platform.yml` |
 
 ### Required SOPS Variables

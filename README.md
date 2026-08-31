@@ -150,7 +150,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | Service | FQDN | Port | Notes |
 |---------|------|------|-------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | Metrics: `:9187/metrics` (postgres-exporter) |
-| InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 8086 | Metrics: `:80/metrics` (native) |
+| InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | Metrics: `/metrics` (same port; container listens on 8086) |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | MQTT broker, anonymous (LAN-only) |
 | Mosquitto Exporter | `mosquitto-metrics.apps.svc.cluster.local` | 9234 | Prometheus metrics endpoint |
 | LiteLLM | `litellm.apps.svc.cluster.local` | 4000 | AI gateway |
