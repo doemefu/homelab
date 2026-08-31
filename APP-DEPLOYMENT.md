@@ -34,7 +34,7 @@ The following **shared services** run in the `apps` namespace and are available 
 | Service | Internal FQDN | Port | Metrics Endpoint | Authentication | Notes |
 |---------|---------------|------|-----------------|----------------|-------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | `:9187/metrics` (sidecar) | Single replica | Password from SOPS `postgresql_password` |
-| InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 8086 | `:80/metrics` (native) | Token-based | Org: `homelab`, Bucket: `default`, 30d retention |
+| InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | `/metrics` (same port; container listens on 8086) | Token-based | Org: `homelab`, Bucket: `default`, 30d retention |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | **Anonymous** (LAN-only) | Also exposed via LoadBalancer on port 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | `:9234/metrics` | - | Prometheus exporter for Mosquitto |
 

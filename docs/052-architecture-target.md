@@ -333,7 +333,7 @@ Services run locally via `./mvnw spring-boot:run` and connect to infrastructure 
 ```bash
 # Port-forward cluster services for local dev
 kubectl port-forward -n apps svc/postgres 5432:5432 &
-kubectl port-forward -n apps svc/influxdb 8086:8086 &
+kubectl port-forward -n apps svc/influxdb2 8086:80 &
 kubectl port-forward -n apps svc/mosquitto 1883:1883 &
 
 # Run service locally
