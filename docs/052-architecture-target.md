@@ -1,5 +1,7 @@
 # Target Architecture — Microservices
 
+> Amended 2026-09-01 per ADR 0001 (parent `docs/adr/0001-schedules-ownership-and-data-plane.md`): schedules ownership -> device-service.
+
 This document describes the target architecture for the Terrarium IoT application after the migration from the legacy monolith.
 
 ---
@@ -56,16 +58,14 @@ Internet
 +-----------------------------------------------------+
 |                    data-service :8082                |
 |  - InfluxDB queries (historical data)               |
-|  - Schedule CRUD (read/write schedules table)        |
 |  - JWT validation via JWKS from auth-service         |
 +-----------------------------------------------------+
-         |                    |
-         v                    v
-    +---------+         +----------+
-    |InfluxDB |         |PostgreSQL|
-    | (read)  |         |(schedules|
-    +---------+         | table)   |
-                        +----------+
+         |
+         v
+    +---------+
+    |InfluxDB |
+    | (read)  |
+    +---------+
 ```
 
 ---
@@ -102,35 +102,37 @@ Internet
 - Scheduled MQTT commands (light, nightlight, rain automation)
 - WebSocket broadcast (STOMP, live device state to frontend)
 - Device control REST endpoint (manual toggle -> MQTT publish)
+- Schedules REST CRUD (planned: device-service#41)
 
 **Does NOT:**
 - Handle user authentication or user CRUD
 - Query historical InfluxDB data for charts
 
-**Database:** PostgreSQL — `devices` table (owns it), reads `schedules` table
+**Database:** PostgreSQL — owns `devices` and `schedules` tables
 **InfluxDB:** Write-only (sensor measurements)
 **MQTT:** Full client (subscribe + publish)
 
-**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reads from the `schedules` DB table and refreshes periodically or on notification.
+**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reads from its own `schedules` table and re-registers scheduled tasks directly when a CRUD operation changes them — no cross-service polling or notification needed now that device-service owns both the table and the REST API.
 
 ### data-service
 
-**Domain:** Data retrieval and schedule management.
+**Domain:** Historical sensor data retrieval (near-term).
 
 **Responsibilities:**
 - InfluxDB queries (historical temperature, humidity, device status)
-- Schedule CRUD REST API (create, read, update, delete schedules)
 - JWT validation for all endpoints
 
 **Does NOT:**
-- Connect to MQTT
-- Write to InfluxDB
+- Connect to MQTT (current; see target picture)
+- Write to InfluxDB (current; see target picture)
 - Manage users or issue tokens
 
-**Database:** PostgreSQL — `schedules` table (owns it)
+**Database:** PostgreSQL — none (no owned tables; stateless historical-query service)
 **InfluxDB:** Read-only (queries)
 
-**Key design decision:** Schedule CRUD lives here (not in device-service) because it is a REST-driven, human-facing concern. The device-service reads schedules from the shared DB table. This keeps device-service focused on its real-time loop and avoids exposing user-facing REST APIs from a service that should be headless.
+**Key design decision (superseded 2026-09-01, ADR 0001):** Schedule CRUD does not live here. Schedules are a device-management concern, tightly coupled to the in-process scheduling engine that executes them, so the `schedules` table, its CRUD REST API, and execution all live in device-service. This supersedes the original design (schedule CRUD in data-service) described in earlier drafts of this document. data-service's near-term scope is limited to read-only historical InfluxDB queries.
+
+**Target picture (later step, ADR 0001):** data-service is intended to eventually own sensor-data ingestion and processing (MQTT -> InfluxDB writes), moving that responsibility out of device-service. That is an explicit, separate decision not yet made — until then, ingestion stays in device-service and the "Does NOT" items above hold.
 
 ---
 
@@ -143,22 +145,21 @@ Internet
 | JWKS endpoint |<---------|JWT validation  |          |              |
 | (public key)  |  (HTTP   | (startup only) |          |              |
 |               |   once)  |                |          |              |
-+---------------+          +-------+--------+          +------+-------+
-                                   |                          |
-                                   | reads                    | owns
-                                   v                          v
-                           +-------+--------+         +-------+------+
-                           | PostgreSQL     |         | PostgreSQL   |
-                           | devices table  |         | schedules    |
-                           | (+ reads       |         | table        |
-                           |  schedules)    |         |              |
-                           +----------------+         +--------------+
++---------------+          +-------+--------+          +--------------+
+                                   |
+                                   | owns
+                                   v
+                           +-------+--------+
+                           | PostgreSQL     |
+                           | devices table  |
+                           | schedules table|
+                           +----------------+
 ```
 
 **Communication pattern: Shared database, no synchronous REST calls between services.**
 
 - auth-service is fully self-contained. Other services only fetch its JWKS once at startup (or on key rotation) to get the RSA public key.
-- data-service owns the `schedules` table. device-service reads it.
+- device-service owns both the `devices` and `schedules` tables; it owns schedule execution end-to-end (ADR 0001, 2026-09-01).
 - No message broker between services (MQTT is for device communication only).
 - This is intentionally simple for a 3-service architecture. If the project grows, an event bus could replace the shared DB pattern.
 
@@ -217,16 +218,14 @@ CREATE TABLE refresh_tokens (
     created_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
--- Owned by: data-service, read by: device-service
+-- Owned by: device-service (ADR 0001)
 CREATE TABLE schedules (
     id              BIGSERIAL PRIMARY KEY,
-    title           VARCHAR(100) NOT NULL,
-    cron_expression VARCHAR(50) NOT NULL,
-    mqtt_topic      VARCHAR(200) NOT NULL,
-    mqtt_payload    VARCHAR(500) NOT NULL,     -- JSON string
-    active          BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
+    device_name     VARCHAR(50),
+    field           VARCHAR(50),
+    payload         TEXT,
+    cron_expression VARCHAR(100),
+    active          BOOLEAN DEFAULT TRUE
 );
 
 -- Owned by: device-service
@@ -310,6 +309,10 @@ CREATE TABLE devices (
 | GET | `/devices/{id}` | JWT | Single device state |
 | POST | `/devices/{id}/control` | JWT | Send control command (-> MQTT publish) |
 | WS | `/ws` | Optional | STOMP WebSocket, subscribe to `/topic/terrarium/{deviceId}` |
+| GET | `/schedules` | JWT | List all schedules (planned: device-service#41) |
+| POST | `/schedules` | ADMIN | Create schedule (planned: device-service#41) |
+| PUT | `/schedules/{id}` | ADMIN | Update schedule (planned: device-service#41) |
+| DELETE | `/schedules/{id}` | ADMIN | Delete schedule (planned: device-service#41) |
 
 ### data-service (:8082)
 
@@ -317,10 +320,6 @@ CREATE TABLE devices (
 |--------|------|------|-------------|
 | GET | `/data/measurements` | JWT | Historical sensor data (params: device, period) |
 | GET | `/data/devices/{id}/status` | JWT | Device online/offline history |
-| GET | `/schedules` | JWT | List all schedules |
-| POST | `/schedules` | ADMIN | Create schedule |
-| PUT | `/schedules/{id}` | ADMIN | Update schedule |
-| DELETE | `/schedules/{id}` | ADMIN | Delete schedule |
 
 ---
 
