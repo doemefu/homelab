@@ -112,7 +112,7 @@ Internet
 **InfluxDB:** Write-only (sensor measurements)
 **MQTT:** Full client (subscribe + publish)
 
-**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reads from its own `schedules` table and re-registers scheduled tasks directly when a CRUD operation changes them — no cross-service polling or notification needed now that device-service owns both the table and the REST API.
+**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reconciles from its own `schedules` table on a periodic fixed delay (`app.scheduler.poll-interval`, shipped at 60s); once the CRUD API lands (device-service#41), CRUD writes will re-register the affected task directly in-process — no cross-service polling or HTTP notification needed now that device-service owns both the table and the REST API. The periodic reconciliation stays in place as a fallback safety net for out-of-band DB edits, not as the primary change-propagation path.
 
 ### data-service
 
@@ -156,9 +156,9 @@ Internet
                            +----------------+
 ```
 
-**Communication pattern: Shared database, no synchronous REST calls between services.**
+**Communication pattern: Shared database; no synchronous service-to-service calls on request paths.**
 
-- auth-service is fully self-contained. Other services only fetch its JWKS once at startup (or on key rotation) to get the RSA public key.
+- auth-service is fully self-contained. Other services only fetch its JWKS once at startup (or on key rotation) to get the RSA public key — the only cross-service HTTP call in this architecture, and it happens outside the request path.
 - device-service owns both the `devices` and `schedules` tables; it owns schedule execution end-to-end (ADR 0001, 2026-09-01).
 - No message broker between services (MQTT is for device communication only).
 - This is intentionally simple for a 3-service architecture. If the project grows, an event bus could replace the shared DB pattern.
@@ -393,7 +393,7 @@ Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 ## Decisions Not Yet Made (deferred to implementation)
 
 1. **Refresh token strategy:** DB-backed (revocable) vs. signed JWT (stateless). Recommend DB-backed for revocability.
-2. **Schedule change notification:** device-service polls DB periodically vs. listens for a PostgreSQL NOTIFY. Start with polling (simpler), optimize later if needed.
+2. **Schedule change notification (resolved 2026-09-01, ADR 0001):** No longer an open decision — device-service is both schedule owner and executor, so CRUD writes (device-service#41) re-register the affected task directly in-process. The shipped 60s periodic reconciliation (`SchedulerService`, `app.scheduler.poll-interval`) remains only as a fallback safety net for out-of-band DB edits, not as the primary change-propagation mechanism.
 3. **WebSocket authentication:** Require JWT for WebSocket connection or allow unauthenticated read-only subscriptions. WebSocket only broadcasts state (read-only), so unauthenticated is acceptable for simplicity.
 4. **MQTT topic redesign:** Current topics follow `terra{n}/{sensor}/data` pattern. May be simplified or restructured during M2.
 5. **CI/CD pipeline:** GitHub Actions for building multi-arch images per service repo.
