@@ -86,7 +86,7 @@ ansible-playbook infra/playbooks/40_platform.yml
 ### Post-Deployment Setup
 
 ```bash
-# Enable Flux GitOps for auth-service and device-service
+# Enable Flux GitOps for auth-service, device-service and furchert-ch
 kubectl apply -f cluster/flux-system/apps-sync.yaml
 
 # Verify cluster health
@@ -125,7 +125,7 @@ kubectl get ns
 | `platform` | cert-manager (3x), cloudflared | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
 | `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* | Running |
-| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, n8n-*, litellm-* | Running |
+| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, n8n-*, litellm-*, open-webui-* | Running |
 | `homeassistant` | home-assistant-0 | Running |
 | `flux-system` | source-controller, kustomize-controller, helm-controller, notification-controller, image-reflector-controller, image-automation-controller | Running |
 
@@ -370,13 +370,14 @@ then point kubectl at the local end.
 
    Note that the shell default is the LAN file (`~/.zshrc` exports `KUBECONFIG=~/.kube/homelab.yaml`,
    the kubeconfig the playbooks use), so the `export` above is required. On a machine whose
-   `~/.kube/config` has no `tunnel` context yet, derive one from the LAN kubeconfig instead — same CA
-   and client certificate, only the server changes (the k3s API certificate is valid for `127.0.0.1`;
-   verified 2026-09-03):
+   `~/.kube/config` has no `tunnel` context yet, derive a tunnel kubeconfig from the LAN file instead —
+   same CA and client certificate, only the server changes (the existing `tunnel` context already
+   relies on the k3s API certificate being valid for `127.0.0.1`):
 
    ```bash
    sed 's#https://192.168.1.61:6443#https://127.0.0.1:6443#' ~/.kube/homelab.yaml > ~/.kube/tunnel.yaml
-   export KUBECONFIG=~/.kube/tunnel.yaml   # context is still named "default" but points at the forward
+   kubectl config rename-context default tunnel --kubeconfig ~/.kube/tunnel.yaml
+   export KUBECONFIG=~/.kube/tunnel.yaml
    kubectl get pods -n apps
    ```
 
@@ -389,6 +390,7 @@ then point kubectl at the local end.
 >
 > ```bash
 > ansible-playbook infra/playbooks/59_app_services.yml -e kubeconfig="$HOME/.kube/config"
+> # with a derived tunnel kubeconfig instead: -e kubeconfig="$HOME/.kube/tunnel.yaml"
 > ```
 >
 > Keep the `-N -L …` terminal running for the whole playbook run — if the forward drops, the
@@ -408,12 +410,16 @@ ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ans
   'sudo k3s kubectl apply -f -' < cluster/apps/<app>/deployment.yaml
 ```
 
-This is an escape hatch for reads and single-file hotfixes, not a replacement for the playbooks: it
-applies exactly the manifest you pipe in and none of the playbook's other tasks (secrets, PVCs,
-ConfigMaps, waits). Prefer `ansible-playbook … -e kubeconfig="$HOME/.kube/config"` over the forward
-for anything else, and after a one-shot apply run the owning playbook with `--check --diff` on the
-next LAN session (expect `changed=0`). A `Host ssh.furchert.ch` entry in `~/.ssh/config` can carry
-`User ansible`, the `ProxyCommand` and `IdentityFile`; then `ssh ssh.furchert.ch '…'` suffices.
+This is an escape hatch for reads and for single-file hotfixes of **Ansible-applied** apps (n8n,
+litellm, open-webui and the platform charts): it applies exactly the manifest you pipe in and none of
+the playbook's other tasks (secrets, PVCs, ConfigMaps, waits), so run the owning playbook with
+`--check --diff` on the next LAN session (expect `changed=0`). Never use it for the Flux-managed apps
+(auth-service, device-service, furchert-ch): change the app repo and let Flux reconcile — a manual
+apply there is overwritten by the next reconciliation (see the Flux contract in INTERFACES.md). For
+anything beyond a read or a single-file hotfix, prefer `ansible-playbook … -e kubeconfig=…` over the
+forward. The `Host raspi5` entry from the SSH-access section above already carries `User ansible`,
+the `ProxyCommand` and `IdentityFile`, so `ssh raspi5 'sudo k3s kubectl -n apps get pods'` is the
+short form of the commands above.
 
 ---
 
