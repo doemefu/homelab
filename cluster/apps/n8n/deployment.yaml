@@ -102,11 +102,13 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              # Raised 256Mi -> 768Mi (2026-09-03): measured working set ~450-590 MiB, so the pod ran
+              # far above its request and was the first eviction candidate under node pressure. #74
+              memory: 768Mi
             limits:
               cpu: 1000m
               # Raised 1Gi -> 2Gi (2026-09-03): OOMKilled twice loading the n8n-backup workflow's
-              # execution data (baseline ~550-590 MiB, spike past 1Gi within one 15 s scrape). #72
+              # execution data (baseline ~450-590 MiB, spike past 1Gi within one 15 s scrape). #72
               memory: 2Gi
           securityContext:
             runAsNonRoot: true
