@@ -52,7 +52,7 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 - Home Assistant runs in k3s (namespace `homeassistant`, `51_homeassistant.yml`, pajikos Helm chart) — not in Docker.
 - Ingress: Traefik (bundled with k3s) + cert-manager (Let's Encrypt). External access only via Cloudflare Tunnel.
 - Playbooks (`infra/playbooks/`): `00_bootstrap 10_base 20_k3s 30_longhorn 40_platform 41_monitoring 50_apps_infra 51_homeassistant 52_n8n 53_litellm 54_club_assistant 59_app_services`.
-- Flux bundles (`cluster/apps/`): `auth-service device-service furchert-ch litellm n8n open-webui`.
+- `cluster/apps/` manifests: Flux-managed `auth-service device-service furchert-ch` (Kustomization `apps` + image automation); Ansible-applied `n8n` (`52_n8n.yml`), `litellm` (`53_litellm.yml`), `open-webui` (`54_club_assistant.yml`) — a merge alone does not deploy those three, run the playbook.
 - Secrets: SOPS + age, age key outside repo.
 
 ## Agent Team

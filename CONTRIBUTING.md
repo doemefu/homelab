@@ -43,7 +43,7 @@ Follow this loop for **every change** to this repository:
 | LiteLLM runtime | `infra/playbooks/53_litellm.yml`, `cluster/apps/litellm/` | `53_litellm.yml` |
 | Open WebUI / Club Assistant runtime | `infra/playbooks/54_club_assistant.yml`, `cluster/apps/open-webui/` | `54_club_assistant.yml` |
 | App secrets / DB bootstrap | `infra/playbooks/59_app_services.yml` | `59_app_services.yml` |
-| Flux GitOps | `cluster/apps/{auth-service,device-service}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
+| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
 | Node inventory / IPs | `infra/inventory/hosts.yml` | - |
 | Common variables (non-secret) | `infra/inventory/group_vars/all.yml` | - |
 | Secrets (SOPS) | `infra/inventory/group_vars/all.sops.yml` | - |
@@ -272,7 +272,7 @@ full rationale.
 
 ### Standard App Ownership
 
-- **Flux-managed**: `auth-service`, `device-service`
+- **Flux-managed**: `auth-service`, `device-service`, `furchert-ch`
 - **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, `open-webui` (Club Assistant), PostgreSQL, InfluxDB, Mosquitto
 - **Platform-managed**: cert-manager, cloudflared, Traefik, Longhorn, kube-prometheus-stack
 

@@ -47,7 +47,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 ### Provisioning & Configuration
 - **Provisioning**: Ansible (idempotent, self-discovering playbooks)
 - **Secrets Management**: SOPS + age (no plaintext secrets in git)
-- **GitOps**: Flux CD (image automation for auth-service, device-service)
+- **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch)
 
 ### Kubernetes Platform
 - **Distribution**: k3s v1.32.2+k3s1 (lightweight, embedded etcd, ServiceLB)
@@ -94,7 +94,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **Shared Infrastructure** | PostgreSQL 17, InfluxDB 2, Mosquitto 2 (+ exporters) | `infra/playbooks/50_apps_infra.yml`, `cluster/values/{postgresql,influxdb2}.yaml` |
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
-| **GitOps** | Flux CD sync + image automation for auth-service/device-service | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service}` |
+| **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch}` |
 | **Backup** | Restic-based node backups (daily 03:00 on raspi5) | `infra/roles/storage/`, `infra/playbooks/10_base.yml` |
 
 ---
@@ -162,6 +162,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 |---------|------|------|--------|
 | auth-service | `auth-service.apps.svc.cluster.local` | 8080 | Deployed, Flux-managed |
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | Deployed, Flux-managed |
+| furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Deployed, Flux-managed |
 
 ### Home Assistant
 
@@ -318,7 +319,8 @@ This repository provides the **platform infrastructure**. Application services t
 |------------|-------------|--------|------------|
 | [homelab-auth-service](https://github.com/doemefu/homelab-auth-service) | JWT authentication service — user CRUD, token issuance, JWKS endpoint | Deployed | Flux-managed |
 | [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | Deployed | Flux-managed |
-| homelab-data-service | Historical data queries (InfluxDB) + schedule CRUD | Not yet created | - |
+| [furchert-ch](https://github.com/doemefu/furchert-ch) | Public site (Next.js, DE/EN) + OIDC-gated `/dashboard` | Deployed | Flux-managed |
+| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Historical sensor data (InfluxDB) — README-only skeleton; schedules live in device-service (ADR 0001) | Planned, not deployed | - |
 
 Architecture and migration planning documents are in `docs/`.
 
