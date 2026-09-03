@@ -348,7 +348,7 @@ cd terrarium-auth-service
 - **Storage:** Longhorn (RF=2) for PostgreSQL and InfluxDB PVCs
 - **Secrets:** SOPS + age (encrypted in infra repo)
 - **Images:** Multi-arch (linux/arm64 + linux/amd64), pushed to GHCR
-- **Resource limits:** CPU 100m (request) - 1000m (limit), Memory 256Mi (request) - 512Mi (limit) per service; 300 s startup probe budget (verified against auth-service/device-service `k8s/deployment.yaml` on `origin/main`, 2026-09-04)
+- **Resource limits:** CPU 100m (request) - 1000m (limit), Memory 256Mi (request) - 512Mi (limit) per service; 300 s startup probe budget (verified against auth-service/device-service `k8s/deployment.yaml` on `origin/main`, commit `fd16353`/`93b5fcb` — see PR #78)
 - **JVM tuning:** `-Xmx128m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m`
 - **Infrastructure services (PostgreSQL, InfluxDB, Mosquitto):** Deployed and managed by IaC repo, not this project
 
