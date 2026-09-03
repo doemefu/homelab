@@ -105,7 +105,9 @@ spec:
               memory: 256Mi
             limits:
               cpu: 1000m
-              memory: 1Gi
+              # Raised 1Gi -> 2Gi (2026-09-03): OOMKilled twice loading the n8n-backup workflow's
+              # execution data (baseline ~550-590 MiB, spike past 1Gi within one 15 s scrape). #72
+              memory: 2Gi
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
