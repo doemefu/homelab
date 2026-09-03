@@ -1,0 +1,81 @@
+# Checks .github/helm-tracking/Chart.yaml's tracked Helm chart versions
+# against each chart repository's live index.yaml, weekly.
+#
+# Replaces Dependabot's "helm" package-ecosystem (see .github/dependabot.yml
+# for why it was removed) — this workflow reads the same tracking Chart.yaml
+# and is independently verifiable via manual dispatch. See CONTRIBUTING.md
+# "Helm Chart Version Tracking" for the human follow-up once it flags a
+# chart as outdated (the matching `chart_version:` in the relevant
+# infra/playbooks/*.yml must be bumped by hand — this workflow only opens an
+# issue, it never touches the playbooks itself).
+#
+# actions/checkout is tag-pinned here to match this repo's convention as of
+# 2026-09-04; SHA-pinning of all workflow actions is tracked separately (#37).
+name: Helm Chart Freshness
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: helm-chart-freshness
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check Helm chart versions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install PyYAML (pinned)
+        run: pip install --user pyyaml==6.0.3
+
+      - name: Check chart versions
+        id: check
+        run: python3 scripts/check-helm-chart-versions.py
+
+      - name: Find existing tracking issue
+        id: existing
+        run: |
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title \"Helm chart versions behind upstream (automated)\"" \
+            --json number --jq '.[0].number // empty')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Open or update tracking issue
+        if: steps.check.outputs.outdated == 'true' || steps.check.outputs.has_errors == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.check.outputs.report }}
+          ISSUE_NUMBER: ${{ steps.existing.outputs.number }}
+        run: |
+          body="${REPORT}
+
+          ---
+          Opened/updated automatically by \`.github/workflows/helm-chart-freshness.yml\`. See CONTRIBUTING.md \"Helm Chart Version Tracking\" for the manual sync process once you bump a chart version here."
+          if [ -n "$ISSUE_NUMBER" ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Helm chart versions behind upstream (automated)" \
+              --body "$body"
+          fi
+
+      - name: Close tracking issue if all charts are current
+        if: steps.check.outputs.outdated == 'false' && steps.check.outputs.has_errors == 'false' && steps.existing.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.existing.outputs.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "All tracked Helm charts are now at their latest available version. Closing."
+          gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY"

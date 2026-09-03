@@ -221,23 +221,50 @@ Worklog template: `.claude/worklog-template.md`
 - k3s version: `infra/roles/k3s/defaults/main.yml` (`k3s_version`)
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
 - Container images: Pinned tags in deployment manifests
-- Python packages: `infra/requirements.yml`
+- Ansible collections: `infra/requirements.yml` (exact pins — Dependabot
+  cannot track these; see "Ansible Collection Updates" below)
+- Container images: also see `.github/dependabot.yml`'s `docker`
+  ecosystem entries for which image locations are covered automatically
 
-### Helm Chart Version Tracking (Dependabot Bumps)
+### Ansible Collection Updates (Manual)
+
+`infra/requirements.yml` pins every Ansible collection to an exact
+version. "ansible-galaxy" is not a supported Dependabot
+package-ecosystem (tracked upstream at
+`github.com/dependabot/dependabot-core#3522`, open since 2021, still
+unimplemented), so these bumps are manual:
+
+1. Check the current version: `ansible-galaxy collection list`.
+2. Check the latest published version via the Galaxy API:
+   `https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/<namespace>/<name>/`
+   (`highest_version.version` in the JSON response).
+3. Bump the `version:` field in `infra/requirements.yml`, re-install
+   (`ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collections`),
+   and re-run the affected playbook(s) with `--check --diff` before a
+   real run.
+
+### Helm Chart Version Tracking (Automated Freshness Check)
 
 Helm chart versions live inline in Ansible playbooks under
-`infra/playbooks/` (look for `chart_version:`). Dependabot can't read
-those — its `helm` ecosystem only parses `Chart.yaml` `dependencies:`
-blocks. We bridge the gap with a tracking-only umbrella chart at
-`.github/helm-tracking/Chart.yaml`.
+`infra/playbooks/` (look for `chart_version:`). A scheduled GitHub
+Actions workflow, `.github/workflows/helm-chart-freshness.yml`, checks a
+tracking-only umbrella chart at `.github/helm-tracking/Chart.yaml`
+against each chart's live repository weekly (and on manual
+`workflow_dispatch`) and opens/updates a single tracking issue titled
+"Helm chart versions behind upstream (automated)" when any chart falls
+behind. (This replaced Dependabot's `helm` ecosystem, which pointed at
+the same tracking chart for over three months without ever opening a
+PR despite real available updates — see `.github/dependabot.yml`'s
+comment block for the investigation.)
 
-**When Dependabot opens a chart-bump PR** (it touches only
-`.github/helm-tracking/Chart.yaml`):
+**When that issue appears:**
 
-1. Read the comment above the bumped dependency — it names the
+1. Read the comment above the outdated dependency in
+   `.github/helm-tracking/Chart.yaml` — it names the
    `infra/playbooks/<file>.yml` that holds the real pin.
-2. In the same PR, update the matching `chart_version: "..."` line in
-   that playbook.
+2. Bump the `version:` field for that dependency in
+   `.github/helm-tracking/Chart.yaml`, and in the same PR update the
+   matching `chart_version: "..."` line in that playbook.
 3. Skim the chart's upstream release notes for breaking changes
    (`https://github.com/<owner>/<chart>/releases` or the chart
    repository's index).
@@ -246,11 +273,12 @@ blocks. We bridge the gap with a tracking-only umbrella chart at
    updates and apply them before the playbook run.
 5. Merge, then run the relevant playbook
    (`ansible-playbook infra/playbooks/<file>.yml -l <node>`) to pick
-   up the new chart.
+   up the new chart. The tracking issue is closed automatically by the
+   next scheduled workflow run once all charts are current again.
 
 **Never install or render** `.github/helm-tracking/Chart.yaml` — it is
-metadata for Dependabot only. The header of that file documents the
-full rationale.
+tracking metadata only. The header of that file documents the full
+rationale.
 
 ### IP Addresses
 
