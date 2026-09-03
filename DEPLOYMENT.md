@@ -416,8 +416,9 @@ the playbook's other tasks (secrets, PVCs, ConfigMaps, waits), so run the owning
 `--check --diff` on the next LAN session (expect `changed=0`). Never use it for the Flux-managed apps
 (auth-service, device-service, furchert-ch): change the app repo and let Flux reconcile — a manual
 apply there is overwritten by the next reconciliation (see the Flux contract in INTERFACES.md). For
-anything beyond a read or a single-file hotfix, prefer `ansible-playbook … -e kubeconfig=…` over the
-forward. The `Host raspi5` entry from the SSH-access section above already carries `User ansible`,
+anything beyond a read or a single-file hotfix, run the owning playbook through the port-forward
+(`ansible-playbook … -e kubeconfig=…`, see the gotcha above) instead of this one-shot path. The
+`Host raspi5` entry from the SSH-access section above already carries `User ansible`,
 the `ProxyCommand` and `IdentityFile`, so `ssh raspi5 'sudo k3s kubectl -n apps get pods'` is the
 short form of the commands above.
 
