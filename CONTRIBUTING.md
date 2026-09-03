@@ -272,7 +272,7 @@ full rationale.
 
 ### Standard App Ownership
 
-- **Flux-managed**: `auth-service`, `device-service`
+- **Flux-managed**: `auth-service`, `device-service`, `furchert-ch`
 - **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, `open-webui` (Club Assistant), PostgreSQL, InfluxDB, Mosquitto
 - **Platform-managed**: cert-manager, cloudflared, Traefik, Longhorn, kube-prometheus-stack
 

@@ -324,7 +324,7 @@ Add to `~/.ssh/config`:
 Host raspi5
   HostName ssh.furchert.ch
   User ansible
-  IdentityFile ~/.ssh/new_home
+  IdentityFile ~/.ssh/homelab
   ProxyCommand cloudflared access ssh --hostname %h
 ```
 
@@ -368,6 +368,18 @@ then point kubectl at the local end.
    kubectl get pods -n apps        # verify it reaches the cluster
    ```
 
+   Note that the shell default is the LAN file (`~/.zshrc` exports `KUBECONFIG=~/.kube/homelab.yaml`,
+   the kubeconfig the playbooks use), so the `export` above is required. On a machine whose
+   `~/.kube/config` has no `tunnel` context yet, derive one from the LAN kubeconfig instead — same CA
+   and client certificate, only the server changes (the k3s API certificate is valid for `127.0.0.1`;
+   verified 2026-09-03):
+
+   ```bash
+   sed 's#https://192.168.1.61:6443#https://127.0.0.1:6443#' ~/.kube/homelab.yaml > ~/.kube/tunnel.yaml
+   export KUBECONFIG=~/.kube/tunnel.yaml   # context is still named "default" but points at the forward
+   kubectl get pods -n apps
+   ```
+
 > **Gotcha — playbooks hardcode the LAN kubeconfig.** Playbooks that shell out to `kubectl`
 > (e.g. `infra/playbooks/59_app_services.yml`) set `kubeconfig: ~/.kube/homelab.yaml`, which
 > points at the LAN IP `192.168.1.61:6443` and fails off-LAN with
@@ -381,6 +393,27 @@ then point kubectl at the local end.
 >
 > Keep the `-N -L …` terminal running for the whole playbook run — if the forward drops, the
 > playbook fails the same way.
+
+#### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
+
+For a single read or a single-manifest apply, run kubectl on the control-plane node through the
+same Cloudflare Access SSH proxy instead of holding a forward open:
+
+```bash
+ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl -n apps get pods'
+
+# apply exactly one manifest from the local checkout (used for PR #73 on 2026-09-03):
+ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl apply -f -' < cluster/apps/<app>/deployment.yaml
+```
+
+This is an escape hatch for reads and single-file hotfixes, not a replacement for the playbooks: it
+applies exactly the manifest you pipe in and none of the playbook's other tasks (secrets, PVCs,
+ConfigMaps, waits). Prefer `ansible-playbook … -e kubeconfig="$HOME/.kube/config"` over the forward
+for anything else, and after a one-shot apply run the owning playbook with `--check --diff` on the
+next LAN session (expect `changed=0`). A `Host ssh.furchert.ch` entry in `~/.ssh/config` can carry
+`User ansible`, the `ProxyCommand` and `IdentityFile`; then `ssh ssh.furchert.ch '…'` suffices.
 
 ---
 

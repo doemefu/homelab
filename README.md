@@ -162,6 +162,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 |---------|------|------|--------|
 | auth-service | `auth-service.apps.svc.cluster.local` | 8080 | Deployed, Flux-managed |
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | Deployed, Flux-managed |
+| furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Deployed, Flux-managed |
 
 ### Home Assistant
 
@@ -318,7 +319,8 @@ This repository provides the **platform infrastructure**. Application services t
 |------------|-------------|--------|------------|
 | [homelab-auth-service](https://github.com/doemefu/homelab-auth-service) | JWT authentication service — user CRUD, token issuance, JWKS endpoint | Deployed | Flux-managed |
 | [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | Deployed | Flux-managed |
-| homelab-data-service | Historical data queries (InfluxDB) + schedule CRUD | Not yet created | - |
+| [furchert-ch](https://github.com/doemefu/furchert-ch) | Public site (Next.js, DE/EN) + OIDC-gated `/dashboard` | Deployed | Flux-managed |
+| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Historical sensor data (InfluxDB) — README-only skeleton; schedules live in device-service (ADR 0001) | Planned, not deployed | - |
 
 Architecture and migration planning documents are in `docs/`.
 
