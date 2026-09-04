@@ -600,6 +600,11 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 
+All 7 platform images (these 5 plus postgres-exporter and mosquitto) are pinned by tag
+**and digest** (`repo:tag@sha256:...`, #57) — see CONTRIBUTING.md "Digest-Pinned Platform
+Images" for how to re-resolve the digest as part of any bump below (step 1 of that
+procedure, before touching this runbook's backup steps).
+
 Use this runbook whenever bumping a pinned image tag for one of these five components. Rule:
 **Open WebUI's alembic, LiteLLM's prisma, and n8n's TypeORM migrations are forward-only in
 practice.** Never point an older image at a database/PVC a newer image has already migrated —

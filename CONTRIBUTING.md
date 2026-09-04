@@ -220,8 +220,51 @@ Worklog template: `.claude/worklog-template.md`
 - **NO `latest` tags** — all versions must be pinned
 - k3s version: `infra/roles/k3s/defaults/main.yml` (`k3s_version`)
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
-- Container images: Pinned tags in deployment manifests
+- Container images: Pinned tags **and digests** (`repo:tag@sha256:...`) in deployment manifests — see "Digest-Pinned Platform Images" below
 - Python packages: `infra/requirements.yml`
+
+### Digest-Pinned Platform Images
+
+The 7 platform images (open-webui, litellm, n8n, cloudflared, pgvector,
+postgres-exporter, mosquitto) are pinned by **tag and digest**
+(`repo:tag@sha256:...`), not tag alone — a tag can be repointed
+upstream/registry-side without changing what's in git, but a digest
+can't. Each pin's comment records the multi-arch index digest plus the
+per-platform (amd64/arm64) digests it resolves to at pin time.
+
+**Locations:**
+- `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml` — `image:` field
+- `cluster/values/cloudflared.yaml` — `image.tag` (the chart template does
+  plain string concatenation `{{ .Values.image.repository }}:{{ .Values.image.tag }}`,
+  no dedicated `image.digest` value exists in this chart — the digest is
+  appended directly to `tag`, a valid `name:tag@digest` OCI reference)
+- `infra/playbooks/50_apps_infra.yml` — `image:` field for pgvector,
+  postgres-exporter, and mosquitto (embedded `kubernetes.core.k8s` tasks)
+
+**Bumping a digest (whether moving to a new tag, or re-verifying the current one):**
+
+1. Resolve the **multi-arch index digest** — never a per-platform one, since this
+   cluster mixes arm64 (raspi5, raspi4) and amd64 (mba1, mba2) nodes:
+   ```bash
+   docker buildx imagetools inspect <repo>:<tag>
+   # "Digest:" near the top is the index digest to use in repo:tag@sha256:<digest>.
+   # The per-platform "Name: repo:tag@sha256:..." lines under "Manifests:" are what
+   # goes in the pin's explanatory comment (amd64 + arm64 only; ignore other arches).
+   ```
+2. Confirm both `linux/amd64` and `linux/arm64` platforms are present in the output
+   (`docker buildx imagetools inspect <repo>:<tag> | grep Platform:`) — if either is
+   missing, do not pin (the image wouldn't run on part of the cluster).
+3. Update the `image:` (or `image.tag`) line to `repo:<new-tag>@sha256:<index-digest>`
+   and the explanatory comment above it with the new index + per-platform digests.
+4. Validate: `kustomize build cluster/apps/<app>` (for the 3 raw-manifest images) or
+   `helm template <release> <chart> -f cluster/values/cloudflared.yaml` (for
+   cloudflared) shows the expected `repo:tag@sha256:...` string; `ansible-playbook
+   infra/playbooks/50_apps_infra.yml --syntax-check` for the 3 Ansible-embedded
+   images; `conftest test --policy policy/kubernetes/ --rego-version v0` against the
+   rendered manifests (the `deny-latest-image` policy explicitly allows any
+   `@sha256:...`-suffixed reference regardless of tag).
+5. `ansible-playbook infra/playbooks/50_apps_infra.yml --check --diff` (or the
+   matching playbook) should show only the intended image-line change, no drift.
 
 ### Helm Chart Version Tracking (Dependabot Bumps)
 

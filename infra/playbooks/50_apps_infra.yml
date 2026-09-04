@@ -98,8 +98,11 @@
                   - name: postgresql
                     # pgvector 0.8.6-pg17 (2026-08-13, PostgreSQL 17.11): bug-fix release; extension objects
                     # stay at the installed version until ALTER EXTENSION vector UPDATE is run per database
-                    # (club_assistant only)
-                    image: pgvector/pgvector:0.8.6-pg17
+                    # (club_assistant only). Multi-arch amd64
+                    # (sha256:dca0d688bbb31d3f851502ffcb9c7791387b4fcc544ae434dab41761e5ece317) +
+                    # arm64 (sha256:de5bb95ded567f98e342a29f188f8053b2e8d344cb9ccd52cbdfe15f720cfde7);
+                    # index digest below verified 2026-09-04 via `docker buildx imagetools inspect`.
+                    image: pgvector/pgvector:0.8.6-pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
                     env:
                       - name: POSTGRES_PASSWORD
                         valueFrom:
@@ -133,8 +136,11 @@
                   - name: postgres-exporter
                     # postgres-exporter v0.20.1 (2026-07-08): supports PG17 pg_stat_checkpointer (fixes
                     # 'column "checkpoints_timed" does not exist'); v0.20.0 flag/metric renames
-                    # (replication_slot*) do not affect this config (no flags set)
-                    image: prometheuscommunity/postgres-exporter:v0.20.1
+                    # (replication_slot*) do not affect this config (no flags set). Multi-arch amd64
+                    # (sha256:4f3d82803c1f99ea5e767890de3557d2479ebbc711f63f2e04c663daa840057a) +
+                    # arm64 (sha256:6a3af65923aab6a73a4030724a75f6ba3fda3b437ca514274efea4593638ab7e);
+                    # index digest below verified 2026-09-04 via `docker buildx imagetools inspect`.
+                    image: prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
                     env:
                       - name: DATA_SOURCE_URI
                         value: "localhost:5432/postgres?sslmode=disable"
@@ -283,8 +289,11 @@
                     # Docker Hub (docker-library official-images manifest). Persistence format
                     # identical (MOSQ_DB_VERSION=6 in 2.0.22 and 2.1.2), same Alpine base; none
                     # of our config directives are deprecated in 2.1. max_packet_size default is
-                    # now 2 MB.
-                    image: "eclipse-mosquitto:2.1.2-alpine"
+                    # now 2 MB. Multi-arch amd64
+                    # (sha256:6dba0f1b2795ddcbe0d41bdfb8b8d56a423acca23ccde4342a4652be54639b11) +
+                    # arm64/v8 (sha256:0cb9dcf861ada0efab0266b43a4e4c702c36df838a7b979c2820dc28bb61c5f0);
+                    # index digest below verified 2026-09-04 via `docker buildx imagetools inspect`.
+                    image: "eclipse-mosquitto:2.1.2-alpine@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797"
                     ports:
                       - containerPort: 1883
                     volumeMounts:
