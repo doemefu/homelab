@@ -23,13 +23,11 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: n8n
-          # Pinned 2.36.8 (2026-08-28; 2.37.x is beta). Node 24.18.1 / Alpine 3.24, multi-arch
-          # amd64 (sha256:6b3a46d63a081e0c7fb2af2032cfec5182e923eadddc34743d19ab481f5ff628) +
-          # arm64 (sha256:ae71a814e21c85a6d18ca7a0eb03cd4e2d8698fd5c7eb75fd1208b5078398ede)
-          # (Docker Hub manifest, index digest below verified 2026-09-04 via
-          # `docker buildx imagetools inspect`). ~13–15 SQLite migrations since 2.17.1 (additive
-          # except two Drop* on unrelated feature tables), forward-only: PVC backup before rollout
-          # (DEPLOYMENT.md).
+          # Pinned 2.36.8 (2026-08-28; 2.37.x is beta). Node 24.18.1 / Alpine 3.24. Multi-arch
+          # index digest sha256:cfe2704ff858395503d42548206c2c99ea351a205e941063a9d9b77b0f404478
+          # resolved 2026-09-04 via `docker buildx imagetools inspect` (#57). ~13–15 SQLite
+          # migrations since 2.17.1 (additive except two Drop* on unrelated feature tables),
+          # forward-only: PVC backup before rollout (DEPLOYMENT.md).
           image: n8nio/n8n:2.36.8@sha256:cfe2704ff858395503d42548206c2c99ea351a205e941063a9d9b77b0f404478
           ports:
             - containerPort: 5678

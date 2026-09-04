@@ -27,11 +27,8 @@ spec:
           # The non_root image auto-migrates the Postgres schema on startup (prisma migrate deploy).
           # Pinned v1.98.0 (2026-08-23). No '-stable' suffix since v1.84.0 (weekly releases bump MINOR).
           # Fixes CVE-2026-49468 (critical host-header auth bypass) + 4 further advisories since 1.83.7.
-          # Multi-arch: linux/amd64 (sha256:f2fd8bd38f16c82958b9f25d6f836de6f70f6621f0d8d7c96d10d7cc90f43b14)
-          # + linux/arm64 (sha256:2bcb5aacc816ffc32f8c3c4b157f941d53e54923bc45610efca2401cfc028d92).
-          # Index digest sha256:157aaf0a519713663ec6abefe73fa48bf12f638b0e63fb2b209ba0eae68e6bd7
-          # (verified 2026-09-04 via `docker buildx imagetools inspect`, matches the amd64-only
-          # prefix already confirmed by the earlier 2026-08-29 cluster pull test).
+          # Multi-arch index digest sha256:157aaf0a519713663ec6abefe73fa48bf12f638b0e63fb2b209ba0eae68e6bd7
+          # resolved 2026-09-04 via `docker buildx imagetools inspect` (#57).
           image: docker.litellm.ai/berriai/litellm-non_root:v1.98.0@sha256:157aaf0a519713663ec6abefe73fa48bf12f638b0e63fb2b209ba0eae68e6bd7
           args:
             - "--config"

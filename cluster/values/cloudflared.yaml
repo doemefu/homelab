@@ -7,13 +7,15 @@
 # Repo:  https://cloudflare.github.io/helm-charts
 #
 # Digest pin (#57): the chart template does `image: "{{ .Values.image.repository }}:
-# {{ .Values.image.tag }}"` (plain string concat, no dedicated image.digest value in this
-# chart's values.yaml as of 0.1.2 — confirmed via `helm show values`) — so the digest is
-# appended directly to image.tag below (valid `name:tag@digest` OCI reference form; the
-# digest takes precedence for the actual pull, the tag stays informational). Multi-arch
-# amd64 (sha256:de55830499e9adb1c580f7b5cbbdef86a3ff1715fb3ae6b3ff242f19de0afde8) + arm64
-# (sha256:38b3c3029deda0fe5a41b3d312a717c6301c3572d82f03330324236e2f55f644); index digest
-# below verified 2026-09-04 via `docker buildx imagetools inspect`.
+# {{ .Values.image.tag | default "latest" }}"` (plain string concat, no dedicated
+# image.digest value in this chart's values.yaml as of 0.1.2 — confirmed via `helm show
+# values`) — so the digest is appended directly to image.tag below (valid `name:tag@digest`
+# OCI reference form; the digest takes precedence for the actual pull, the tag stays
+# informational). Never leave image.tag empty — the template's `| default "latest"`
+# fallback would silently pull `:latest`. Multi-arch index digest resolved 2026-09-04 via
+# `docker buildx imagetools inspect`.
+# Do not add `image:` to the inline `values:` block in 40_platform.yml's Helm task — it
+# would override this pin (that block currently only sets the tunnel token).
 #
 # tunnelToken: wird von 40_platform.yml aus all.sops.yml injiziert — nicht hier hinterlegen
 #
