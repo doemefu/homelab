@@ -253,10 +253,20 @@ line's index digest is the actual source of truth).
    architecture is missing, do not pin (the image wouldn't run on part of the cluster).
 2. Update the `image:` (or `image.tag`) line to `repo:<new-tag>@sha256:<index-digest>`
    and the one-line explanatory comment above it with the new index digest + resolution date.
-3. Validate per "Reproducing each check locally" above (`kustomize build`/`helm
-   template`/`ansible-playbook --syntax-check` as appropriate for the location, and
-   the same `conftest` invocation documented there — it already accepts any
-   `@sha256:...`-suffixed reference regardless of tag).
+3. Validate:
+   - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml`: covered by the existing
+     `kustomize build cluster/apps/<app> | kubeconform ...` and
+     `| conftest test --policy policy/kubernetes/ --all-namespaces -` commands in
+     "Reproducing each check locally" above (open-webui, litellm, and n8n are already
+     in that loop; `deny-latest-image.rego` already accepts any `@sha256:...`-suffixed
+     reference regardless of tag).
+   - `cluster/values/cloudflared.yaml` and `infra/playbooks/50_apps_infra.yml`
+     (pgvector, postgres-exporter, mosquitto, mosquitto-exporter): not rendered by
+     `kustomize build` and out of scope for CI's `enforce-cluster-policies` job (see
+     `.github/workflows/ci.yml` / `policy/kubernetes/README.md`) — run `ansible-lint
+     infra/` and manually confirm the `image:`/`image.tag` line matches
+     `repo:tag@sha256:<64-hex-digest>`. There is currently no automated policy check
+     of these 5 images' pin format (a follow-up, not part of this procedure).
 4. `ansible-playbook infra/playbooks/50_apps_infra.yml --check --diff` (or the
    matching playbook) should show only the intended image-line change, no drift.
 

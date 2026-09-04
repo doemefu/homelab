@@ -205,6 +205,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | **SSH** | Keys only, `PasswordAuthentication no`, `PermitRootLogin no`, `MaxAuthTries 3` |
 | **Firewall (UFW)** | Default deny incoming; LAN-only rules for k3s, Longhorn, Node Exporter, Mosquitto ports |
 | **Secrets** | SOPS + age encryption; no plaintext in git; age key stored outside repo |
+| **Container Images** | No `:latest` tags anywhere; the 8 platform images (open-webui, litellm, n8n, cloudflared, pgvector, postgres-exporter, mosquitto, mosquitto-exporter) are pinned by tag **and** SHA-256 digest (`repo:tag@sha256:...`, #57) — see CONTRIBUTING.md § "Digest-Pinned Platform Images" |
 | **External Exposure** | Exclusively via Cloudflare Tunnel (no public IPs, no port forwarding) |
 | **Namespaces** | Isolated: `platform`, `longhorn-system`, `monitoring`, `apps`, `homeassistant`, `flux-system` |
 | **Storage** | Longhorn default (RF=2), local-path non-default fallback |
