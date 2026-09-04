@@ -574,8 +574,10 @@ find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
 
 # GitHub Actions workflows (checksum from the upstream release, same as CI — see .github/workflows/ci.yml)
 curl -fsSLO https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
-echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionlint_1.7.7_linux_amd64.tar.gz" | sha256sum -c -
-sudo tar -xzf actionlint_1.7.7_linux_amd64.tar.gz -C /usr/local/bin actionlint
+# `&&`-chained (not a bare sequence) so a checksum mismatch actually stops the install —
+# unlike a bare `set -e`-less script, this doesn't rely on the caller's shell options.
+echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionlint_1.7.7_linux_amd64.tar.gz" | sha256sum -c - \
+  && sudo tar -xzf actionlint_1.7.7_linux_amd64.tar.gz -C /usr/local/bin actionlint
 actionlint
 
 # Ansible

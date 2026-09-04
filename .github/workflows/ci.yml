@@ -9,12 +9,16 @@ name: CI
 # `curl | tar` is checksum-verified against the upstream release's own
 # published checksums file before extraction (all binary steps assume the
 # `ubuntu-latest` runner's linux/amd64 architecture, matching every asset
-# filename below — e.g. `_linux_amd64`/`-linux-amd64`). Re-pinning: resolve
-# the new tag to a commit SHA via `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`
-# (dereference an annotated tag via `git/tags/<sha>` -> `object.sha`), and
-# re-fetch the matching checksums file for any binary version bump. This same
-# convention applies to `codeql.yml` in this directory (see its own header
-# comment) and should be applied to any future workflow file added here.
+# filename below — e.g. `_linux_amd64`/`-linux-amd64`). Re-pinning the 6 actions:
+# `.github/dependabot.yml`'s `github-actions` ecosystem entry already tracks these and
+# opens a PR with the new SHA on a version bump — review and merge that PR rather than
+# hand-resolving (hand-resolving is only for sanity-checking an already-open Dependabot PR,
+# or a bump outside its weekly schedule): `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`
+# (dereference an annotated tag via `git/tags/<sha>` -> `object.sha`). Re-pinning the 4
+# curl-downloaded binaries is fully manual — Dependabot doesn't track them at all — just
+# re-fetch the matching checksums file for the new version. This same convention applies to
+# `codeql.yml` in this directory (see its own header comment) and should be applied to any
+# future workflow file added here.
 
 on:
   pull_request:
@@ -48,8 +52,7 @@ jobs:
       shell: ${{ steps.filter.outputs.shell }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: filter
@@ -89,8 +92,7 @@ jobs:
     if: needs.detect-changes.outputs.yaml == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -110,8 +112,7 @@ jobs:
     if: needs.detect-changes.outputs.shell == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
@@ -124,16 +125,17 @@ jobs:
     if: needs.detect-changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install actionlint (pinned + checksum-verified)
+        env:
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
         run: |
           set -euo pipefail
           asset="actionlint_1.7.7_linux_amd64.tar.gz"
           curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v1.7.7/${asset}"
-          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  ${asset}" | sha256sum -c -
+          echo "${ACTIONLINT_SHA256}  ${asset}" | sha256sum -c -
           sudo tar -xzf "${asset}" -C /usr/local/bin actionlint
           rm -f "${asset}"
       - name: Run actionlint
@@ -148,8 +150,7 @@ jobs:
     if: needs.detect-changes.outputs.ansible == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -175,8 +176,7 @@ jobs:
       KUSTOMIZE_VERSION: v5.4.3
       KUBECONFORM_VERSION: v0.6.7
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install kustomize (pinned + checksum-verified)
@@ -235,8 +235,7 @@ jobs:
       KUSTOMIZE_VERSION: v5.4.3
       CONFTEST_VERSION: 0.56.0
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install kustomize (pinned + checksum-verified)
