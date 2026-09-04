@@ -222,6 +222,8 @@ Worklog template: `.claude/worklog-template.md`
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
 - Container images: Pinned tags in deployment manifests
 - Python packages: `infra/requirements.yml`
+- GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
+- CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction
 
 ### Helm Chart Version Tracking (Dependabot Bumps)
 
