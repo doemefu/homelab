@@ -51,6 +51,8 @@ Follow this loop for **every change** to this repository:
 | Worker specific vars | `infra/inventory/group_vars/k3s_agent.yml` | - |
 | Mac-specific vars | `infra/inventory/group_vars/mac.yml` | - |
 | Helm values | `cluster/values/<chart>.yaml` | Referenced by playbooks |
+| Ansible collection version pins | `infra/requirements.yml` | - (manual bump, see "Ansible Collection Updates (Manual)") |
+| Helm chart freshness tracking | `.github/helm-tracking/Chart.yaml`, `.github/workflows/helm-chart-freshness.yml` | - (weekly automated check, see "Helm Chart Version Tracking") |
 
 ---
 

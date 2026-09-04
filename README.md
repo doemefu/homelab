@@ -304,6 +304,7 @@ docs/                        # Architecture and planning documents
 
 scripts/                     # Utility scripts
   smoke-test-litellm.sh       # LiteLLM health and endpoint verification
+  check-helm-chart-versions.py # Weekly Helm chart freshness check (invoked by .github/workflows/helm-chart-freshness.yml)
 
 .claude/                      # Claude agent configuration (workflow rules, agents, worklogs, memory)
 .github/                      # GitHub workflows
