@@ -228,8 +228,12 @@ ansible-playbook infra/playbooks/30_longhorn.yml
 A Longhorn `RecurringJob` named `daily-snapshot` (applied by `infra/playbooks/30_longhorn.yml`)
 takes a snapshot of every Longhorn volume once a day:
 
-- **Schedule:** `0 2 * * *` (02:00 UTC daily — one hour ahead of the existing 03:00 restic
-  backup cron so the two don't overlap; there is no functional dependency between them).
+- **Schedule:** `0 2 * * *` (02:00 **node-local time** daily — one hour ahead of the existing
+  03:00 restic backup cron so the two don't overlap; there is no functional dependency between
+  them). Both run in the node's system timezone (`base_timezone: Europe/Zurich`, DST-aware), not
+  UTC: Longhorn v1.7.2 doesn't set `spec.timeZone` on the `CronJob` it generates, so it follows
+  k3s's embedded controller-manager, which inherits the host's local timezone — the same
+  mechanism the restic cron (a plain crontab entry, also node-local) relies on.
 - **Retention:** 7 snapshots per volume (Longhorn prunes older ones automatically).
 - **Concurrency:** 1 (snapshots run one volume at a time).
 - **Coverage:** `groups: [default]` — Longhorn applies a `default`-group job to every volume
@@ -241,9 +245,13 @@ takes a snapshot of every Longhorn volume once a day:
 **This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
 disks/replicas as the primary data (see the SD-card root-disk risk noted in
 `cluster/values/longhorn.yaml`'s header comment), so this protects against logical mistakes
-(bad config change, accidental deletion) but not node/disk hardware failure or a cluster-wide
-incident. Off-cluster durability (a Longhorn `BackupTarget` + restic restore testing) is tracked
-separately in #64 and not yet implemented.
+(bad config change, accidental deletion of *data within* a surviving volume) but not node/disk
+hardware failure or a cluster-wide incident. It also does **not** protect against deleting the
+PVC or Longhorn Volume itself — Longhorn's volume controller deletes a volume's associated
+snapshots as part of tearing the volume down, so once the volume is gone, so are its local
+snapshots; only a genuinely off-cluster backup can recover from that. Off-cluster durability (a
+Longhorn `BackupTarget` + restic restore testing) is tracked separately in #64 and not yet
+implemented.
 
 ```bash
 # Confirm the job exists and its spec
