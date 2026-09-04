@@ -41,15 +41,23 @@ jobs:
         id: check
         run: python3 scripts/check-helm-chart-versions.py
 
-      - name: Find existing tracking issue
-        id: existing
-        run: |
-          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-            --search "in:title \"Helm chart versions behind upstream (automated)\"" \
-            --json number --jq '.[0].number // empty')
-          echo "number=$number" >> "$GITHUB_OUTPUT"
+      - name: Ensure tracking label exists
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create helm-freshness --repo "$GITHUB_REPOSITORY" --force \
+            --description "Opened by helm-chart-freshness.yml" --color "5319e7"
+
+      - name: Find existing tracking issue
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "Helm chart versions behind upstream (automated)"
+        run: |
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label helm-freshness --json number,title | \
+            jq -r --arg title "$TITLE" '[.[] | select(.title == $title)][0].number // empty')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
 
       - name: Open or update tracking issue
         if: steps.check.outputs.outdated == 'true' || steps.check.outputs.has_errors == 'true'
@@ -67,6 +75,7 @@ jobs:
           else
             gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "Helm chart versions behind upstream (automated)" \
+              --label helm-freshness \
               --body "$body"
           fi
 

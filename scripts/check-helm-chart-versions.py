@@ -12,11 +12,19 @@ manually for a one-off check:
 
     python3 scripts/check-helm-chart-versions.py [--dry-run]
 
-Always exits 0 in normal operation (the workflow step decides what to do
-with the report); exits 1 only if every tracked chart's repository was
-unreachable (a real infrastructure failure, not "everything is current").
+Exits 1 only on script misuse (the tracking Chart.yaml has no
+`dependencies:` entries at all) — that is a config error, not an
+infrastructure blip. Every other outcome, including every single chart
+being unreachable, exits 0 and is surfaced via the `has_errors` output
+instead, so the calling workflow can still open/update the tracking
+issue with a partial (or fully failed) report rather than silently
+dropping it — the exact silent-failure mode this script replaces
+Dependabot's helm ecosystem to avoid (see the plan's "R3" risk note in
+the #62 worklog).
+
 --dry-run prints the report only, skipping the GITHUB_OUTPUT lines the
-workflow step consumes.
+workflow step consumes; it exists purely as a local debugging aid run
+by hand — no CI caller uses this flag.
 """
 
 import argparse
@@ -55,6 +63,11 @@ def semver_key(version):
     longer key tuple — this matters here because some of the chart
     repositories checked (e.g. cert-manager's) list alpha/beta/rc releases
     interleaved with stable ones in the same index.
+
+    Hand-rolled instead of using the `packaging` library's `Version`/`parse`
+    (which would handle this correctly out of the box) because adding a new
+    pip dependency needs Dominic's explicit approval (repo non-negotiable);
+    this script sticks to PyYAML, already required for the Chart.yaml read.
     """
     stripped = version.lstrip("vV").split("+", 1)[0]  # ignore build metadata
     release_part, _, prerelease_part = stripped.partition("-")
@@ -94,7 +107,7 @@ def latest_version(index, chart_name):
     versions = [entry["version"] for entry in entries if "version" in entry]
     if not versions:
         return None
-    return sorted(versions, key=semver_key)[-1]
+    return max(versions, key=semver_key)
 
 
 def build_report(outdated, current, errors):
@@ -104,6 +117,15 @@ def build_report(outdated, current, errors):
         lines.append("|-------|--------|--------|------------|")
         for name, pinned, latest, repo in outdated:
             lines.append("| {} | {} | {} | {} |".format(name, pinned, latest, repo))
+    elif errors:
+        # No chart is confirmed outdated, but not every chart could be
+        # checked either — say so explicitly rather than falling through to
+        # the "all current" line, which would misreport a pure connectivity
+        # failure as "everything is up to date".
+        lines.append(
+            "{} chart(s) could not be checked (see Errors below); "
+            "no outdated charts detected among the rest.".format(len(errors))
+        )
     else:
         lines.append("All tracked charts are at their latest available version.")
     if current:
@@ -132,18 +154,49 @@ def main():
     chart = yaml.safe_load(CHART_YAML.read_text())
     dependencies = chart.get("dependencies", [])
 
+    if not dependencies:
+        # Script/config misuse, not an infrastructure failure — there is
+        # nothing meaningful to report, so don't write GITHUB_OUTPUT or open
+        # a tracking issue over it; fail loudly in the Actions log instead.
+        print(
+            "ERROR: no dependencies found in {} — nothing to check.".format(
+                CHART_YAML
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
     outdated = []
     current = []
     errors = []
     for dependency in dependencies:
-        name = dependency["name"]
-        pinned = dependency["version"]
-        repository = dependency["repository"]
+        name = pinned = repository = None
         try:
+            name = dependency["name"]
+            pinned = dependency["version"]
+            repository = dependency["repository"]
             index = fetch_index(repository)
             latest = latest_version(index, name)
-        except (urllib.error.URLError, ValueError, KeyError) as exc:
-            errors.append((name, repository, str(exc)))
+        except (
+            urllib.error.URLError,
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            yaml.YAMLError,
+        ) as exc:
+            # Broad on purpose: a chart repository is untrusted external
+            # input — a 200 response with a non-YAML body (yaml.YAMLError),
+            # an unexpectedly shaped index.yaml (AttributeError/TypeError),
+            # or a malformed entry in our own Chart.yaml (KeyError) must all
+            # degrade to a per-chart error, never crash the whole run.
+            errors.append(
+                (
+                    name or "<malformed dependency entry>",
+                    repository or "<unknown>",
+                    "{}: {}".format(type(exc).__name__, exc),
+                )
+            )
             continue
         if latest is None:
             errors.append((name, repository, "chart name not found in index.yaml"))
@@ -171,15 +224,15 @@ def main():
                 delimiter = "helm_freshness_report_{}".format(uuid.uuid4().hex)
                 handle.write("report<<{}\n{}\n{}\n".format(delimiter, report, delimiter))
 
-    # A hard failure (every chart errored, nothing resolvable at all) should
-    # fail the workflow step so it's visible in the Actions log. A partial
-    # failure (some charts errored, others resolved fine) is surfaced via
-    # the `has_errors` output instead of a non-zero exit, so the workflow
-    # can still open/update the tracking issue with the partial report
-    # rather than silently dropping the error the way the Dependabot helm
-    # channel this replaces used to (see the "R3" risk note in the plan).
-    if errors and not outdated and not current:
-        return 1
+    # Every per-chart failure — including every single chart failing — is
+    # surfaced through `has_errors` / the report text, never through the
+    # process exit code: GITHUB_OUTPUT is always written above (unless
+    # --dry-run), so the workflow's "open/update tracking issue" step still
+    # runs and the failure becomes a visible, actionable issue instead of a
+    # silently swallowed one — exactly the failure mode being fixed by
+    # replacing Dependabot's helm ecosystem with this script. Exit 1 is
+    # reserved for the script-misuse case above (empty dependencies list),
+    # which happens before any output is written.
     return 0
 
 

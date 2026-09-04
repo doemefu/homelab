@@ -220,11 +220,11 @@ Worklog template: `.claude/worklog-template.md`
 - **NO `latest` tags** — all versions must be pinned
 - k3s version: `infra/roles/k3s/defaults/main.yml` (`k3s_version`)
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
-- Container images: Pinned tags in deployment manifests
+- Container images: Pinned tags in deployment manifests — see
+  `.github/dependabot.yml`'s `docker` ecosystem entries for which image
+  locations are covered automatically
 - Ansible collections: `infra/requirements.yml` (exact pins — Dependabot
   cannot track these; see "Ansible Collection Updates" below)
-- Container images: also see `.github/dependabot.yml`'s `docker`
-  ecosystem entries for which image locations are covered automatically
 
 ### Ansible Collection Updates (Manual)
 
