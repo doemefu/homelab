@@ -13,6 +13,17 @@ updates:
   # that shape (or a real Helm chart directory with a sibling Chart.yaml +
   # values.yaml, which this repo doesn't vendor locally).
   #
+  # Verify after merge: these 3 directories are the closest match to
+  # Dependabot's own documented docker-ecosystem example (standalone
+  # Deployment YAML, plain `image: repo:tag`), but the `helm` ecosystem
+  # entry this PR removed looked equally correct on paper and still
+  # produced zero PRs for ~14 cycles (see the removed helm block's history
+  # in git log) — so "correctly configured" is not proof it works. Confirm
+  # by watching for a real Dependabot PR on the next actual image bump for
+  # open-webui/n8n/litellm/cloudflared; if none of the four ever produces
+  # one despite an available bump, treat it the same way the helm channel
+  # was treated here (investigate with evidence, then fix or replace).
+  #
   # Deliberately NOT covered (do not add these directories):
   #   - infra/playbooks/ — the images embedded in 50_apps_infra.yml
   #     (pgvector, postgres-exporter, mosquitto, mosquitto-exporter) live

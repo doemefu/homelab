@@ -42,20 +42,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CHART_YAML = REPO_ROOT / ".github" / "helm-tracking" / "Chart.yaml"
 USER_AGENT = "homelab-helm-chart-freshness-check (+https://github.com/doemefu/homelab)"
 
-# Fixed width for the padded numeric-release tuple in semver_key() — comfortably
-# more than any real chart version's segment count (major.minor.patch plus margin).
-_RELEASE_WIDTH = 6
-
 
 def semver_key(version):
     """Semver-aware sort key.
 
-    Numeric release segments compare numerically and are padded to a fixed
-    width so unequal segment counts compare correctly — e.g. "2.0" and
-    "2.0.0" must be equal for ordering purposes, not "2.0" < "2.0.0" purely
-    because its tuple is shorter (a naive string-sort attempt hit exactly
-    this class of bug during #62's research, on real data: "69.3.1" sorted
-    below "9.4.9" as plain strings).
+    Numeric release segments compare numerically, with trailing zero
+    segments stripped before comparison so unequal segment counts still
+    compare correctly by *value* — e.g. "2.0" and "2.0.0" must be equal for
+    ordering purposes, not "2.0" < "2.0.0" purely because its tuple is
+    shorter (a naive string-sort attempt hit exactly this class of bug
+    during #62's research, on real data: "69.3.1" sorted below "9.4.9" as
+    plain strings). A *fixed-width* padding scheme was tried first and
+    rejected: it silently reintroduced the same bug class for any version
+    with more segments than the padding width (e.g. "1.0.0.0.0.0.1" vs.
+    "1.0.0" with a width of 6) — stripping trailing zeros instead has no
+    such ceiling, because Python's own tuple comparison already handles
+    differing lengths correctly once meaningless trailing zeros are gone
+    (a real non-zero segment past the common prefix legitimately makes a
+    version greater, e.g. "1.0.0.1" > "1.0.0", and plain lexicographic
+    tuple comparison gives exactly that without any padding).
 
     A pre-release suffix (anything after the first "-") always sorts BELOW
     a bare release with the same numeric segments, per semver precedence
@@ -76,7 +81,8 @@ def semver_key(version):
     for segment in release_part.split("."):
         match = re.match(r"^\d+", segment)
         release_segments.append(int(match.group()) if match else 0)
-    release_segments += [0] * (_RELEASE_WIDTH - len(release_segments))
+    while len(release_segments) > 1 and release_segments[-1] == 0:
+        release_segments.pop()
 
     has_prerelease = bool(prerelease_part)
     prerelease_segments = []
