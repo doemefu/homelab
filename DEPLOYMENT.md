@@ -1159,6 +1159,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
+| Verify Longhorn recurring snapshot job fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" above) |
 | Test backup restore | Monthly | Non-destructive restore test (see above) |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
@@ -1172,7 +1173,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
-| `30_longhorn.yml` | Longhorn storage system and default StorageClass | 3-5 min | Yes |
+| `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
 | `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |

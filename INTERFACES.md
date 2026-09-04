@@ -333,6 +333,7 @@ From `40_platform.yml` (platform):
 - **Default**: Yes — PVCs without `storageClassName` use Longhorn automatically
 - **Access Modes**: ReadWriteOnce (RWO), ReadWriteMany (RWX via RWX storage class)
 - **Survives**: Node failures, k3s restarts
+- **Recurring snapshots**: every Longhorn volume without a more specific recurring-job assignment is automatically covered by the daily `default`-group `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7) — local-only, does not survive PVC/Volume deletion. See DEPLOYMENT.md "Recurring Snapshots (#63)".
 
 **Source of Truth**: `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml`
 
