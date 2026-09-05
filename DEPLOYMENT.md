@@ -467,6 +467,10 @@ Expected UP targets:
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
 
+> **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
+> absent from this list and from `/targets` entirely (disabled in
+> `cluster/values/kube-prometheus-stack.yaml`, #68) — see "Alerting Decisions" below for why.
+
 > **Note:** `postgres-exporter` v0.20.1 (the pinned version in `50_apps_infra.yml`) does not
 > expose `pg_stat_checkpointer_*` metrics by default — no `--collector.*` flags are set on the
 > exporter container, so that collector stays off. The PG17 `column "checkpoints_timed" does not
@@ -495,12 +499,21 @@ disabling both the component scrape config and the matching alert rule groups in
 `false`). The Grafana dashboards for these 3 components already showed "No data" (the targets
 never existed) and continue to after this change — that's expected, not a regression.
 **Alternative, not implemented** (needs a k3s server/agent config change + restart on `raspi5`,
-the only control-plane node — a cluster mutation out of scope for a values-only fix): add
-`--kube-controller-manager-arg bind-address=0.0.0.0`, `--kube-scheduler-arg bind-address=0.0.0.0`,
-`--kube-proxy-arg metrics-bind-address=0.0.0.0:10249` to the k3s server/agent args, then set
-`kubeControllerManager.endpoints` / `kubeScheduler.endpoints` to `["192.168.1.61"]` with
-`https` + `insecureSkipVerify`, and re-enable `kubeProxy` pointed at the same. Revisit as a
-separate task if real coverage of these 3 components is ever wanted.
+the only control-plane node — a cluster mutation out of scope for a values-only fix, plus real
+security prerequisites that would need to be worked out before enabling it): add
+`--kube-controller-manager-arg bind-address=0.0.0.0` and `--kube-scheduler-arg bind-address=0.0.0.0`
+to the k3s server args, then set `kubeControllerManager.endpoints` / `kubeScheduler.endpoints` to
+`["192.168.1.61"]`. Both components serve their metrics on Kubernetes's authenticated HTTPS
+"secure serving" port — `https` + `insecureSkipVerify` only skips *certificate validation*, it
+does not bypass authentication, so the ServiceMonitor would additionally need a working bearer
+token/RBAC credential for Prometheus to actually scrape (not yet designed here). `kube-proxy` is
+different: `--kube-proxy-arg metrics-bind-address=0.0.0.0:10249` exposes a **plain HTTP, unauthenticated**
+metrics endpoint (no TLS support in kube-proxy itself), so `kubeProxy.endpoints`/`https` config
+does not apply to it the same way — it would need its own values wiring and, because binding any
+of these three to `0.0.0.0` exposes the listener on every node network interface, network-level
+restriction (firewall rule or NetworkPolicy scoped to the `monitoring` namespace's Prometheus pod)
+before it's safe to enable. None of this is implemented; revisit as a separate, security-reviewed
+task if real coverage of these 3 components is ever wanted.
 
 **`CPUThrottlingHigh` review (#68, following the 2026-08-28 auth-service/device-service CPU-limit
 changes to 1000m):** 24h throttled-CFS-period ratios — `postgres-exporter` (in the `postgresql-0`
