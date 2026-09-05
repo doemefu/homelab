@@ -6,6 +6,17 @@
 # --edge-ip-version defaults to auto (chart exposes no extraArgs to pin it).
 # Repo:  https://cloudflare.github.io/helm-charts
 #
+# Digest pin (#57): the chart template does `image: "{{ .Values.image.repository }}:
+# {{ .Values.image.tag | default "latest" }}"` (plain string concat, no dedicated
+# image.digest value in this chart's values.yaml as of 0.1.2 — confirmed via `helm show
+# values`) — so the digest is appended directly to image.tag below (valid `name:tag@digest`
+# OCI reference form; the digest takes precedence for the actual pull, the tag stays
+# informational). Never leave image.tag empty — the template's `| default "latest"`
+# fallback would silently pull `:latest`. Multi-arch index digest resolved 2026-09-04 via
+# `docker buildx imagetools inspect`.
+# Do not add `image:` to the inline `values:` block in 40_platform.yml's Helm task — it
+# would override this pin (that block currently only sets the tunnel token).
+#
 # tunnelToken: wird von 40_platform.yml aus all.sops.yml injiziert — nicht hier hinterlegen
 #
 # Ingress-Regeln: werden via Cloudflare API gesetzt (40_platform.yml, uri-Task PUT)
@@ -28,7 +39,7 @@
 # Sicherheitsprinzip: alles was nicht explizit gelistet ist → 404, nie → Traefik
 
 image:
-  tag: "2026.8.2"  # pinned — never latest
+  tag: "2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38"  # pinned — never latest
 
 replicaCount: 1
 
