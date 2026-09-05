@@ -480,6 +480,38 @@ Expected UP targets:
 kubectl get servicemonitor -n monitoring
 ```
 
+#### Alerting Decisions
+
+**`KubeControllerManagerDown` / `KubeSchedulerDown` / `KubeProxyDown` (disabled, #68):** k3s runs
+kube-controller-manager, kube-scheduler, and kube-proxy embedded in the k3s server/agent process,
+bound to `127.0.0.1` by default — no `--kube-controller-manager-arg bind-address=`,
+`--kube-scheduler-arg bind-address=`, or `--kube-proxy-arg metrics-bind-address=` flag is set
+anywhere in `infra/`. The chart's default scrape targets for these 3 components therefore have
+zero endpoints, so their `absent(up{job="..."} == 1)` alert rules fired as permanent critical
+false positives from install (2026-05-16) onward — they can structurally never resolve. Fixed by
+disabling both the component scrape config and the matching alert rule groups in
+`cluster/values/kube-prometheus-stack.yaml` (`kubeControllerManager.enabled`,
+`kubeScheduler.enabled`, `kubeProxy.enabled`, and the matching `defaultRules.rules.*` keys — all
+`false`). The Grafana dashboards for these 3 components already showed "No data" (the targets
+never existed) and continue to after this change — that's expected, not a regression.
+**Alternative, not implemented** (needs a k3s server/agent config change + restart on `raspi5`,
+the only control-plane node — a cluster mutation out of scope for a values-only fix): add
+`--kube-controller-manager-arg bind-address=0.0.0.0`, `--kube-scheduler-arg bind-address=0.0.0.0`,
+`--kube-proxy-arg metrics-bind-address=0.0.0.0:10249` to the k3s server/agent args, then set
+`kubeControllerManager.endpoints` / `kubeScheduler.endpoints` to `["192.168.1.61"]` with
+`https` + `insecureSkipVerify`, and re-enable `kubeProxy` pointed at the same. Revisit as a
+separate task if real coverage of these 3 components is ever wanted.
+
+**`CPUThrottlingHigh` review (#68, following the 2026-08-28 auth-service/device-service CPU-limit
+changes to 1000m):** 24h throttled-CFS-period ratios — `postgres-exporter` (in the `postgresql-0`
+pod) **0.67**, the only container above the 25% alert threshold, at a `limits.cpu: 100m` against
+~0.0016 cores average usage (classic scrape-burst-vs-tiny-quota pattern); `auth-service` 0.009 and
+`device-service` 0.007 at their new 1000m limits — both already fine, no further tuning needed.
+Decision: raised `postgres-exporter`'s `limits.cpu` to `250m` in `infra/playbooks/50_apps_infra.yml`
+(`requests` unchanged); kept the alert itself (severity `info`, already excluded from paging by
+`InfoInhibitor`) rather than tuning its expression — it was correctly identifying a genuinely
+undersized CPU quota, not a false positive.
+
 ---
 
 ### Home Assistant
