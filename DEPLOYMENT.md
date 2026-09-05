@@ -645,6 +645,15 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 
+All 8 platform images (the 5 in this runbook, plus postgres-exporter, mosquitto, and
+mosquitto-exporter) are pinned by tag **and digest** (`repo:tag@sha256:...`, #57) — see
+CONTRIBUTING.md "Digest-Pinned Platform Images" for how to re-resolve the digest as part
+of any bump. Of the 3 not named in this runbook's title, postgres-exporter and
+mosquitto-exporter have no backup step here (no migration-forward-only concern like
+Postgres/n8n/open-webui/litellm) — just re-resolve their digest per that procedure when
+bumping. mosquitto does have a backup subsection below (nice-to-have, not a hard
+prerequisite — see "mosquitto (persistence DB, nice-to-have)").
+
 Use this runbook whenever bumping a pinned image tag for one of these five components. Rule:
 **Open WebUI's alembic, LiteLLM's prisma, and n8n's TypeORM migrations are forward-only in
 practice.** Never point an older image at a database/PVC a newer image has already migrated —

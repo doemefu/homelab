@@ -220,8 +220,55 @@ Worklog template: `.claude/worklog-template.md`
 - **NO `latest` tags** — all versions must be pinned
 - k3s version: `infra/roles/k3s/defaults/main.yml` (`k3s_version`)
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
-- Container images: Pinned tags in deployment manifests
+- Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
+
+### Digest-Pinned Platform Images
+
+The 8 platform images (open-webui, litellm, n8n, cloudflared, pgvector,
+postgres-exporter, mosquitto, mosquitto-exporter) are pinned by **tag
+and digest** (`repo:tag@sha256:...`), not tag alone — a tag can be
+repointed upstream/registry-side without changing what's in git, but a
+digest can't. Each pin's comment records the multi-arch **index**
+digest and the date it was resolved; it does not repeat the
+per-platform digests (those are a point-in-time implementation detail
+of the index, not separately re-verified — the `image:`/`image.tag`
+line's index digest is the actual source of truth).
+
+**Locations:**
+- `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml` — `image:` field
+- `cluster/values/cloudflared.yaml` — `image.tag` (see that file's own
+  comment for why the digest lives in `tag` rather than a dedicated field)
+- `infra/playbooks/50_apps_infra.yml` — `image:` field for pgvector,
+  postgres-exporter, mosquitto, and mosquitto-exporter (embedded
+  `kubernetes.core.k8s` tasks)
+
+**Bumping a digest (whether moving to a new tag, or re-verifying the current one):**
+
+1. Resolve the **multi-arch index digest** — never a per-platform one, since this
+   cluster mixes arm64 (raspi5, raspi4) and amd64 (mba1, mba2) nodes — and confirm
+   both architectures are present, per INTERFACES.md § 11 "Multi-Architecture
+   Interface" (`docker buildx imagetools inspect <repo>:<tag>`; its top "Digest:"
+   line is the index digest to use in `repo:tag@sha256:<digest>`). If either
+   architecture is missing, do not pin (the image wouldn't run on part of the cluster).
+2. Update the `image:` (or `image.tag`) line to `repo:<new-tag>@sha256:<index-digest>`
+   and the one-line explanatory comment above it with the new index digest + resolution date.
+3. Validate:
+   - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml`: covered by the existing
+     `kustomize build cluster/apps/<app> | kubeconform ...` and
+     `| conftest test --policy policy/kubernetes/ --all-namespaces -` commands in
+     "Reproducing each check locally" above (open-webui, litellm, and n8n are already
+     in that loop; `deny-latest-image.rego` already accepts any `@sha256:...`-suffixed
+     reference regardless of tag).
+   - `cluster/values/cloudflared.yaml` and `infra/playbooks/50_apps_infra.yml`
+     (pgvector, postgres-exporter, mosquitto, mosquitto-exporter): not rendered by
+     `kustomize build` and out of scope for CI's `enforce-cluster-policies` job (see
+     `.github/workflows/ci.yml` / `policy/kubernetes/README.md`) — run `ansible-lint
+     infra/` and manually confirm the `image:`/`image.tag` line matches
+     `repo:tag@sha256:<64-hex-digest>`. There is currently no automated policy check
+     of these 5 images' pin format (a follow-up, not part of this procedure).
+4. `ansible-playbook infra/playbooks/50_apps_infra.yml --check --diff` (or the
+   matching playbook) should show only the intended image-line change, no drift.
 
 ### Helm Chart Version Tracking (Dependabot Bumps)
 
