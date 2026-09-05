@@ -65,6 +65,11 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **Dashboards**: Grafana (public at `https://grafana.furchert.ch`)
 - **Alerting**: Alertmanager with Discord webhook receiver
 - **Exporters**: Node Exporter (DaemonSet), postgres-exporter, mosquitto-exporter
+- **Not monitored**: kube-controller-manager, kube-scheduler, kube-proxy — k3s runs these
+  embedded in the server/agent process bound to `127.0.0.1` with no exposed scrape endpoints;
+  their chart scrape configs and alert rule groups are disabled in
+  `cluster/values/kube-prometheus-stack.yaml` (see
+  [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions))
 
 ### External Access
 - **Tunnel Provider**: Cloudflare Tunnel (cloudflared v0.1.2 helm chart)
@@ -193,6 +198,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 |------|-------------|--------|
 | raspi4 SSH tunnel | Cloudflare Tunnel ingress not yet configured for raspi4 | ⚠️ Open (see below) |
 | Restic restore test | Documented restore procedure awaits external SSD attachment | ⚠️ Deferred |
+| `KubeControllerManagerDown` / `KubeSchedulerDown` / `KubeProxyDown` | Fired as permanent critical false positives since install (2026-05-16) — k3s embeds these 3 components with zero exposed scrape targets | ✅ Resolved (#68) — scrape configs + alert rule groups disabled, see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions) |
 
 > **Note on raspi4 SSH**: The SSH tunnel for raspi4 (`ssh-raspi4.furchert.ch → 192.168.1.163:22`) is not yet configured in `40_platform.yml`. To add: include `- hostname: ssh-raspi4.furchert.ch, service: ssh://192.168.1.163:22` in the ingress list, then re-run `ansible-playbook infra/playbooks/40_platform.yml`.
 

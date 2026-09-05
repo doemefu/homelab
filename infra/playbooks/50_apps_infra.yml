@@ -154,7 +154,11 @@
                         cpu: 10m
                         memory: 32Mi
                       limits:
-                        cpu: 100m
+                        # Raised 100m -> 250m (#68): scrape bursts throttled 67% of CFS periods
+                        # over 24h at 100m against ~2m-cores average usage (CPUThrottlingHigh);
+                        # requests unchanged (CFS throttling is enforced against the limit, not
+                        # the request; average usage stays far below the unchanged 10m request).
+                        cpu: 250m
                         memory: 64Mi
             volumeClaimTemplates:
               - metadata:

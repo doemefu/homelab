@@ -566,6 +566,13 @@ rg --type yaml "pattern"
    repository named influxdata") if the locally cached Helm repo entry still has one — this hits
    `50_apps_infra.yml`'s InfluxData repo task on every run until fixed. Fix:
    `helm repo remove influxdata && helm repo add influxdata https://helm.influxdata.com`
+8. **Sizing exporter sidecar CPU limits from idle usage**: `CPUThrottlingHigh` can fire on a
+   scrape-only sidecar (e.g. `postgres-exporter`) even at tiny average CPU usage. Check the 24h
+   throttled-CFS-period ratio in Prometheus
+   (`rate(container_cpu_cfs_throttled_periods_total[24h]) /
+   rate(container_cpu_cfs_periods_total[24h])`), not just `kubectl top`, before deciding whether
+   to raise `limits.cpu` (see #68 — `requests` stayed unchanged, only `limits.cpu` moved
+   100m → 250m).
 
 ---
 

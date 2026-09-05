@@ -20,6 +20,37 @@
 # Hinweis: PVC-Resize nur via kubectl patch möglich (Helm kann StatefulSet-PVCs nicht resizen).
 #
 # Ressourcen: bewusst konservativ für ARM64 Pi-Hardware (raspi5: 8GB, raspi4: 4GB).
+#
+# Alert triage (#68): k3s runs kube-controller-manager, kube-scheduler, and kube-proxy
+# embedded in the k3s server/agent process, bound to 127.0.0.1 by default (no
+# --kube-*-arg bind-address=/metrics-bind-address= flags set anywhere in infra/) — the
+# chart's default scrape targets for these 3 components have zero endpoints, so their
+# default absent()-based alert rules (KubeControllerManagerDown/KubeSchedulerDown/
+# KubeProxyDown) have fired as permanent false positives since install (2026-05-16).
+# Disabled both the component scrape config and the matching alert rule groups below
+# (values-only, reversible). Alternative NOT implemented here (needs a k3s server/agent
+# config change + restart on raspi5, a cluster mutation out of scope for a values-only
+# fix): add --kube-controller-manager-arg bind-address=0.0.0.0,
+# --kube-scheduler-arg bind-address=0.0.0.0, --kube-proxy-arg
+# metrics-bind-address=0.0.0.0:10249 to k3s server/agent args, then set
+# kubeControllerManager.endpoints / kubeScheduler.endpoints to ["192.168.1.61"] (raspi5)
+# with https + insecureSkipVerify, and re-enable kubeProxy pointed at the same. See
+# DEPLOYMENT.md "Alerting Decisions" for the full writeup.
+
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  rules:
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeProxy: false
 
 prometheus:
   prometheusSpec:
