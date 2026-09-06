@@ -76,3 +76,35 @@
               storageclass.kubernetes.io/is-default-class: "false"
         merge_type: merge
       delegate_to: localhost
+
+    # --- Recurring snapshot job (#63) ---
+    # `groups: [default]` applies this job to every Longhorn volume that has
+    # no more specific recurring-job/group assignment of its own — today
+    # that's all 5 stateful apps volumes (postgresql, influxdb2, mosquitto,
+    # n8n, open-webui) with zero per-volume labeling required, and covers
+    # any future stateful volume the same way unless it opts into something
+    # more specific later. See DEPLOYMENT.md "Longhorn Storage" for the
+    # schedule/retention rationale and how to verify/smoke-test it.
+    - name: Longhorn RecurringJob for daily snapshots anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: RecurringJob
+          metadata:
+            name: daily-snapshot
+            namespace: longhorn-system
+          spec:
+            # 02:00 node-local time, one hour ahead of the 03:00 restic backup cron (storage
+            # role). Both run in the node's system timezone (base_timezone: Europe/Zurich,
+            # DST-aware), NOT UTC: Longhorn v1.7.2 doesn't set spec.timeZone on the CronJob it
+            # generates, so it follows k3s's embedded controller-manager process, which inherits
+            # the host's local timezone (set via community.general.timezone in the base role) —
+            # same mechanism the restic cron (ansible.builtin.cron, also node-local) relies on.
+            cron: "0 2 * * *"
+            task: snapshot
+            groups:
+              - default
+            retain: 7
+            concurrency: 1
+      delegate_to: localhost
