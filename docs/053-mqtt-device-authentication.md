@@ -21,7 +21,8 @@ This resolves the post-M6 task tracked in `.claude/memory/project_post_m6_items.
 
 See `infra/playbooks/50_apps_infra.yml` lines 205–310:
 
-- `eclipse-mosquitto:2.1.2-alpine` deployed with `allow_anonymous true`.
+- `eclipse-mosquitto:2.1.2-alpine` (digest-pinned since #57 — see the mosquitto container's
+  `image:` line in the playbook) deployed with `allow_anonymous true`.
 - Single shared `backend` MQTT user **planned but not yet enforced** — devices and device-service all connect anonymously today.
 - Service exposed as `LoadBalancer` on port 1883.
 - ACL not configured. Persistence in `mosquitto-data` PVC.
@@ -45,13 +46,11 @@ The base `eclipse-mosquitto` image has no JWT support — a plugin is required.
 
 ### 2. Replace deployment image + config
 
-In `50_apps_infra.yml`, change:
-
-```yaml
-image: "eclipse-mosquitto:2.1.2-alpine"
-```
-
-to the chosen plugin image. Add `MOSQUITTO_GO_AUTH_*` env vars or a richer config (plugin image expects an extended `mosquitto.conf`).
+In `50_apps_infra.yml`, change the mosquitto container's `image:` line (now digest-pinned,
+`repo:tag@sha256:...` — see CONTRIBUTING.md "Digest-Pinned Platform Images", #57) to the
+chosen plugin image (with its own freshly-resolved digest, per that same procedure). Add
+`MOSQUITTO_GO_AUTH_*` env vars or a richer config (plugin image expects an extended
+`mosquitto.conf`).
 
 Updated `mosquitto.conf` (in the `mosquitto-config` ConfigMap):
 
