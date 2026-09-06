@@ -223,6 +223,70 @@ After k3s restart or upgrade, local-path may become default again:
 ansible-playbook infra/playbooks/30_longhorn.yml
 ```
 
+#### Recurring Snapshots (#63)
+
+A Longhorn `RecurringJob` named `daily-snapshot` (applied by `infra/playbooks/30_longhorn.yml`)
+takes a snapshot of every Longhorn volume once a day:
+
+- **Schedule:** `0 2 * * *` (02:00 **node-local time** daily — one hour ahead of the existing
+  03:00 restic backup cron so the two don't overlap; there is no functional dependency between
+  them). Both run in the node's system timezone (`base_timezone: Europe/Zurich`, DST-aware), not
+  UTC: Longhorn v1.7.2 doesn't set `spec.timeZone` on the `CronJob` it generates, so it follows
+  k3s's embedded controller-manager, which inherits the host's local timezone — the same
+  mechanism the restic cron (a plain crontab entry, also node-local) relies on.
+- **Retention:** 7 snapshots per volume (Longhorn prunes older ones automatically).
+- **Concurrency:** 1 (snapshots run one volume at a time).
+- **Coverage:** `groups: [default]` — Longhorn applies a `default`-group job to every volume
+  that has no more specific recurring-job/group assignment of its own. As of 2026-09-04 that
+  covers all 5 stateful `apps` volumes (`postgresql`, `influxdb2`, `mosquitto`, `n8n`,
+  `open-webui`) with no per-volume labeling required, and will automatically cover any future
+  stateful volume the same way unless it's later opted into something more specific.
+
+**This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
+disks/replicas as the primary data (see the SD-card root-disk risk noted in
+`cluster/values/longhorn.yaml`'s header comment), so this protects against logical mistakes
+(bad config change, accidental deletion of *data within* a surviving volume) but not node/disk
+hardware failure or a cluster-wide incident. It also does **not** protect against deleting the
+PVC or Longhorn Volume itself — Longhorn's volume controller deletes a volume's associated
+snapshots as part of tearing the volume down, so once the volume is gone, so are its local
+snapshots; only a genuinely off-cluster backup can recover from that. Off-cluster durability (a
+Longhorn `BackupTarget` + restic restore testing) is tracked separately in #64 and not yet
+implemented.
+
+```bash
+# Confirm the job exists and its spec
+kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot -o yaml
+
+# List all recurring jobs (Longhorn UI: http://localhost:8080 -> Recurring Job)
+kubectl -n longhorn-system get recurringjobs.longhorn.io
+
+# Confirm a volume picked up the default group (empty recurringJobSelector on the volume
+# spec is expected — default-group membership isn't itself a per-volume field; check the
+# Longhorn UI's Volume -> Recurring Jobs tab, or the snapshot list below, for direct proof)
+kubectl -n longhorn-system get volumes.longhorn.io
+
+# List snapshots for a specific volume (volume name = PV name, not the PVC name —
+# resolve via: kubectl -n apps get pvc <pvc-name> -o jsonpath='{.spec.volumeName}')
+kubectl -n longhorn-system get snapshots.longhorn.io -l longhornvolume=<volume-name>
+```
+
+**One-time smoke test** (to confirm the schedule actually fires, rather than trusting the cron
+string alone): temporarily edit the RecurringJob's `spec.cron` to `"* * * * *"`
+(`kubectl -n longhorn-system edit recurringjobs.longhorn.io daily-snapshot`), wait up to a
+minute, confirm a new snapshot appears (`kubectl -n longhorn-system get snapshots.longhorn.io`
+or the Longhorn UI), then revert `cron` back to `"0 2 * * *"` (or just re-run
+`ansible-playbook infra/playbooks/30_longhorn.yml`, which re-applies the checked-in schedule).
+
+Restore from a recurring snapshot uses the same procedure as the manual snapshot recipe in
+"Backup & Rollback for Image Updates" -> "Longhorn volume snapshot" below (scale the workload
+to 0 replicas, revert via the Longhorn UI).
+
+**Removing the job:** deleting the task from `30_longhorn.yml` and re-running the playbook does
+NOT delete the `RecurringJob` CR — `kubernetes.core.k8s` with a `definition:` block only applies
+what's present, it doesn't prune resources removed from the playbook (unlike Flux's
+`Kustomization` pruning). Delete it explicitly if it's ever decommissioned:
+`kubectl -n longhorn-system delete recurringjobs.longhorn.io daily-snapshot`.
+
 ---
 
 ### cert-manager / TLS
@@ -1149,9 +1213,12 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
+| Verify Longhorn recurring snapshot job fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" above) |
 | Test backup restore | Monthly | Non-destructive restore test (see above) |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
+| Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |
+| Triage Helm chart freshness issues | Weekly (automated) / as opened | Handle any open GitHub issue labeled `helm-freshness` — see CONTRIBUTING.md "Helm Chart Version Tracking" |
 
 ---
 
@@ -1162,7 +1229,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
-| `30_longhorn.yml` | Longhorn storage system and default StorageClass | 3-5 min | Yes |
+| `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
 | `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |

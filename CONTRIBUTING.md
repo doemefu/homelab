@@ -30,6 +30,7 @@ Follow this loop for **every change** to this repository:
 | k3s installation / configuration | `infra/playbooks/20_k3s.yml`, `infra/roles/k3s/` | `20_k3s.yml` |
 | k3s version pinning | `infra/roles/k3s/defaults/main.yml` (`k3s_version`) | `20_k3s.yml` |
 | Longhorn storage | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` | `30_longhorn.yml` |
+| Longhorn recurring snapshot schedule/retention | `infra/playbooks/30_longhorn.yml` (`daily-snapshot` RecurringJob task) | `30_longhorn.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
 | cert-manager / TLS | `infra/playbooks/40_platform.yml`, `cluster/values/cert-manager.yaml` | `40_platform.yml` |
 | Cloudflare Tunnel | `infra/playbooks/40_platform.yml`, `cluster/values/cloudflared.yaml` | `40_platform.yml` |
@@ -51,6 +52,8 @@ Follow this loop for **every change** to this repository:
 | Worker specific vars | `infra/inventory/group_vars/k3s_agent.yml` | - |
 | Mac-specific vars | `infra/inventory/group_vars/mac.yml` | - |
 | Helm values | `cluster/values/<chart>.yaml` | Referenced by playbooks |
+| Ansible collection version pins | `infra/requirements.yml` | - (manual bump, see "Ansible Collection Updates (Manual)") |
+| Helm chart freshness tracking | `.github/helm-tracking/Chart.yaml`, `.github/workflows/helm-chart-freshness.yml` | - (weekly automated check, see "Helm Chart Version Tracking") |
 
 ---
 
@@ -220,6 +223,30 @@ Worklog template: `.claude/worklog-template.md`
 - **NO `latest` tags** — all versions must be pinned
 - k3s version: `infra/roles/k3s/defaults/main.yml` (`k3s_version`)
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
+- Container images: Pinned tags in deployment manifests — see
+  `.github/dependabot.yml`'s `docker` ecosystem entries for which image
+  locations are covered automatically
+- Ansible collections: `infra/requirements.yml` (exact pins — Dependabot
+  cannot track these; see "Ansible Collection Updates" below)
+
+### Ansible Collection Updates (Manual)
+
+`infra/requirements.yml` pins every Ansible collection to an exact
+version. "ansible-galaxy" is not a supported Dependabot
+package-ecosystem (tracked upstream at
+`github.com/dependabot/dependabot-core#3522`, open since 2021, still
+unimplemented), so these bumps are manual:
+
+1. Check the current version: `ansible-galaxy collection list`.
+2. Check the latest published version via the Galaxy API:
+   `https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/<namespace>/<name>/`
+   (`highest_version.version` in the JSON response).
+3. Bump the `version:` field in `infra/requirements.yml`, re-install
+   (`ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collections`),
+   and re-run the affected playbook(s) with `--check --diff` before a
+   real run.
+
+### Helm Chart Version Tracking (Automated Freshness Check)
 - Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
 - GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
@@ -275,18 +302,25 @@ line's index digest is the actual source of truth).
 ### Helm Chart Version Tracking (Dependabot Bumps)
 
 Helm chart versions live inline in Ansible playbooks under
-`infra/playbooks/` (look for `chart_version:`). Dependabot can't read
-those — its `helm` ecosystem only parses `Chart.yaml` `dependencies:`
-blocks. We bridge the gap with a tracking-only umbrella chart at
-`.github/helm-tracking/Chart.yaml`.
+`infra/playbooks/` (look for `chart_version:`). A scheduled GitHub
+Actions workflow, `.github/workflows/helm-chart-freshness.yml`, checks a
+tracking-only umbrella chart at `.github/helm-tracking/Chart.yaml`
+against each chart's live repository weekly (and on manual
+`workflow_dispatch`) and opens/updates a single tracking issue titled
+"Helm chart versions behind upstream (automated)" when any chart falls
+behind. (This replaced Dependabot's `helm` ecosystem, which pointed at
+the same tracking chart for over three months without ever opening a
+PR despite real available updates — see `.github/dependabot.yml`'s
+comment block for the investigation.)
 
-**When Dependabot opens a chart-bump PR** (it touches only
-`.github/helm-tracking/Chart.yaml`):
+**When that issue appears:**
 
-1. Read the comment above the bumped dependency — it names the
+1. Read the comment above the outdated dependency in
+   `.github/helm-tracking/Chart.yaml` — it names the
    `infra/playbooks/<file>.yml` that holds the real pin.
-2. In the same PR, update the matching `chart_version: "..."` line in
-   that playbook.
+2. Bump the `version:` field for that dependency in
+   `.github/helm-tracking/Chart.yaml`, and in the same PR update the
+   matching `chart_version: "..."` line in that playbook.
 3. Skim the chart's upstream release notes for breaking changes
    (`https://github.com/<owner>/<chart>/releases` or the chart
    repository's index).
@@ -295,11 +329,12 @@ blocks. We bridge the gap with a tracking-only umbrella chart at
    updates and apply them before the playbook run.
 5. Merge, then run the relevant playbook
    (`ansible-playbook infra/playbooks/<file>.yml -l <node>`) to pick
-   up the new chart.
+   up the new chart. The tracking issue is closed automatically by the
+   next scheduled workflow run once all charts are current again.
 
 **Never install or render** `.github/helm-tracking/Chart.yaml` — it is
-metadata for Dependabot only. The header of that file documents the
-full rationale.
+tracking metadata only. The header of that file documents the full
+rationale.
 
 ### IP Addresses
 

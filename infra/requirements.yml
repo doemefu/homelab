@@ -1,12 +1,19 @@
 ---
 # Ansible Collection Dependencies
 # Installieren mit: ansible-galaxy collection install -r infra/requirements.yml
+#
+# Exact-pinned (no `>=`/`~=` ranges) per the repo's version-pinning
+# non-negotiable. Dependabot cannot track these — "ansible-galaxy" is not
+# a supported Dependabot package-ecosystem (see .github/dependabot.yml) —
+# so bumps are manual. Check the currently installed version with
+# `ansible-galaxy collection list`, or query the Galaxy API directly:
+#   https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/<namespace>/<name>/
 collections:
   - name: ansible.posix
-    version: ">=2.0.0"
+    version: "2.2.2"
   - name: community.general
-    version: ">=10.0.0"
+    version: "13.3.0"
   - name: kubernetes.core
-    version: ">=5.0.0"
+    version: "6.5.0"
   - name: community.sops
-    version: ">=1.0.0"
+    version: "2.4.0"

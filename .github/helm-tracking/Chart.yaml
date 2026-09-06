@@ -4,31 +4,47 @@
 # -------
 # Our cluster's Helm chart versions are pinned inline inside Ansible
 # playbooks (`infra/playbooks/*.yml`, look for `chart_version:`). That is
-# where the cluster reads them from. Dependabot's `helm` ecosystem,
-# however, can only read versions out of a Chart.yaml `dependencies:`
-# block — it does not scan arbitrary YAML. This file exists *solely*
-# to give Dependabot something to scan; it is a tracking artifact, not
-# a real Helm chart.
+# where the cluster reads them from. This file exists *solely* to give a
+# freshness checker something to scan; it is a tracking artifact, not a
+# real Helm chart.
 #
-# How it works
-# ------------
-# 1. Dependabot polls each `repository:` listed below for new chart
-#    releases (config: `.github/dependabot.yml`, ecosystem `helm`,
-#    directory `/.github/helm-tracking`).
-# 2. When a new version drops, Dependabot opens a PR that bumps the
-#    `version:` field for that dependency *in this file*.
-# 3. You — the human reviewing the PR — copy the new version into the
-#    corresponding `chart_version: "..."` line in the relevant playbook
-#    under `infra/playbooks/` (see mapping in the comment on each entry
-#    below), commit the playbook change to the same PR, and merge.
-# 4. The next `ansible-playbook ... -l <node>` run picks up the new
+# How it works (as of 2026-09-04 — see #62)
+# ------------------------------------------
+# 1. `.github/workflows/helm-chart-freshness.yml` runs weekly (and on
+#    manual `workflow_dispatch`), reading the `dependencies:` list below
+#    and comparing each `version:` against that chart's live `index.yaml`
+#    at `repository:` (via `scripts/check-helm-chart-versions.py`).
+# 2. If any chart is behind, the workflow opens (or updates) a single
+#    GitHub issue titled "Helm chart versions behind upstream
+#    (automated)" listing the outdated charts. It never edits this file
+#    or any playbook itself.
+# 3. You — the human handling that issue — bump the `version:` field for
+#    that dependency *in this file*, then copy the same new version into
+#    the corresponding `chart_version: "..."` line in the relevant
+#    playbook under `infra/playbooks/` (see mapping in the comment on
+#    each entry below), in the same PR.
+# 4. Skim the chart's upstream release notes for breaking changes before
+#    merging, especially for charts shipping CRDs (cert-manager,
+#    kube-prometheus-stack, longhorn) — see CONTRIBUTING.md "Helm Chart
+#    Version Tracking" for the full checklist.
+# 5. The next `ansible-playbook ... -l <node>` run picks up the new
 #    chart version. This file does **not** drive any install — Helm
 #    never sees it.
 #
-# Why not just put the versions in the playbook and let Renovate read
-# them? Renovate can do that with `customManagers`, but we'd be adding
-# a second bot just for one file pattern. Dependabot-with-umbrella is
-# the cheaper trade-off; the cost is one manual sync step per bump.
+# Why not Dependabot's own `helm` ecosystem? It was configured exactly
+# this way (pointed at this same file) from 2026-05-27 to 2026-09-04 and
+# never opened a single PR, despite 4 of the 6 charts below having real,
+# substantial upstream updates available the whole time — a correctly
+# formed, reachable config that silently never worked, for reasons not
+# diagnosable without Dependabot job-log access (not exposed via the
+# GitHub API). See `.github/dependabot.yml`'s comment block for the full
+# investigation. The scheduled workflow above replaces it with something
+# independently testable via `workflow_dispatch`.
+#
+# Why not just put the versions in the playbook and let a bot read them
+# directly there? Renovate can do that with `customManagers`, but we'd be
+# adding a second bot just for one file pattern; the umbrella-chart +
+# small custom workflow keeps everything on tooling already in this repo.
 #
 # Why this file lives under `.github/` rather than `cluster/`
 # -----------------------------------------------------------
