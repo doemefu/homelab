@@ -506,6 +506,15 @@ Platform: linux/amd64
 Platform: linux/arm64
 ```
 
+**Get the index digest for a digest pin** (used by CONTRIBUTING.md § "Digest-Pinned
+Platform Images"): the `| grep Platform` form above filters out the `Digest:` line, so
+resolve the digest with the unfiltered command instead:
+```bash
+docker buildx imagetools inspect <repo>:<tag>
+```
+The `Digest:` line near the top of the unfiltered output is the multi-arch **index**
+digest — use it in `repo:tag@sha256:<digest>`.
+
 **Official Docker Hub images** (postgres, nginx, redis, etc.) are typically multi-arch.
 Third-party or custom images must be checked.
 

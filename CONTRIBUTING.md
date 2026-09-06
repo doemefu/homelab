@@ -52,6 +52,8 @@ Follow this loop for **every change** to this repository:
 | Worker specific vars | `infra/inventory/group_vars/k3s_agent.yml` | - |
 | Mac-specific vars | `infra/inventory/group_vars/mac.yml` | - |
 | Helm values | `cluster/values/<chart>.yaml` | Referenced by playbooks |
+| Ansible collection version pins | `infra/requirements.yml` | - (manual bump, see "Ansible Collection Updates (Manual)") |
+| Helm chart freshness tracking | `.github/helm-tracking/Chart.yaml`, `.github/workflows/helm-chart-freshness.yml` | - (weekly automated check, see "Helm Chart Version Tracking") |
 
 ---
 
@@ -221,24 +223,102 @@ Worklog template: `.claude/worklog-template.md`
 - **NO `latest` tags** — all versions must be pinned
 - k3s version: `infra/roles/k3s/defaults/main.yml` (`k3s_version`)
 - Helm chart versions: In `cluster/values/<chart>.yaml` (`version:` field) or in playbook `chart_version:`
-- Container images: Pinned tags in deployment manifests
+- Container images: Pinned tags in deployment manifests — see
+  `.github/dependabot.yml`'s `docker` ecosystem entries for which image
+  locations are covered automatically
+- Ansible collections: `infra/requirements.yml` (exact pins — Dependabot
+  cannot track these; see "Ansible Collection Updates" below)
+
+### Ansible Collection Updates (Manual)
+
+`infra/requirements.yml` pins every Ansible collection to an exact
+version. "ansible-galaxy" is not a supported Dependabot
+package-ecosystem (tracked upstream at
+`github.com/dependabot/dependabot-core#3522`, open since 2021, still
+unimplemented), so these bumps are manual:
+
+1. Check the current version: `ansible-galaxy collection list`.
+2. Check the latest published version via the Galaxy API:
+   `https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/<namespace>/<name>/`
+   (`highest_version.version` in the JSON response).
+3. Bump the `version:` field in `infra/requirements.yml`, re-install
+   (`ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collections`),
+   and re-run the affected playbook(s) with `--check --diff` before a
+   real run.
+
+### Helm Chart Version Tracking (Automated Freshness Check)
+- Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
+
+### Digest-Pinned Platform Images
+
+The 8 platform images (open-webui, litellm, n8n, cloudflared, pgvector,
+postgres-exporter, mosquitto, mosquitto-exporter) are pinned by **tag
+and digest** (`repo:tag@sha256:...`), not tag alone — a tag can be
+repointed upstream/registry-side without changing what's in git, but a
+digest can't. Each pin's comment records the multi-arch **index**
+digest and the date it was resolved; it does not repeat the
+per-platform digests (those are a point-in-time implementation detail
+of the index, not separately re-verified — the `image:`/`image.tag`
+line's index digest is the actual source of truth).
+
+**Locations:**
+- `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml` — `image:` field
+- `cluster/values/cloudflared.yaml` — `image.tag` (see that file's own
+  comment for why the digest lives in `tag` rather than a dedicated field)
+- `infra/playbooks/50_apps_infra.yml` — `image:` field for pgvector,
+  postgres-exporter, mosquitto, and mosquitto-exporter (embedded
+  `kubernetes.core.k8s` tasks)
+
+**Bumping a digest (whether moving to a new tag, or re-verifying the current one):**
+
+1. Resolve the **multi-arch index digest** — never a per-platform one, since this
+   cluster mixes arm64 (raspi5, raspi4) and amd64 (mba1, mba2) nodes — and confirm
+   both architectures are present, per INTERFACES.md § 11 "Multi-Architecture
+   Interface" (`docker buildx imagetools inspect <repo>:<tag>`; its top "Digest:"
+   line is the index digest to use in `repo:tag@sha256:<digest>`). If either
+   architecture is missing, do not pin (the image wouldn't run on part of the cluster).
+2. Update the `image:` (or `image.tag`) line to `repo:<new-tag>@sha256:<index-digest>`
+   and the one-line explanatory comment above it with the new index digest + resolution date.
+3. Validate:
+   - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml`: covered by the existing
+     `kustomize build cluster/apps/<app> | kubeconform ...` and
+     `| conftest test --policy policy/kubernetes/ --all-namespaces -` commands in
+     "Reproducing each check locally" above (open-webui, litellm, and n8n are already
+     in that loop; `deny-latest-image.rego` already accepts any `@sha256:...`-suffixed
+     reference regardless of tag).
+   - `cluster/values/cloudflared.yaml` and `infra/playbooks/50_apps_infra.yml`
+     (pgvector, postgres-exporter, mosquitto, mosquitto-exporter): not rendered by
+     `kustomize build` and out of scope for CI's `enforce-cluster-policies` job (see
+     `.github/workflows/ci.yml` / `policy/kubernetes/README.md`) — run `ansible-lint
+     infra/` and manually confirm the `image:`/`image.tag` line matches
+     `repo:tag@sha256:<64-hex-digest>`. There is currently no automated policy check
+     of these 5 images' pin format (a follow-up, not part of this procedure).
+4. `ansible-playbook infra/playbooks/50_apps_infra.yml --check --diff` (or the
+   matching playbook) should show only the intended image-line change, no drift.
 
 ### Helm Chart Version Tracking (Dependabot Bumps)
 
 Helm chart versions live inline in Ansible playbooks under
-`infra/playbooks/` (look for `chart_version:`). Dependabot can't read
-those — its `helm` ecosystem only parses `Chart.yaml` `dependencies:`
-blocks. We bridge the gap with a tracking-only umbrella chart at
-`.github/helm-tracking/Chart.yaml`.
+`infra/playbooks/` (look for `chart_version:`). A scheduled GitHub
+Actions workflow, `.github/workflows/helm-chart-freshness.yml`, checks a
+tracking-only umbrella chart at `.github/helm-tracking/Chart.yaml`
+against each chart's live repository weekly (and on manual
+`workflow_dispatch`) and opens/updates a single tracking issue titled
+"Helm chart versions behind upstream (automated)" when any chart falls
+behind. (This replaced Dependabot's `helm` ecosystem, which pointed at
+the same tracking chart for over three months without ever opening a
+PR despite real available updates — see `.github/dependabot.yml`'s
+comment block for the investigation.)
 
-**When Dependabot opens a chart-bump PR** (it touches only
-`.github/helm-tracking/Chart.yaml`):
+**When that issue appears:**
 
-1. Read the comment above the bumped dependency — it names the
+1. Read the comment above the outdated dependency in
+   `.github/helm-tracking/Chart.yaml` — it names the
    `infra/playbooks/<file>.yml` that holds the real pin.
-2. In the same PR, update the matching `chart_version: "..."` line in
-   that playbook.
+2. Bump the `version:` field for that dependency in
+   `.github/helm-tracking/Chart.yaml`, and in the same PR update the
+   matching `chart_version: "..."` line in that playbook.
 3. Skim the chart's upstream release notes for breaking changes
    (`https://github.com/<owner>/<chart>/releases` or the chart
    repository's index).
@@ -247,11 +327,12 @@ blocks. We bridge the gap with a tracking-only umbrella chart at
    updates and apply them before the playbook run.
 5. Merge, then run the relevant playbook
    (`ansible-playbook infra/playbooks/<file>.yml -l <node>`) to pick
-   up the new chart.
+   up the new chart. The tracking issue is closed automatically by the
+   next scheduled workflow run once all charts are current again.
 
 **Never install or render** `.github/helm-tracking/Chart.yaml` — it is
-metadata for Dependabot only. The header of that file documents the
-full rationale.
+tracking metadata only. The header of that file documents the full
+rationale.
 
 ### IP Addresses
 
@@ -520,6 +601,13 @@ rg --type yaml "pattern"
    repository named influxdata") if the locally cached Helm repo entry still has one — this hits
    `50_apps_infra.yml`'s InfluxData repo task on every run until fixed. Fix:
    `helm repo remove influxdata && helm repo add influxdata https://helm.influxdata.com`
+8. **Sizing exporter sidecar CPU limits from idle usage**: `CPUThrottlingHigh` can fire on a
+   scrape-only sidecar (e.g. `postgres-exporter`) even at tiny average CPU usage. Check the 24h
+   throttled-CFS-period ratio in Prometheus
+   (`rate(container_cpu_cfs_throttled_periods_total[24h]) /
+   rate(container_cpu_cfs_periods_total[24h])`), not just `kubectl top`, before deciding whether
+   to raise `limits.cpu` (see #68 — `requests` stayed unchanged, only `limits.cpu` moved
+   100m → 250m).
 
 ---
 

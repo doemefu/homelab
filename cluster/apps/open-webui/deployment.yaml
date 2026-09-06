@@ -53,7 +53,7 @@ spec:
           # │  docs/02 §11 (decision log) before Phase 1 close (AC-0.x pending).    │
           # │  Monitor upstream for a future release that ships non-root by default. │
           # └─────────────────────────────────────────────────────────────────────────┘
-          image: ghcr.io/open-webui/open-webui:v0.11.1
+          image: ghcr.io/open-webui/open-webui:v0.11.1@sha256:6bb1fbe8ab0a3e0456067f493044ffb66a30a65a34be47f6a5862176a370dd16
           ports:
             - containerPort: 8080
           env:
