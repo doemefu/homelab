@@ -5,27 +5,94 @@ updates:
     schedule:
       interval: weekly
 
-  - package-ecosystem: ansible-galaxy
-    directory: "/infra"
+  # Container images.
+  #
+  # Coverage is limited to directories containing a standalone Kubernetes
+  # manifest (top-level apiVersion + kind) with a plain `image: repo:tag`
+  # reference — Dependabot's docker ecosystem file-fetcher only recognizes
+  # that shape (or a real Helm chart directory with a sibling Chart.yaml +
+  # values.yaml, which this repo doesn't vendor locally).
+  #
+  # Verify after merge: these 3 directories are the closest match to
+  # Dependabot's own documented docker-ecosystem example (standalone
+  # Deployment YAML, plain `image: repo:tag`), but the `helm` ecosystem
+  # entry this PR removed looked equally correct on paper and still
+  # produced zero PRs for ~14 cycles (see the removed helm block's history
+  # in git log) — so "correctly configured" is not proof it works. Confirm
+  # by watching for a real Dependabot PR on the next actual image bump for
+  # open-webui/n8n/litellm/cloudflared; if none of the four ever produces
+  # one despite an available bump, treat it the same way the helm channel
+  # was treated here (investigate with evidence, then fix or replace).
+  #
+  # Deliberately NOT covered (do not add these directories):
+  #   - infra/playbooks/ — the images embedded in 50_apps_infra.yml
+  #     (pgvector, postgres-exporter, mosquitto, mosquitto-exporter) live
+  #     inside Ansible kubernetes.core.k8s task `definition:` blocks, not
+  #     standalone manifests. Dependabot's docker ecosystem cannot see
+  #     inside an Ansible playbook's YAML shape (top level is a task list,
+  #     not a Hash with apiVersion+kind) — no directory config fixes this.
+  #     These stay manually tracked (see the version comment next to each).
+  #   - cluster/apps/{auth-service,device-service,furchert-ch}/imagerepo.yaml —
+  #     Flux ImageRepository CRs; tag tracking is Flux image automation's
+  #     job, not Dependabot's.
+  #   - cluster/flux-system/ — Flux's own generated component bundle
+  #     (regenerated via `flux bootstrap`/`flux install`); bumping a single
+  #     controller image here without regenerating the whole bundle would
+  #     desync CRDs/RBAC from the pinned Flux version.
+  - package-ecosystem: docker
+    directory: "/cluster/apps/open-webui"
     schedule:
       interval: weekly
 
-  # Helm chart version tracking.
-  #
-  # Dependabot's `helm` ecosystem can only read versions out of a
-  # Chart.yaml `dependencies:` block — it does NOT scan arbitrary YAML
-  # for `chart_version:` keys. Our actual chart pins live inline in
-  # Ansible playbooks under `infra/playbooks/`. To bridge that gap we
-  # keep a tracking-only umbrella chart at `.github/helm-tracking/`
-  # whose sole purpose is to give Dependabot something to scan.
-  #
-  # When Dependabot opens a PR bumping a chart version in
-  # `.github/helm-tracking/Chart.yaml`, the human reviewer is
-  # responsible for also bumping the matching `chart_version: "..."`
-  # line in the playbook listed in that dependency's comment, in the
-  # same PR. See the header of `.github/helm-tracking/Chart.yaml` for
-  # the full workflow and rationale.
-  - package-ecosystem: helm
-    directory: "/.github/helm-tracking"
+  - package-ecosystem: docker
+    directory: "/cluster/apps/n8n"
     schedule:
       interval: weekly
+
+  - package-ecosystem: docker
+    directory: "/cluster/apps/litellm"
+    schedule:
+      interval: weekly
+
+  # Only cloudflared.yaml in this directory has an `image:` key (verified
+  # 2026-09-04 — none of the other 6 values files here do), so scanning
+  # this directory is safe even though the file may not match either of
+  # Dependabot's detection heuristics (it has no top-level apiVersion/kind,
+  # and no sibling Chart.yaml since we don't vendor charts locally). Kept
+  # as a good-faith attempt; #57 tracks digest-pinning this image directly
+  # regardless of whether Dependabot picks it up here.
+  - package-ecosystem: docker
+    directory: "/cluster/values"
+    schedule:
+      interval: weekly
+
+  # Ansible Galaxy collections (infra/requirements.yml).
+  #
+  # Deliberately NOT configured: "ansible-galaxy" is not a supported
+  # Dependabot package-ecosystem (tracked upstream at
+  # github.com/dependabot/dependabot-core#3522, open since 2021-04-20,
+  # still unimplemented as of 2026-09-04). A prior entry here (added
+  # 2026-04-12) could therefore never have produced a PR. Versions are
+  # exact-pinned in infra/requirements.yml instead and must be bumped
+  # manually (`ansible-galaxy collection list` locally, or the Galaxy API,
+  # shows the current latest) — re-check dependabot-core#3522 before ever
+  # re-adding this ecosystem.
+
+  # Helm chart versions (infra/playbooks/*.yml `chart_version:` pins).
+  #
+  # Deliberately NOT configured via Dependabot's "helm" ecosystem: an
+  # entry targeting the tracking-only umbrella chart at
+  # .github/helm-tracking/Chart.yaml ran for ~14 weekly cycles
+  # (2026-05-27 to 2026-09-04) without ever opening a PR, despite 4 of
+  # its 6 tracked charts having real, verified upstream updates available
+  # at removal time (longhorn 1.7.2->1.12.1, cert-manager
+  # v1.17.1->v1.21.1, kube-prometheus-stack 69.3.1->89.1.0, home-assistant
+  # 0.3.51->0.3.79) — a correctly-shaped, reachable config that
+  # nonetheless never surfaced them. Root cause not diagnosable without
+  # Dependabot job-log access (not exposed via the GitHub API or `gh`
+  # CLI). Replaced with the scheduled workflow
+  # .github/workflows/helm-chart-freshness.yml, which reads the same
+  # tracking Chart.yaml and is independently verifiable via
+  # `workflow_dispatch` (unlike the opaque Dependabot helm ecosystem).
+  # See CONTRIBUTING.md "Helm Chart Version Tracking" for the human
+  # follow-up process once it flags an outdated chart.

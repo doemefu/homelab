@@ -44,6 +44,22 @@ test_allow_digest_pin {
     count(result) == 0
 }
 
+# Regression fixture for the real repo:tag@sha256:<64-hex> shape used in production
+# (#57 digest-pinned platform images) — not just the shortened "abcdef" placeholder above.
+test_allow_real_tag_and_digest_shape {
+    result := deny with input as {
+        "kind": "Deployment",
+        "metadata": {"name": "litellm", "namespace": "apps"},
+        "spec": {"template": {"spec": {"containers": [
+            {
+                "name": "litellm",
+                "image": "docker.litellm.ai/berriai/litellm-non_root:v1.98.0@sha256:157aaf0a519713663ec6abefe73fa48bf12f638b0e63fb2b209ba0eae68e6bd7",
+            },
+        ]}}},
+    }
+    count(result) == 0
+}
+
 test_init_container_latest_denied {
     result := deny with input as {
         "kind": "StatefulSet",
