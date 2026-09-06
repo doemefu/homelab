@@ -95,6 +95,7 @@
             name: daily-snapshot
             namespace: longhorn-system
           spec:
+            name: daily-snapshot
             # 02:00 node-local time, one hour ahead of the 03:00 restic backup cron (storage
             # role). Both run in the node's system timezone (base_timezone: Europe/Zurich,
             # DST-aware), NOT UTC: Longhorn v1.7.2 doesn't set spec.timeZone on the CronJob it
