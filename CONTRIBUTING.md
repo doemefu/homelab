@@ -249,6 +249,8 @@ unimplemented), so these bumps are manual:
 ### Helm Chart Version Tracking (Automated Freshness Check)
 - Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
+- GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
+- CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction
 
 ### Digest-Pinned Platform Images
 
@@ -659,9 +661,12 @@ yamllint -c .yamllint .
 # Shell — CI runs shellcheck over the whole scripts/ dir (scandir: ./scripts)
 find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
 
-# GitHub Actions workflows
-curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
-  | sudo tar -xz -C /usr/local/bin actionlint
+# GitHub Actions workflows (checksum from the upstream release, same as CI — see .github/workflows/ci.yml)
+curl -fsSLO https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+# `&&`-chained (not a bare sequence) so a checksum mismatch actually stops the install —
+# unlike a bare `set -e`-less script, this doesn't rely on the caller's shell options.
+echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionlint_1.7.7_linux_amd64.tar.gz" | sha256sum -c - \
+  && sudo tar -xzf actionlint_1.7.7_linux_amd64.tar.gz -C /usr/local/bin actionlint
 actionlint
 
 # Ansible

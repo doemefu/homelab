@@ -1,5 +1,25 @@
 name: CI
 
+# Supply-chain hardening (#37): every third-party `uses:` is pinned to a full
+# commit SHA (not a mutable tag) with a `# vX.Y.Z` comment recording which
+# release that SHA corresponds to at pin time; every `actions/checkout` step
+# sets `persist-credentials: false` since none of these jobs push anything
+# (workflow already runs with `permissions: contents: read`, so this is
+# defense-in-depth, not a fix for an active gap); every binary downloaded via
+# `curl | tar` is checksum-verified against the upstream release's own
+# published checksums file before extraction (all binary steps assume the
+# `ubuntu-latest` runner's linux/amd64 architecture, matching every asset
+# filename below — e.g. `_linux_amd64`/`-linux-amd64`). Re-pinning the 6 actions:
+# `.github/dependabot.yml`'s `github-actions` ecosystem entry already tracks these and
+# opens a PR with the new SHA on a version bump — review and merge that PR rather than
+# hand-resolving (hand-resolving is only for sanity-checking an already-open Dependabot PR,
+# or a bump outside its weekly schedule): `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`
+# (dereference an annotated tag via `git/tags/<sha>` -> `object.sha`). Re-pinning the 4
+# curl-downloaded binaries is fully manual — Dependabot doesn't track them at all — just
+# re-fetch the matching checksums file for the new version. This same convention applies to
+# `codeql.yml` in this directory (see its own header comment) and should be applied to any
+# future workflow file added here.
+
 on:
   pull_request:
     branches: [main]
@@ -32,9 +52,11 @@ jobs:
       shell: ${{ steps.filter.outputs.shell }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: filter
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
             ansible:
@@ -70,8 +92,10 @@ jobs:
     if: needs.detect-changes.outputs.yaml == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install yamllint
@@ -88,8 +112,10 @@ jobs:
     if: needs.detect-changes.outputs.shell == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: ludeeus/action-shellcheck@2.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           scandir: ./scripts
 
@@ -99,13 +125,19 @@ jobs:
     if: needs.detect-changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - name: Install actionlint (pinned)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint (pinned + checksum-verified)
+        env:
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
         run: |
           set -euo pipefail
-          curl -fsSL \
-            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin actionlint
+          asset="actionlint_1.7.7_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v1.7.7/${asset}"
+          echo "${ACTIONLINT_SHA256}  ${asset}" | sha256sum -c -
+          sudo tar -xzf "${asset}" -C /usr/local/bin actionlint
+          rm -f "${asset}"
       - name: Run actionlint
         run: actionlint -color
 
@@ -118,8 +150,10 @@ jobs:
     if: needs.detect-changes.outputs.ansible == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install ansible-lint and ansible-core
@@ -142,19 +176,29 @@ jobs:
       KUSTOMIZE_VERSION: v5.4.3
       KUBECONFORM_VERSION: v0.6.7
     steps:
-      - uses: actions/checkout@v7
-      - name: Install kustomize (pinned)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install kustomize (pinned + checksum-verified)
+        env:
+          KUSTOMIZE_SHA256: 3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7
         run: |
           set -euo pipefail
-          curl -fsSL \
-            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin kustomize
-      - name: Install kubeconform (pinned)
+          asset="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/${asset}"
+          echo "${KUSTOMIZE_SHA256}  ${asset}" | sha256sum -c -
+          sudo tar -xzf "${asset}" -C /usr/local/bin kustomize
+          rm -f "${asset}"
+      - name: Install kubeconform (pinned + checksum-verified)
+        env:
+          KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
         run: |
           set -euo pipefail
-          curl -fsSL \
-            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin kubeconform
+          asset="kubeconform-linux-amd64.tar.gz"
+          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/${asset}"
+          echo "${KUBECONFORM_SHA256}  ${asset}" | sha256sum -c -
+          sudo tar -xzf "${asset}" -C /usr/local/bin kubeconform
+          rm -f "${asset}"
       - name: Validate each per-app overlay
         run: |
           set -euo pipefail
@@ -191,19 +235,29 @@ jobs:
       KUSTOMIZE_VERSION: v5.4.3
       CONFTEST_VERSION: 0.56.0
     steps:
-      - uses: actions/checkout@v7
-      - name: Install kustomize (pinned)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install kustomize (pinned + checksum-verified)
+        env:
+          KUSTOMIZE_SHA256: 3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7
         run: |
           set -euo pipefail
-          curl -fsSL \
-            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin kustomize
-      - name: Install conftest (pinned)
+          asset="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/${asset}"
+          echo "${KUSTOMIZE_SHA256}  ${asset}" | sha256sum -c -
+          sudo tar -xzf "${asset}" -C /usr/local/bin kustomize
+          rm -f "${asset}"
+      - name: Install conftest (pinned + checksum-verified)
+        env:
+          CONFTEST_SHA256: 620f41640d63bbde1646a108ce2816ba54c980466ceebb7e754dda2d508e8cd5
         run: |
           set -euo pipefail
-          curl -fsSL \
-            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin conftest
+          asset="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLO "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${asset}"
+          echo "${CONFTEST_SHA256}  ${asset}" | sha256sum -c -
+          sudo tar -xzf "${asset}" -C /usr/local/bin conftest
+          rm -f "${asset}"
       - name: Verify policy unit tests
         # `verify` walks every *_test.rego file regardless of package, so it
         # doesn't need --all-namespaces. The per-file packages
