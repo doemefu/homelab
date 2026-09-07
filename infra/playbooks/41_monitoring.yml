@@ -167,8 +167,28 @@
     # = "<template>-<statefulset>-<ordinal>" = "prometheus-kube-prometheus-stack-prometheus-db-
     # prometheus-kube-prometheus-stack-prometheus-0". Changing the Helm release name would
     # change this — re-verify after any such rename.
-    # 41 must run BEFORE 30 on first rollout: 30's `daily-backup` job otherwise fires at 04:00
-    # against a still-unlabeled Prometheus volume — see DEPLOYMENT.md "Off-cluster backups".
+    # On a fresh bootstrap, keep the documented order 30 -> 41 (Longhorn must be the default
+    # StorageClass before the Prometheus Operator can provision this PVC at all) — just make
+    # sure this playbook completes before the first 04:00 `daily-backup` window fires. When
+    # retrofitting the backup target onto an already-running cluster, run 41 before 30 instead
+    # — see DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)".
+    #
+    # The Prometheus Operator only creates the StatefulSet (and therefore this PVC) once the
+    # Helm release above is ready — `state: patched` on a PVC that doesn't exist yet is a
+    # silent no-op in kubernetes.core 6.5.0 (a warning plus `changed: false`), so without this
+    # wait the label could simply never get applied on a fresh rollout.
+    - name: Warten bis Prometheus-PVC existiert
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: PersistentVolumeClaim
+        name: prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0
+        namespace: monitoring
+      register: prometheus_pvc
+      until: prometheus_pvc.resources | length > 0
+      retries: 30
+      delay: 10
+      delegate_to: localhost
+
     - name: Prometheus-PVC von der off-site Backup-Gruppe ausschliessen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"

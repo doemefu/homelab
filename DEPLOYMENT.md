@@ -59,9 +59,12 @@ ansible-playbook infra/playbooks/10_base.yml
 ansible-playbook infra/playbooks/20_k3s.yml
 
 # 3) Longhorn storage (default StorageClass) — requires the three longhorn_backup_s3_*
-#    SOPS keys (see "Off-cluster backups (Longhorn BackupTarget)" below); on first rollout
-#    run 41_monitoring.yml BEFORE this step so the Prometheus volume is already excluded
-#    from the off-site backup job when it starts firing
+#    SOPS keys (see "Off-cluster backups (Longhorn BackupTarget)" below). Fresh bootstrap
+#    (this numbered order): 30 runs before 41 because Longhorn must already be the default
+#    StorageClass before the Prometheus Operator can provision a PVC at all — just make sure
+#    41_monitoring.yml (step 5 below) completes before the first 04:00 daily-backup window
+#    fires. Retrofitting the backup target onto an already-running cluster instead runs
+#    41 before 30 — see "Off-cluster backups (Longhorn BackupTarget)" below.
 ansible-playbook infra/playbooks/30_longhorn.yml
 
 # 4) Platform: cert-manager, Cloudflare Tunnel, Traefik
@@ -208,7 +211,10 @@ kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80
 
 #### Root Disk Monitoring
 
-Longhorn writes permanently to `/var/lib/longhorn` (root SD card on Pis).
+Longhorn writes permanently to `/var/lib/longhorn` (root SD card on Pis). Since #64, the restic
+repository — which lives on the same SD card — also ingests a ~710 MB k3s datastore copy every
+day (deduplicated by restic; retention 7 daily / 4 weekly / 6 monthly), adding to the root-disk
+pressure this section already tracks.
 
 ```bash
 # Check free space on root (min 10GB recommended)
@@ -239,11 +245,14 @@ takes a snapshot of every Longhorn volume once a day:
   mechanism the restic cron (a plain crontab entry, also node-local) relies on.
 - **Retention:** 7 snapshots per volume (Longhorn prunes older ones automatically).
 - **Concurrency:** 1 (snapshots run one volume at a time).
-- **Coverage:** `groups: [default]` — Longhorn applies a `default`-group job to every volume
-  that has no more specific recurring-job/group assignment of its own. As of 2026-09-04 that
-  covers all 5 stateful `apps` volumes (`postgresql`, `influxdb2`, `mosquitto`, `n8n`,
-  `open-webui`) with no per-volume labeling required, and will automatically cover any future
-  stateful volume the same way unless it's later opted into something more specific.
+- **Coverage:** `groups: [default, snapshot-only]` — Longhorn applies a `default`-group job to
+  every volume that has no more specific recurring-job/group assignment of its own. As of
+  2026-09-07 that covers all 6 stateful `apps`/`monitoring` volumes (`postgresql`, `influxdb2`,
+  `mosquitto`, `n8n`, `open-webui`, `grafana`) with no per-volume labeling required, plus the
+  Prometheus volume via the extra `snapshot-only` group (`infra/playbooks/41_monitoring.yml`
+  labels it explicitly — see "Off-cluster backups (Longhorn BackupTarget)" below). It will
+  automatically cover any future stateful volume the same way unless that volume is later
+  opted into something more specific.
 
 **This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
 disks/replicas as the primary data (see the SD-card root-disk risk noted in
@@ -290,14 +299,16 @@ what's present, it doesn't prune resources removed from the playbook (unlike Flu
 `Kustomization` pruning). Delete it explicitly if it's ever decommissioned:
 `kubectl -n longhorn-system delete recurringjobs.longhorn.io daily-snapshot`.
 
-#### Off-cluster backups (Longhorn BackupTarget → Cloudflare R2, #64)
+#### Off-cluster backups (Longhorn BackupTarget)
 
 **What it protects:** a daily `backup` RecurringJob (`daily-backup`, applied by
 `infra/playbooks/30_longhorn.yml`) uploads a crash-consistent block-level copy of every Longhorn
-volume in the `default` recurring-job group to Cloudflare R2 (S3-compatible object storage) —
-that's the same 6 volumes the local `daily-snapshot` job covers minus Prometheus (see below).
-This survives node/disk failure and the loss of the PVC/Volume itself, which local snapshots
-(above) do not.
+volume in the `default` recurring-job group to Cloudflare R2 (S3-compatible object storage, #64)
+— the 6 volumes (`postgresql`, `influxdb2`, `mosquitto`, `n8n`, `open-webui`, `grafana`) that
+also get local snapshots via `daily-snapshot`'s `default`-group membership. Prometheus gets
+local snapshots too (via the extra `snapshot-only` group) but is excluded from this upload (see
+below). This survives node/disk failure and the loss of the PVC/Volume itself, which local
+snapshots (above) do not.
 
 **What it does not protect:** these are crash-consistent block copies, not application-consistent
 dumps — a PostgreSQL or n8n backup restored from here is exactly as consistent as pulling the
@@ -320,7 +331,19 @@ it still gets local `daily-snapshot` snapshots, just not uploaded to R2.
    - `longhorn_backup_s3_secret_access_key` — the token's secret
    - `longhorn_backup_s3_endpoint` — `https://<account-id>.r2.cloudflarestorage.com`
 
-**Rollout order** (first-time rollout, in one sitting):
+**Rollout order:**
+
+- **Fresh bootstrap** (new cluster, following the numbered
+  [Deployment Order](#deployment-order-step-by-step) above): run the playbooks in the order
+  listed there — `30_longhorn.yml` before `41_monitoring.yml` — because Longhorn must already be
+  the default StorageClass before the Prometheus Operator can provision its PVC at all. The only
+  requirement is that `41_monitoring.yml` completes (and the Prometheus PVC carries the
+  `snapshot-only` label — see "Verification" below) before the first 04:00 `daily-backup` window
+  fires.
+- **Retrofitting onto an already-running cluster** (this rollout — Longhorn and Prometheus are
+  already deployed): run `41_monitoring.yml` before `30_longhorn.yml` instead, in one sitting, so
+  the Prometheus volume is already excluded from the `default` group before `daily-backup` is
+  created:
 
 ```bash
 # 1) Monitoring first — labels the Prometheus PVC out of the default backup group
@@ -335,9 +358,9 @@ ansible-playbook infra/playbooks/30_longhorn.yml
 ansible-playbook infra/playbooks/10_base.yml -l raspi5
 ```
 
-Running `30_longhorn.yml` before `41_monitoring.yml` on a fresh rollout would let the first
-04:00 `daily-backup` run include the (unlabeled) Prometheus volume — always verify the
-Prometheus labels are in place before running `30_longhorn.yml`.
+Either order works as long as the Prometheus volume's labels are verified in place before
+`30_longhorn.yml`'s `daily-backup` job has a chance to run against it — always check
+"Verification" below before trusting either rollout to have excluded Prometheus correctly.
 
 **Verification:**
 
@@ -404,6 +427,9 @@ spec:
     driver: driver.longhorn.io
     volumeHandle: <restore-test-volume>
     fsType: ext4
+    volumeAttributes:
+      numberOfReplicas: "2"
+      staleReplicaTimeout: "2880"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -419,12 +445,23 @@ spec:
       storage: <volumeSize-from-step-1>
 EOF
 
-# 5) Mount with a throwaway busybox pod and compare a checksum against the live volume
-kubectl -n longhorn-system run restore-check --rm -it --image=busybox:1.36 --restart=Never \
-  --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.36","command":["sh"],"stdin":true,"tty":true,"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"<restore-test-volume>"}}]}}' \
-  -- sh -c 'sha256sum /data/<known-file>'
+# 5) Baseline: compute the checksum of a known file on the LIVE volume first, via the
+#    workload's own running pod (adjust namespace/pod/path to the volume under test)
+LIVE=$(kubectl -n <ns> exec <live-pod> -- sha256sum <path-inside-container> | awk '{print $1}')
 
-# 6) Delete PVC -> PV -> Volume THE SAME DAY: a restored volume re-enters the `default`
+# 6) Mount the restored volume with a throwaway busybox pod and compute the same checksum.
+#    The command must live inside the container overrides (command + args), not after `--`
+#    — kubectl run interprets anything after `--` as extra arguments to the image's default
+#    entrypoint, not as the command to execute, so a `command`/`args` override is required
+#    for the checksum to actually run instead of being silently dropped.
+RESTORED=$(kubectl -n longhorn-system run restore-check --rm -i --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.36","command":["sh","-c"],"args":["sha256sum /data/<known-file>"],"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"<restore-test-volume>"}}]}}' \
+  | awk '{print $1}')
+
+# 7) Compare — fail loudly on a mismatch instead of eyeballing two hashes side by side
+[ "$LIVE" = "$RESTORED" ] || echo "MISMATCH: live=$LIVE restored=$RESTORED"
+
+# 8) Delete PVC -> PV -> Volume THE SAME DAY: a restored volume re-enters the `default`
 #    recurring-job group (it has no group label of its own) and would otherwise get
 #    snapshotted/backed up overnight as if it were live production data.
 kubectl -n longhorn-system delete pvc <restore-test-volume>
@@ -432,11 +469,12 @@ kubectl delete pv <restore-test-volume>
 kubectl -n longhorn-system delete volumes.longhorn.io <restore-test-volume>
 ```
 
-**Restore test log:**
+**Restore test log:** records both the baseline (`LIVE`) and restored (`RESTORED`) hashes from
+step 7 above for each run, so a mismatch is auditable after the fact, not just at test time.
 
-| Date | Volume | Backup | Method | Result |
-|------|--------|--------|--------|--------|
-| — | — | — | — | pending — filled at rollout |
+| Date | Volume | Backup | Method | Hashes (live / restored) | Result |
+|------|--------|--------|--------|---------------------------|--------|
+| — | — | — | — | — | pending — filled at rollout |
 
 **Backblaze B2 swap:** change `backupTarget` in `cluster/values/longhorn.yaml` from
 `s3://homelab-longhorn@auto/` to `s3://<bucket>@<b2-region>/` (e.g. `eu-central-003`) and set
@@ -1389,7 +1427,8 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
 | Verify Longhorn recurring snapshot job fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" above) |
 | Verify a Longhorn backup landed on R2 | Weekly | `kubectl -n longhorn-system get backups.longhorn.io` (see "Off-cluster backups (Longhorn BackupTarget)" above) |
-| Test backup restore | Monthly | Longhorn restore test (see "Off-cluster backups") + restic non-destructive restore test (see "Backup (Restic)") |
+| Test backup restore | Monthly | Longhorn restore test (see "Off-cluster backups (Longhorn BackupTarget)") + restic non-destructive restore test (see "Backup (Restic)") |
+| Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
 | Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |
