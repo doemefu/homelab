@@ -11,26 +11,27 @@
 #   defaultSettings.defaultReplicaCount — für Volumes die manuell im UI erstellt werden (String)
 #   persistence.defaultClassReplicaCount — für Volumes via StorageClass/PVC (Integer)
 #
-# Off-cluster backup target (#64): Cloudflare R2 was chosen because the Cloudflare account
-# already exists (Tunnel), the free tier (10 GB-month storage, zero egress) covers the ~5.7 GB
-# of application data this target actually receives (Prometheus is excluded — see
-# infra/playbooks/41_monitoring.yml), and R2 speaks the plain S3 API Longhorn already supports.
-# The credential Secret `longhorn-backup-target` (created by infra/playbooks/30_longhorn.yml
-# from SOPS vars, never committed) must provide these keys:
-#   AWS_ACCESS_KEY_ID     — R2 API token access key ID
-#   AWS_SECRET_ACCESS_KEY — R2 API token secret
-#   AWS_ENDPOINTS         — https://<account-id>.r2.cloudflarestorage.com
-# `backupTarget` uses S3 URL syntax `s3://<bucket>@<region>/<path>/` — the trailing slash is
-# mandatory (Longhorn silently mis-parses the target without it). R2 has no AWS-style regions,
-# so `auto` is used; Longhorn only reaches R2 through the endpoint override above.
-# Backblaze B2 swap: same Secret shape (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_ENDPOINTS),
-# change `backupTarget`'s region to the B2 bucket's actual region (e.g. `eu-central-003`) and
-# `AWS_ENDPOINTS` to `https://s3.<region>.backblazeb2.com`.
+# Off-cluster backup target (#64): an NFS export on the operator's Mac
+# (/Users/dominic/informatik/homelab/backups/longhorn), reachable on the LAN only.
+# Rationale: no cloud account, no egress cost, and the Mac is the same machine that already
+# holds the manual pre-upgrade dumps. Trade-offs, all deliberate:
+#   - Backups are triggered MANUALLY via scripts/longhorn-backup.sh — there is no
+#     `backup` RecurringJob, because the Mac is not always on.
+#   - This is NOT off-site: a fire or theft at the flat destroys cluster and backups alike.
+#   - The Mac's IP is hardcoded below, so it needs a DHCP reservation on the router.
+#   - While the Mac is off or off-LAN, `backuptargets.longhorn.io/default` reports
+#     available=false. That is expected and harmless — nothing on the cluster depends on it;
+#     the target becomes available again within one poll interval (300 s) once the Mac is back.
+# NFS needs no credentials, so no credential Secret is configured for the target.
+# TODO(spike): Longhorn mounts this with NFSv4 and macOS nfsd is not a mainstream Longhorn
+# target. If the mount misbehaves, mount options can be appended to the URL as a query string
+# (`?nfsOptions=...`); Longhorn 1.7.2 defaults to `actimeo=1,soft,timeo=300,retry=2` and any
+# specified option list REPLACES those defaults, so re-state them alongside the new option.
+# See DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" for the export setup.
 
 defaultSettings:
   defaultReplicaCount: "2"
-  backupTarget: "s3://homelab-longhorn@auto/"
-  backupTargetCredentialSecret: "longhorn-backup-target"
+  backupTarget: "nfs://192.168.1.78:/Users/dominic/informatik/homelab/backups/longhorn"
 
 persistence:
   defaultClass: true

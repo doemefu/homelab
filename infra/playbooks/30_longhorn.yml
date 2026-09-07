@@ -2,7 +2,6 @@
 # Longhorn v1.7.2 deployen: Helm Chart + Default StorageClass setzen
 # Voraussetzung: 20_k3s.yml wurde ausgeführt (longhorn_prereqs auf allen Nodes installiert)
 # Voraussetzung: ~/.kube/homelab.yaml existiert
-# Voraussetzung: all.sops.yml enthält longhorn_backup_s3_access_key_id, longhorn_backup_s3_secret_access_key, longhorn_backup_s3_endpoint
 #
 # Ausführen mit: ansible-playbook infra/playbooks/30_longhorn.yml
 #
@@ -22,52 +21,6 @@
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
 
   tasks:
-    # --- Off-cluster backup target prerequisites (#64) ---
-    # Fails fast, before any Helm/kubectl call, if the R2 (or B2) credentials are missing —
-    # otherwise the backupTarget in cluster/values/longhorn.yaml would silently point at a
-    # bucket Longhorn can never reach.
-    - name: Prüfen dass alle benötigten SOPS-Variablen für das Backup-Target gesetzt sind
-      ansible.builtin.assert:
-        that:
-          - longhorn_backup_s3_access_key_id is defined and longhorn_backup_s3_access_key_id | length > 0
-          - longhorn_backup_s3_secret_access_key is defined and longhorn_backup_s3_secret_access_key | length > 0
-          - longhorn_backup_s3_endpoint is defined and longhorn_backup_s3_endpoint | length > 0
-        fail_msg: >-
-          One or more required SOPS variables are missing: longhorn_backup_s3_access_key_id,
-          longhorn_backup_s3_secret_access_key, longhorn_backup_s3_endpoint.
-          Add them to infra/inventory/group_vars/all.sops.yml — see DEPLOYMENT.md
-          "Off-cluster backups (Longhorn BackupTarget)".
-      delegate_to: localhost
-
-    # --- Namespace + backup-target credential Secret (must exist before the Helm release,
-    # so the backupTarget in cluster/values/longhorn.yaml resolves on first install) ---
-    - name: Longhorn-system Namespace anlegen
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        definition:
-          apiVersion: v1
-          kind: Namespace
-          metadata:
-            name: longhorn-system
-      delegate_to: localhost
-
-    - name: Longhorn-backup-target-Secret anlegen (S3-Credentials für off-site Backups)
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        definition:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: longhorn-backup-target
-            namespace: longhorn-system
-          type: Opaque
-          stringData:
-            AWS_ACCESS_KEY_ID: "{{ longhorn_backup_s3_access_key_id }}"
-            AWS_SECRET_ACCESS_KEY: "{{ longhorn_backup_s3_secret_access_key }}"
-            AWS_ENDPOINTS: "{{ longhorn_backup_s3_endpoint }}"
-      no_log: true
-      delegate_to: localhost
-
     # --- Longhorn Helm Repo ---
     - name: Longhorn Helm Repo hinzufügen
       kubernetes.core.helm_repository:
@@ -125,14 +78,13 @@
       delegate_to: localhost
 
     # --- Recurring snapshot job (#63) ---
-    # `groups: [default, snapshot-only]` applies this job to every Longhorn volume that has
-    # no more specific recurring-job/group assignment of its own (the 6 stateful apps/grafana
-    # volumes: postgresql, influxdb2, mosquitto, n8n, open-webui, grafana) plus the Prometheus
-    # volume, which infra/playbooks/41_monitoring.yml labels into the `snapshot-only` group so
-    # it keeps local snapshots but is excluded from the off-site `daily-backup` job below (#64)
-    # — see that playbook's comment for why. Covers any future stateful volume the same way
-    # unless it opts into something more specific later. See DEPLOYMENT.md "Longhorn Storage"
-    # for the schedule/retention rationale and how to verify/smoke-test it.
+    # `groups: [default]` applies this job to every Longhorn volume that has
+    # no more specific recurring-job/group assignment of its own — today
+    # that's all 5 stateful apps volumes (postgresql, influxdb2, mosquitto,
+    # n8n, open-webui) with zero per-volume labeling required, and covers
+    # any future stateful volume the same way unless it opts into something
+    # more specific later. See DEPLOYMENT.md "Longhorn Storage" for the
+    # schedule/retention rationale and how to verify/smoke-test it.
     - name: Longhorn RecurringJob for daily snapshots anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -152,35 +104,6 @@
             # same mechanism the restic cron (ansible.builtin.cron, also node-local) relies on.
             cron: "0 2 * * *"
             task: snapshot
-            groups:
-              - default
-              - snapshot-only
-            retain: 7
-            concurrency: 1
-      delegate_to: localhost
-
-    # --- Off-cluster backup job (#64) ---
-    # `groups: [default]` — same coverage as daily-snapshot's default group (all stateful
-    # apps/grafana volumes), but NOT `snapshot-only`, so the Prometheus volume never gets
-    # uploaded (see infra/playbooks/41_monitoring.yml for why: 20 Gi TSDB with 14 d retention,
-    # fully regenerable, would by itself exceed the R2 free tier).
-    # Ordering within one node-local day: 02:00 Longhorn snapshot -> 03:00 restic backup
-    # (storage role) -> 04:00 this job uploads a fresh Longhorn snapshot+backup to R2. The three
-    # don't depend on each other technically, but this order keeps the heaviest/slowest step
-    # (the off-site upload) last, after the two local, fast steps have already succeeded.
-    - name: Longhorn RecurringJob for daily off-site backup anlegen
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        definition:
-          apiVersion: longhorn.io/v1beta2
-          kind: RecurringJob
-          metadata:
-            name: daily-backup
-            namespace: longhorn-system
-          spec:
-            name: daily-backup
-            cron: "0 4 * * *"
-            task: backup
             groups:
               - default
             retain: 7
