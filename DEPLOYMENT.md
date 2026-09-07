@@ -32,7 +32,7 @@ Before starting any deployment or upgrade, verify:
 ### Secrets Check
 
 - [ ] `infra/inventory/group_vars/all.sops.yml` exists and is decrypted
-- [ ] All required variables set (see [CONTRIBUTING.md](CONTRIBUTING.md))
+- [ ] All required variables set (see INTERFACES.md § 7 "Required SOPS Variables" — including the three `longhorn_backup_s3_*` keys for `30_longhorn.yml`)
 - [ ] SOPS key available: `export SOPS_AGE_KEY_FILE=~/.config/age/homelab.key`
 
 ### External Dependencies
@@ -365,8 +365,11 @@ Either order works as long as the Prometheus volume's labels are verified in pla
 **Verification:**
 
 ```bash
-# Prometheus volume carries the snapshot-only label, not the default recurring-job label
-kubectl -n longhorn-system get volumes.longhorn.io --show-labels | grep prometheus
+# Prometheus volume carries the snapshot-only label, not the default recurring-job label.
+# Longhorn volume name = PV name `pvc-<uuid>`, not the PVC name — resolve it first.
+PROM_VOL=$(kubectl -n monitoring get pvc prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0 -o jsonpath='{.spec.volumeName}')
+kubectl -n longhorn-system get volumes.longhorn.io "$PROM_VOL" --show-labels
+# expect recurring-job-group.longhorn.io/snapshot-only=enabled present and .../default=enabled absent
 
 # Exactly 6 volumes remain in the default group (5 apps + grafana; Prometheus excluded)
 kubectl -n longhorn-system get volumes.longhorn.io -l recurring-job-group.longhorn.io/default=enabled --no-headers | wc -l

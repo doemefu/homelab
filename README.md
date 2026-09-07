@@ -102,7 +102,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
 | **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch}` |
-| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`) + off-site Longhorn backup target on Cloudflare R2 (daily 04:00, retain 7, #64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `infra/playbooks/41_monitoring.yml`, `cluster/values/longhorn.yaml` |
+| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default, snapshot-only]`) + off-site Longhorn backup target on Cloudflare R2 (daily 04:00, retain 7, #64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `infra/playbooks/41_monitoring.yml`, `cluster/values/longhorn.yaml` |
 
 ---
 

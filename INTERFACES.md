@@ -290,6 +290,7 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `cloudflare-api-token` | `platform` | Cloudflare API token | cert-manager DNS-01 challenges | Set in `40_platform.yml` |
+| `longhorn-backup-target` | `longhorn-system` | R2 API token (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) + `AWS_ENDPOINTS` | Longhorn backup target (`daily-backup` RecurringJob, #64) | Set by `30_longhorn.yml` from `longhorn_backup_s3_*`; rotate by issuing a new R2 token, updating the three SOPS vars, re-running `30_longhorn.yml`, then checking `kubectl -n longhorn-system get backuptargets.longhorn.io default -o jsonpath='{.status.available}'` is `true` |
 
 ### Required SOPS Variables
 
