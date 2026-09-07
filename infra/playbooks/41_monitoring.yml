@@ -152,6 +152,37 @@
       no_log: true
       delegate_to: localhost
 
+    # --- Exclude Prometheus from the off-site backup target (#64) ---
+    # The Prometheus TSDB volume (20 Gi, 14 d retention) is fully regenerable and, at ~35 GB
+    # actual usage including snapshot overhead, would by itself exceed the R2 free tier used by
+    # infra/playbooks/30_longhorn.yml's `daily-backup` RecurringJob. Labeling the PVC moves its
+    # Longhorn volume from the implicit `default` recurring-job group into `snapshot-only`
+    # (labeled explicitly via `recurring-job.longhorn.io/source: enabled`, which is required for
+    # Longhorn to sync PVC labels onto the volume at all) — it still gets the local
+    # `daily-snapshot` job (member of both `default` and `snapshot-only`), just not the
+    # `daily-backup` job (member of `default` only).
+    # PVC name derivation: Helm release name `kube-prometheus-stack` -> Prometheus Operator
+    # creates StatefulSet `prometheus-kube-prometheus-stack-prometheus` -> its
+    # volumeClaimTemplate is named `prometheus-kube-prometheus-stack-prometheus-db` -> PVC name
+    # = "<template>-<statefulset>-<ordinal>" = "prometheus-kube-prometheus-stack-prometheus-db-
+    # prometheus-kube-prometheus-stack-prometheus-0". Changing the Helm release name would
+    # change this — re-verify after any such rename.
+    # 41 must run BEFORE 30 on first rollout: 30's `daily-backup` job otherwise fires at 04:00
+    # against a still-unlabeled Prometheus volume — see DEPLOYMENT.md "Off-cluster backups".
+    - name: Prometheus-PVC von der off-site Backup-Gruppe ausschliessen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: PersistentVolumeClaim
+        name: prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0
+        namespace: monitoring
+        definition:
+          metadata:
+            labels:
+              recurring-job.longhorn.io/source: enabled
+              recurring-job-group.longhorn.io/snapshot-only: enabled
+      delegate_to: localhost
+
     # --- ServiceMonitors ---
     # All ServiceMonitors live in the monitoring namespace with label release: kube-prometheus-stack
     # so the Prometheus Operator discovers them automatically.

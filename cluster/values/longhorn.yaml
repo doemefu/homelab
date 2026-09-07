@@ -10,9 +10,27 @@
 # RF=2: Beide Keys sind nötig:
 #   defaultSettings.defaultReplicaCount — für Volumes die manuell im UI erstellt werden (String)
 #   persistence.defaultClassReplicaCount — für Volumes via StorageClass/PVC (Integer)
+#
+# Off-cluster backup target (#64): Cloudflare R2 was chosen because the Cloudflare account
+# already exists (Tunnel), the free tier (10 GB-month storage, zero egress) covers the ~5.7 GB
+# of application data this target actually receives (Prometheus is excluded — see
+# infra/playbooks/41_monitoring.yml), and R2 speaks the plain S3 API Longhorn already supports.
+# The credential Secret `longhorn-backup-target` (created by infra/playbooks/30_longhorn.yml
+# from SOPS vars, never committed) must provide these keys:
+#   AWS_ACCESS_KEY_ID     — R2 API token access key ID
+#   AWS_SECRET_ACCESS_KEY — R2 API token secret
+#   AWS_ENDPOINTS         — https://<account-id>.r2.cloudflarestorage.com
+# `backupTarget` uses S3 URL syntax `s3://<bucket>@<region>/<path>/` — the trailing slash is
+# mandatory (Longhorn silently mis-parses the target without it). R2 has no AWS-style regions,
+# so `auto` is used; Longhorn only reaches R2 through the endpoint override above.
+# Backblaze B2 swap: same Secret shape (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_ENDPOINTS),
+# change `backupTarget`'s region to the B2 bucket's actual region (e.g. `eu-central-003`) and
+# `AWS_ENDPOINTS` to `https://s3.<region>.backblazeb2.com`.
 
 defaultSettings:
   defaultReplicaCount: "2"
+  backupTarget: "s3://homelab-longhorn@auto/"
+  backupTargetCredentialSecret: "longhorn-backup-target"
 
 persistence:
   defaultClass: true
