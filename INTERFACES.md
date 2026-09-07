@@ -322,6 +322,11 @@ From `40_platform.yml` (platform):
 - `cloudflare_api_token`, `cloudflared_tunnel_token`
 - `cloudflare_account_id`, `cloudflare_tunnel_id`, `cloudflare_tunnel_api_token`
 
+From `30_longhorn.yml` (off-site backup, #64):
+- `longhorn_backup_s3_access_key_id`
+- `longhorn_backup_s3_secret_access_key`
+- `longhorn_backup_s3_endpoint` (`https://<account-id>.r2.cloudflarestorage.com` for Cloudflare R2)
+
 ---
 
 ## 8) Storage Interface
@@ -333,7 +338,7 @@ From `40_platform.yml` (platform):
 - **Default**: Yes — PVCs without `storageClassName` use Longhorn automatically
 - **Access Modes**: ReadWriteOnce (RWO), ReadWriteMany (RWX via RWX storage class)
 - **Survives**: Node failures, k3s restarts
-- **Recurring snapshots**: every Longhorn volume without a more specific recurring-job assignment is automatically covered by the daily `default`-group `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7) — local-only, does not survive PVC/Volume deletion. See DEPLOYMENT.md "Recurring Snapshots (#63)".
+- **Recurring snapshots**: every Longhorn volume without a more specific recurring-job assignment is automatically covered by the daily `default`-group `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7) — local-only, does not survive PVC/Volume deletion. See DEPLOYMENT.md "Recurring Snapshots (#63)". A second `RecurringJob` (`daily-backup`, 04:00 node-local time, retain 7) additionally uploads all `default`-group volumes to an off-site Cloudflare R2 bucket daily — every Longhorn volume except Prometheus, which is excluded via a `snapshot-only` group label. See DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" (#64).
 
 **Source of Truth**: `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml`
 

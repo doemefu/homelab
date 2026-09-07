@@ -111,6 +111,7 @@ config:
 - **Survives**: Node failures, k3s restarts
 - **Use for**: Databases and stateful workloads that need persistence
 - **Auto-snapshotted**: every Longhorn PVC is automatically covered by the daily `default`-group recurring snapshot job (retain 7) unless opted into a different group. This protects against accidental in-place data changes but not PVC/Volume deletion or node/disk failure — plan your own off-cluster backup for real DR needs. See DEPLOYMENT.md "Recurring Snapshots (#63)".
+- **Off-site backup**: every Longhorn PVC in the `default` group is additionally backed up daily to Cloudflare R2, except Prometheus (excluded on purpose, see DEPLOYMENT.md). See DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" (#64).
 
 ### Fallback: local-path
 

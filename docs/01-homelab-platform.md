@@ -94,7 +94,7 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 | Tunnel         | Cloudflare Tunnel                            |
 | Secrets        | SOPS + age                                   |
 | Storage        | Longhorn (Replication Factor 2)              |
-| Backup-Ziel    | Externer USB/SSD am Pi5, Restic              |
+| Backup-Ziel    | Externer USB/SSD am Pi5, Restic (superseded 2026-09-07 by #64 → `DEPLOYMENT.md` "Off-cluster backups") |
 | Host-Detection | Ansible Facts (Arch, RAM) + Rolle via Gruppe |
 | Home Assistant | Docker (nicht in k3s), `ha_host=mba1`        |
 | DNS            | `furchert.ch` via Cloudflare DNS             |

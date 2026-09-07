@@ -58,7 +58,10 @@ ansible-playbook infra/playbooks/10_base.yml
 # 2) k3s cluster (control-plane + workers)
 ansible-playbook infra/playbooks/20_k3s.yml
 
-# 3) Longhorn storage (default StorageClass)
+# 3) Longhorn storage (default StorageClass) — requires the three longhorn_backup_s3_*
+#    SOPS keys (see "Off-cluster backups (Longhorn BackupTarget)" below); on first rollout
+#    run 41_monitoring.yml BEFORE this step so the Prometheus volume is already excluded
+#    from the off-site backup job when it starts firing
 ansible-playbook infra/playbooks/30_longhorn.yml
 
 # 4) Platform: cert-manager, Cloudflare Tunnel, Traefik
@@ -249,9 +252,9 @@ disks/replicas as the primary data (see the SD-card root-disk risk noted in
 hardware failure or a cluster-wide incident. It also does **not** protect against deleting the
 PVC or Longhorn Volume itself — Longhorn's volume controller deletes a volume's associated
 snapshots as part of tearing the volume down, so once the volume is gone, so are its local
-snapshots; only a genuinely off-cluster backup can recover from that. Off-cluster durability (a
-Longhorn `BackupTarget` + restic restore testing) is tracked separately in #64 and not yet
-implemented.
+snapshots; only a genuinely off-cluster backup can recover from that. Off-cluster durability is
+covered by the Longhorn `BackupTarget` described in "Off-cluster backups (Longhorn BackupTarget)"
+below (#64).
 
 ```bash
 # Confirm the job exists and its spec
@@ -286,6 +289,159 @@ NOT delete the `RecurringJob` CR — `kubernetes.core.k8s` with a `definition:` 
 what's present, it doesn't prune resources removed from the playbook (unlike Flux's
 `Kustomization` pruning). Delete it explicitly if it's ever decommissioned:
 `kubectl -n longhorn-system delete recurringjobs.longhorn.io daily-snapshot`.
+
+#### Off-cluster backups (Longhorn BackupTarget → Cloudflare R2, #64)
+
+**What it protects:** a daily `backup` RecurringJob (`daily-backup`, applied by
+`infra/playbooks/30_longhorn.yml`) uploads a crash-consistent block-level copy of every Longhorn
+volume in the `default` recurring-job group to Cloudflare R2 (S3-compatible object storage) —
+that's the same 6 volumes the local `daily-snapshot` job covers minus Prometheus (see below).
+This survives node/disk failure and the loss of the PVC/Volume itself, which local snapshots
+(above) do not.
+
+**What it does not protect:** these are crash-consistent block copies, not application-consistent
+dumps — a PostgreSQL or n8n backup restored from here is exactly as consistent as pulling the
+power cord at the moment the snapshot was taken (Longhorn quiesces at the block layer, not inside
+the database). The pre-upgrade `pg_dumpall` + PVC-tarball dumps (see "Backup & Rollback for Image
+Updates") remain the application-consistent path for planned maintenance; this backup target is
+for disaster recovery, not routine point-in-time restores of a single database row.
+
+**Prometheus is excluded:** its TSDB volume (20 Gi, 14 d retention, ~35 GB actual usage including
+snapshot overhead, fully regenerable from live metrics) would by itself exceed the R2 free tier.
+`infra/playbooks/41_monitoring.yml` labels its PVC into a `snapshot-only` recurring-job group —
+it still gets local `daily-snapshot` snapshots, just not uploaded to R2.
+
+**Prerequisites** (user actions, not run by any playbook):
+1. Create an R2 bucket named `homelab-longhorn` (location hint `WEUR`) in the Cloudflare
+   dashboard.
+2. Create an R2 API token with "Object Read & Write" permission scoped to only that bucket.
+3. Add three keys to `infra/inventory/group_vars/all.sops.yml` (`sops infra/inventory/group_vars/all.sops.yml`):
+   - `longhorn_backup_s3_access_key_id` — the token's access key ID
+   - `longhorn_backup_s3_secret_access_key` — the token's secret
+   - `longhorn_backup_s3_endpoint` — `https://<account-id>.r2.cloudflarestorage.com`
+
+**Rollout order** (first-time rollout, in one sitting):
+
+```bash
+# 1) Monitoring first — labels the Prometheus PVC out of the default backup group
+ansible-playbook infra/playbooks/41_monitoring.yml
+
+# Verify the label landed BEFORE running 30_longhorn.yml — see "Verification" below
+
+# 2) Longhorn — creates the credential Secret, sets the backup target, adds daily-backup
+ansible-playbook infra/playbooks/30_longhorn.yml
+
+# 3) Base role — ships the updated homelab-backup.sh (restic now covers the k3s datastore too)
+ansible-playbook infra/playbooks/10_base.yml -l raspi5
+```
+
+Running `30_longhorn.yml` before `41_monitoring.yml` on a fresh rollout would let the first
+04:00 `daily-backup` run include the (unlabeled) Prometheus volume — always verify the
+Prometheus labels are in place before running `30_longhorn.yml`.
+
+**Verification:**
+
+```bash
+# Prometheus volume carries the snapshot-only label, not the default recurring-job label
+kubectl -n longhorn-system get volumes.longhorn.io --show-labels | grep prometheus
+
+# Exactly 6 volumes remain in the default group (5 apps + grafana; Prometheus excluded)
+kubectl -n longhorn-system get volumes.longhorn.io -l recurring-job-group.longhorn.io/default=enabled --no-headers | wc -l
+
+# Backup target is set and becomes available (poll every few seconds, should flip within ~300s)
+kubectl -n longhorn-system get settings.longhorn.io backup-target -o jsonpath='{.value}'
+kubectl -n longhorn-system get backuptargets.longhorn.io default -o jsonpath='{.status.available}'
+
+# After the first daily-backup run: 6 backup volumes, not 7 (Prometheus stays excluded)
+kubectl -n longhorn-system get backupvolumes.longhorn.io
+
+# Individual backups reach Completed
+kubectl -n longhorn-system get backups.longhorn.io
+```
+
+**Manual / one-off backup** (same cron-edit pattern as the `daily-snapshot` smoke test above):
+temporarily edit `daily-backup`'s `spec.cron` to `"* * * * *"`
+(`kubectl -n longhorn-system edit recurringjobs.longhorn.io daily-backup`), wait for a `Backup`
+to reach `Completed` (`kubectl -n longhorn-system get backups.longhorn.io`), then revert `cron`
+back to `"0 4 * * *"` (or re-run `ansible-playbook infra/playbooks/30_longhorn.yml`).
+
+**Restore procedure (without the Longhorn UI):**
+
+```bash
+# 1) Find the backup and its size
+kubectl -n longhorn-system get backup.longhorn.io <backup-name> -o jsonpath='{.status.url}'
+kubectl -n longhorn-system get backup.longhorn.io <backup-name> -o jsonpath='{.status.volumeSize}'
+
+# 2) Create a new Volume restoring from that backup — a NEW name, never the original
+cat <<EOF | kubectl apply -f -
+apiVersion: longhorn.io/v1beta2
+kind: Volume
+metadata:
+  name: <restore-test-volume>
+  namespace: longhorn-system
+spec:
+  fromBackup: "<url-from-step-1>"
+  size: "<volumeSize-from-step-1>"
+  numberOfReplicas: 2
+  frontend: blockdev
+EOF
+
+# 3) Wait for the restore to finish (restoreRequired flips to false, volume state Detached)
+kubectl -n longhorn-system get volumes.longhorn.io <restore-test-volume> -o jsonpath='{.status.restoreRequired}'
+kubectl -n longhorn-system get volumes.longhorn.io <restore-test-volume> -o jsonpath='{.status.state}'
+
+# 4) Wire up a PV -> PVC pointing at the restored volume
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: <restore-test-volume>
+spec:
+  capacity:
+    storage: <volumeSize-from-step-1>
+  accessModes: ["ReadWriteOnce"]
+  csi:
+    driver: driver.longhorn.io
+    volumeHandle: <restore-test-volume>
+    fsType: ext4
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: <restore-test-volume>
+  namespace: longhorn-system
+spec:
+  accessModes: ["ReadWriteOnce"]
+  volumeName: <restore-test-volume>
+  storageClassName: ""
+  resources:
+    requests:
+      storage: <volumeSize-from-step-1>
+EOF
+
+# 5) Mount with a throwaway busybox pod and compare a checksum against the live volume
+kubectl -n longhorn-system run restore-check --rm -it --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.36","command":["sh"],"stdin":true,"tty":true,"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"<restore-test-volume>"}}]}}' \
+  -- sh -c 'sha256sum /data/<known-file>'
+
+# 6) Delete PVC -> PV -> Volume THE SAME DAY: a restored volume re-enters the `default`
+#    recurring-job group (it has no group label of its own) and would otherwise get
+#    snapshotted/backed up overnight as if it were live production data.
+kubectl -n longhorn-system delete pvc <restore-test-volume>
+kubectl delete pv <restore-test-volume>
+kubectl -n longhorn-system delete volumes.longhorn.io <restore-test-volume>
+```
+
+**Restore test log:**
+
+| Date | Volume | Backup | Method | Result |
+|------|--------|--------|--------|--------|
+| — | — | — | — | pending — filled at rollout |
+
+**Backblaze B2 swap:** change `backupTarget` in `cluster/values/longhorn.yaml` from
+`s3://homelab-longhorn@auto/` to `s3://<bucket>@<b2-region>/` (e.g. `eu-central-003`) and set
+`longhorn_backup_s3_endpoint` to `https://s3.<b2-region>.backblazeb2.com` — the Secret shape
+(`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_ENDPOINTS`) is identical.
 
 ---
 
@@ -1018,23 +1174,35 @@ ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"
 
 #### Restore Test (Non-Destructive)
 
+Restic now covers `/etc/rancher/k3s` (kubeconfig + certs), `/var/lib/rancher/k3s/server/token`,
+and a consistent copy of the k3s SQLite (kine) datastore (`k3s-state.db`, produced each run by
+`homelab-backup.sh` via sqlite3's online backup API — see `infra/roles/storage/tasks/main.yml`).
+Restore into `/var/lib/backup/restore-test` (mode `0700`, root-only) — **the restored
+`k3s-state.db` contains every cluster Secret in plaintext**, so treat the restore target like a
+secret itself and always run the cleanup step below.
+
 ```bash
 # List snapshots
 ssh raspi5 "sudo restic snapshots \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password"
 
-# Restore to /tmp/restore-test
+# Restore to /var/lib/backup/restore-test (root-only)
+ssh raspi5 "sudo mkdir -p -m 0700 /var/lib/backup/restore-test"
 ssh raspi5 "sudo restic restore latest \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password \
-  --target /tmp/restore-test"
+  --target /var/lib/backup/restore-test"
 
-# Verify k3s etcd snapshots
-ssh raspi5 "ls -lh /tmp/restore-test/var/lib/rancher/k3s/server/db/snapshots/"
+# Verify the restored k3s config + token are present
+ssh raspi5 "ls -lh /var/lib/backup/restore-test/etc/rancher/k3s/"
+ssh raspi5 "ls -lh /var/lib/backup/restore-test/var/lib/rancher/k3s/server/token"
 
-# Cleanup
-ssh raspi5 "sudo rm -rf /tmp/restore-test"
+# Integrity check on the restored SQLite datastore copy
+ssh raspi5 "sudo python3 -c \"import sqlite3; print(sqlite3.connect('/var/lib/backup/restore-test/var/lib/backup/k3s-state.db').execute('PRAGMA integrity_check').fetchone())\""
+
+# Cleanup — MANDATORY, do not leave a plaintext copy of every cluster Secret on disk
+ssh raspi5 "sudo rm -rf /var/lib/backup/restore-test"
 ```
 
 #### Full Restore (Disaster Recovery)
@@ -1045,11 +1213,16 @@ Only when k3s is stopped and node is freshly provisioned:
 # Stop k3s
 ssh raspi5 "sudo systemctl stop k3s"
 
-# Restore from specific snapshot
+# Restore from a specific snapshot
 ssh raspi5 "sudo restic restore <snapshot-id> \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password \
   --target /"
+
+# Restic restores the datastore copy to its backed-up path, not the live datastore location —
+# put it back, and drop any stale WAL/SHM files so k3s starts from a clean checkpoint
+ssh raspi5 "sudo cp /var/lib/backup/k3s-state.db /var/lib/rancher/k3s/server/db/state.db"
+ssh raspi5 "sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/rancher/k3s/server/db/state.db-shm"
 
 # Start k3s
 ssh raspi5 "sudo systemctl start k3s"
@@ -1188,10 +1361,11 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 
 ### Full Cluster Reset
 
-1. **Backup etcd snapshots** from raspi5:
-   ```bash
-   scp ansible@raspi5:/var/lib/rancher/k3s/server/db/snapshots/* ./backup-$(date +%Y%m%d)/
-   ```
+1. **Backup the k3s datastore** from raspi5 — k3s runs the embedded SQLite (kine) datastore, not
+   etcd, so there is no `db/snapshots/` directory to copy; use the restic restore instead (see
+   "Backup (Restic)" → "Restore Test (Non-Destructive)" above) to pull a recent
+   `/etc/rancher/k3s`, `server/token`, and `k3s-state.db` onto your workstation before wiping
+   the node.
 
 2. **Wipe k3s from all nodes**:
    ```bash
@@ -1210,11 +1384,12 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify all pods Running | Daily | `kubectl get pods -A` |
 | Check node resource usage | Daily | `kubectl top nodes` |
 | Verify Longhorn volume health | Daily | `kubectl get volumes -n longhorn-system` |
-| Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` |
+| Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
 | Verify Longhorn recurring snapshot job fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" above) |
-| Test backup restore | Monthly | Non-destructive restore test (see above) |
+| Verify a Longhorn backup landed on R2 | Weekly | `kubectl -n longhorn-system get backups.longhorn.io` (see "Off-cluster backups (Longhorn BackupTarget)" above) |
+| Test backup restore | Monthly | Longhorn restore test (see "Off-cluster backups") + restic non-destructive restore test (see "Backup (Restic)") |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
 | Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |
@@ -1229,9 +1404,9 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
-| `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
+| `30_longhorn.yml` | Longhorn storage system, default StorageClass, daily recurring snapshot job, and off-site backup target + daily backup job (#64) | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
-| `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
+| `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) + Prometheus PVC snapshot-only label (#64) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |
 | `51_homeassistant.yml` | Home Assistant | 3-5 min | Yes |
 | `52_n8n.yml` | n8n deployment | 2-3 min | Yes |
