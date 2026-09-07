@@ -290,7 +290,6 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `cloudflare-api-token` | `platform` | Cloudflare API token | cert-manager DNS-01 challenges | Set in `40_platform.yml` |
-| `longhorn-backup-target` | `longhorn-system` | R2 API token (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) + `AWS_ENDPOINTS` | Longhorn backup target (`daily-backup` RecurringJob, #64) | Set by `30_longhorn.yml` from `longhorn_backup_s3_*`; rotate by issuing a new R2 token, updating the three SOPS vars, re-running `30_longhorn.yml`, then checking `kubectl -n longhorn-system get backuptargets.longhorn.io default -o jsonpath='{.status.available}'` is `true` |
 
 ### Required SOPS Variables
 
@@ -323,11 +322,6 @@ From `40_platform.yml` (platform):
 - `cloudflare_api_token`, `cloudflared_tunnel_token`
 - `cloudflare_account_id`, `cloudflare_tunnel_id`, `cloudflare_tunnel_api_token`
 
-From `30_longhorn.yml` (off-site backup, #64):
-- `longhorn_backup_s3_access_key_id`
-- `longhorn_backup_s3_secret_access_key`
-- `longhorn_backup_s3_endpoint` (`https://<account-id>.r2.cloudflarestorage.com` for Cloudflare R2)
-
 ---
 
 ## 8) Storage Interface
@@ -339,7 +333,8 @@ From `30_longhorn.yml` (off-site backup, #64):
 - **Default**: Yes — PVCs without `storageClassName` use Longhorn automatically
 - **Access Modes**: ReadWriteOnce (RWO), ReadWriteMany (RWX via RWX storage class)
 - **Survives**: Node failures, k3s restarts
-- **Recurring snapshots**: a `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7, `groups: [default, snapshot-only]`) covers every Longhorn volume — the 6 stateful `apps`/`monitoring` volumes with no more specific recurring-job assignment of their own via the `default` group, plus the Prometheus volume via the extra `snapshot-only` group — local-only, does not survive PVC/Volume deletion. See DEPLOYMENT.md "Recurring Snapshots (#63)". A second `RecurringJob` (`daily-backup`, 04:00 node-local time, retain 7, `groups: [default]`) additionally uploads those same 6 `default`-group volumes to an off-site Cloudflare R2 bucket daily; Prometheus is excluded because it is not a member of the `default` group. See DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" (#64).
+- **Recurring snapshots**: every Longhorn volume without a more specific recurring-job assignment is automatically covered by the daily `default`-group `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7) — local-only, does not survive PVC/Volume deletion. See DEPLOYMENT.md "Recurring Snapshots (#63)".
+- **Off-cluster backups**: Longhorn's backup target is an NFS export on the operator's Mac (`nfs://192.168.1.78:/Users/dominic/informatik/homelab/backups/longhorn`, set in `cluster/values/longhorn.yaml`). Backups are triggered manually with `scripts/longhorn-backup.sh` — there is no recurring backup job, and the target reports `available=false` whenever the Mac is off or off-LAN. See DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" (#64).
 
 **Source of Truth**: `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml`
 

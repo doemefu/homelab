@@ -59,8 +59,8 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **Primary**: Longhorn v1.7.2 (distributed block storage, RF=2, default StorageClass)
 - **Fallback**: local-path (non-default, for node-local/ephemeral storage)
 - **Backup**: Restic (daily at 03:00 on raspi5, repository on root filesystem; covers `/etc/rancher/k3s`, the k3s server token, and a consistent copy of the k3s SQLite datastore)
-- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default, snapshot-only]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui/grafana via `default`, plus Prometheus via the extra `snapshot-only` group); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
-- **Off-site backup target**: Longhorn RecurringJob `daily-backup` uploads all `default`-group volumes except Prometheus to Cloudflare R2 daily at 04:00, retain 7 — see DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" (#64)
+- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui plus the two monitoring volumes); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
+- **Off-cluster backup target**: NFS export on the operator's Mac, triggered manually via `scripts/longhorn-backup.sh` (no nightly job — the Mac is not always on); LAN-only, not off-site — see DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" (#64)
 
 ### Observability
 - **Metrics**: kube-prometheus-stack v69.3.1 (Prometheus operator)
@@ -102,7 +102,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
 | **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch}` |
-| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default, snapshot-only]`) + off-site Longhorn backup target on Cloudflare R2 (daily 04:00, retain 7, #64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `infra/playbooks/41_monitoring.yml`, `cluster/values/longhorn.yaml` |
+| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`) + manual off-cluster Longhorn backups to an NFS export on the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml`, `scripts/longhorn-backup.sh` |
 
 ---
 
@@ -199,7 +199,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | Item | Description | Status |
 |------|-------------|--------|
 | raspi4 SSH tunnel | Cloudflare Tunnel ingress not yet configured for raspi4 | ⚠️ Open (see below) |
-| Off-cluster backups + restore tests | Off-cluster backup target (Longhorn BackupTarget on Cloudflare R2) + restic datastore fix implemented via #64 — see [DEPLOYMENT.md](DEPLOYMENT.md) "Off-cluster backups (Longhorn BackupTarget)" | 🚧 Implemented — restore test pending rollout |
+| Off-cluster backups + restore tests | Manual Longhorn backups to an NFS export on the operator's Mac + restic datastore fix implemented via #64 — see [DEPLOYMENT.md](DEPLOYMENT.md) "Off-cluster backups (Longhorn BackupTarget)" | 🚧 Implemented — restore test pending rollout |
 | `KubeControllerManagerDown` / `KubeSchedulerDown` / `KubeProxyDown` | Fired as permanent critical false positives since install (2026-05-16) — k3s embeds these 3 components with zero exposed scrape targets | ✅ Resolved (#68) — scrape configs + alert rule groups disabled, see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions) |
 
 > **Note on raspi4 SSH**: The SSH tunnel for raspi4 (`ssh-raspi4.furchert.ch → 192.168.1.163:22`) is not yet configured in `40_platform.yml`. To add: include `- hostname: ssh-raspi4.furchert.ch, service: ssh://192.168.1.163:22` in the ingress list, then re-run `ansible-playbook infra/playbooks/40_platform.yml`.

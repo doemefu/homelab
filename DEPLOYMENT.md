@@ -32,7 +32,7 @@ Before starting any deployment or upgrade, verify:
 ### Secrets Check
 
 - [ ] `infra/inventory/group_vars/all.sops.yml` exists and is decrypted
-- [ ] All required variables set (see INTERFACES.md § 7 "Required SOPS Variables" — including the three `longhorn_backup_s3_*` keys for `30_longhorn.yml`)
+- [ ] All required variables set (see INTERFACES.md § 7 "Required SOPS Variables")
 - [ ] SOPS key available: `export SOPS_AGE_KEY_FILE=~/.config/age/homelab.key`
 
 ### External Dependencies
@@ -58,13 +58,11 @@ ansible-playbook infra/playbooks/10_base.yml
 # 2) k3s cluster (control-plane + workers)
 ansible-playbook infra/playbooks/20_k3s.yml
 
-# 3) Longhorn storage (default StorageClass) — requires the three longhorn_backup_s3_*
-#    SOPS keys (see "Off-cluster backups (Longhorn BackupTarget)" below). Fresh bootstrap
-#    (this numbered order): 30 runs before 41 because Longhorn must already be the default
-#    StorageClass before the Prometheus Operator can provision a PVC at all — just make sure
-#    41_monitoring.yml (step 5 below) completes before the first 04:00 daily-backup window
-#    fires. Retrofitting the backup target onto an already-running cluster instead runs
-#    41 before 30 — see "Off-cluster backups (Longhorn BackupTarget)" below.
+# 3) Longhorn storage (default StorageClass) + off-cluster backup target. No SOPS keys are
+#    involved (the target is an NFS export, not object storage). The export on the operator's
+#    Mac should exist before this runs; if it doesn't, the playbook still succeeds and the
+#    backup target simply reports unavailable until the Mac is reachable — see
+#    "Off-cluster backups (Longhorn BackupTarget)" below.
 ansible-playbook infra/playbooks/30_longhorn.yml
 
 # 4) Platform: cert-manager, Cloudflare Tunnel, Traefik
@@ -245,14 +243,12 @@ takes a snapshot of every Longhorn volume once a day:
   mechanism the restic cron (a plain crontab entry, also node-local) relies on.
 - **Retention:** 7 snapshots per volume (Longhorn prunes older ones automatically).
 - **Concurrency:** 1 (snapshots run one volume at a time).
-- **Coverage:** `groups: [default, snapshot-only]` — Longhorn applies a `default`-group job to
-  every volume that has no more specific recurring-job/group assignment of its own. As of
-  2026-09-07 that covers all 6 stateful `apps`/`monitoring` volumes (`postgresql`, `influxdb2`,
-  `mosquitto`, `n8n`, `open-webui`, `grafana`) with no per-volume labeling required, plus the
-  Prometheus volume via the extra `snapshot-only` group (`infra/playbooks/41_monitoring.yml`
-  labels it explicitly — see "Off-cluster backups (Longhorn BackupTarget)" below). It will
-  automatically cover any future stateful volume the same way unless that volume is later
-  opted into something more specific.
+- **Coverage:** `groups: [default]` — Longhorn applies a `default`-group job to every volume
+  that has no more specific recurring-job/group assignment of its own. As of 2026-09-07 that
+  covers all 7 stateful volumes — the 5 `apps` volumes (`postgresql`, `influxdb2`, `mosquitto`,
+  `n8n`, `open-webui`) plus the 2 `monitoring` volumes (`grafana`, `prometheus`) — with no
+  per-volume labeling required, and will automatically cover any future stateful volume the same
+  way unless it's later opted into something more specific.
 
 **This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
 disks/replicas as the primary data (see the SD-card root-disk risk noted in
@@ -301,99 +297,109 @@ what's present, it doesn't prune resources removed from the playbook (unlike Flu
 
 #### Off-cluster backups (Longhorn BackupTarget)
 
-**What it protects:** a daily `backup` RecurringJob (`daily-backup`, applied by
-`infra/playbooks/30_longhorn.yml`) uploads a crash-consistent block-level copy of every Longhorn
-volume in the `default` recurring-job group to Cloudflare R2 (S3-compatible object storage, #64)
-— the 6 volumes (`postgresql`, `influxdb2`, `mosquitto`, `n8n`, `open-webui`, `grafana`) that
-also get local snapshots via `daily-snapshot`'s `default`-group membership. Prometheus gets
-local snapshots too (via the extra `snapshot-only` group) but is excluded from this upload (see
-below). This survives node/disk failure and the loss of the PVC/Volume itself, which local
-snapshots (above) do not.
+**Target:** an NFS export on the operator's Mac —
+`nfs://192.168.1.78:/Users/dominic/informatik/homelab/backups/longhorn`, set as Longhorn's
+`backupTarget` in `cluster/values/longhorn.yaml` and applied by `infra/playbooks/30_longhorn.yml`
+(#64). NFS needs no credential Secret.
 
-**What it does not protect:** these are crash-consistent block copies, not application-consistent
-dumps — a PostgreSQL or n8n backup restored from here is exactly as consistent as pulling the
-power cord at the moment the snapshot was taken (Longhorn quiesces at the block layer, not inside
-the database). The pre-upgrade `pg_dumpall` + PVC-tarball dumps (see "Backup & Rollback for Image
-Updates") remain the application-consistent path for planned maintenance; this backup target is
-for disaster recovery, not routine point-in-time restores of a single database row.
+**Triggered manually.** There is no `backup` RecurringJob: the Mac is not always on, so a nightly
+job would spend most nights failing. Backups are taken by running `scripts/longhorn-backup.sh`
+on the Mac (see "Manual backup" below).
 
-**Prometheus is excluded:** its TSDB volume (20 Gi, 14 d retention, ~35 GB actual usage including
-snapshot overhead, fully regenerable from live metrics) would by itself exceed the R2 free tier.
-`infra/playbooks/41_monitoring.yml` labels its PVC into a `snapshot-only` recurring-job group —
-it still gets local `daily-snapshot` snapshots, just not uploaded to R2.
+**What it protects:** crash-consistent block-level copies of the selected Longhorn volumes,
+stored outside the cluster. This survives node/disk failure and the loss of the PVC/Volume
+itself, which the local `daily-snapshot` snapshots (above) do not.
 
-**Prerequisites** (user actions, not run by any playbook):
-1. Create an R2 bucket named `homelab-longhorn` (location hint `WEUR`) in the Cloudflare
-   dashboard.
-2. Create an R2 API token with "Object Read & Write" permission scoped to only that bucket.
-3. Add three keys to `infra/inventory/group_vars/all.sops.yml` (`sops infra/inventory/group_vars/all.sops.yml`):
-   - `longhorn_backup_s3_access_key_id` — the token's access key ID
-   - `longhorn_backup_s3_secret_access_key` — the token's secret
-   - `longhorn_backup_s3_endpoint` — `https://<account-id>.r2.cloudflarestorage.com`
+**What it does not protect:**
 
-**Rollout order:**
+- **Not application-consistent.** A PostgreSQL or n8n volume restored from here is exactly as
+  consistent as pulling the power cord at the moment the snapshot was taken (Longhorn quiesces at
+  the block layer, not inside the database). The pre-upgrade `pg_dumpall` + PVC-tarball dumps
+  (see "Backup & Rollback for Image Updates") remain the application-consistent path for planned
+  maintenance; this target is for disaster recovery.
+- **Not off-site.** The Mac sits in the same flat as the cluster — a fire, flood or burglary
+  takes both. Copying the backup folder to genuinely remote storage is tracked separately.
+- **Not Prometheus.** The script's default set excludes the Prometheus TSDB volume (20 Gi,
+  ~35 GB actual, 14 d retention, fully regenerable). Add it with `--pvc` if ever needed.
 
-- **Fresh bootstrap** (new cluster, following the numbered
-  [Deployment Order](#deployment-order-step-by-step) above): run the playbooks in the order
-  listed there — `30_longhorn.yml` before `41_monitoring.yml` — because Longhorn must already be
-  the default StorageClass before the Prometheus Operator can provision its PVC at all. The only
-  requirement is that `41_monitoring.yml` completes (and the Prometheus PVC carries the
-  `snapshot-only` label — see "Verification" below) before the first 04:00 `daily-backup` window
-  fires.
-- **Retrofitting onto an already-running cluster** (this rollout — Longhorn and Prometheus are
-  already deployed): run `41_monitoring.yml` before `30_longhorn.yml` instead, in one sitting, so
-  the Prometheus volume is already excluded from the `default` group before `daily-backup` is
-  created:
+**Prerequisites** (user actions on the Mac, not run by any playbook):
+
+1. The backup folder exists and is outside every git repo:
+   `/Users/dominic/informatik/homelab/backups/longhorn`.
+2. Export it read-write to the LAN. macOS starts `nfsd` automatically once `/etc/exports` has
+   entries:
+   ```bash
+   echo '/Users/dominic/informatik/homelab/backups/longhorn -network 192.168.1.0 -mask 255.255.255.0 -mapall=dominic:staff' | sudo tee -a /etc/exports
+   sudo nfsd enable && sudo nfsd update
+   showmount -e localhost   # must list the export path
+   ```
+   `-mapall=dominic:staff` makes the cluster's root-owned writes land as the Mac user, so the
+   files stay readable and deletable without `sudo`.
+3. Give the Mac a **DHCP reservation** for `192.168.1.78` on the router — the IP is hardcoded in
+   `cluster/values/longhorn.yaml`, and Longhorn cannot follow a lease change.
+4. macOS firewall: if "Block all incoming connections" is enabled, `nfsd` is unreachable even
+   while running. Turn it off, or allow incoming connections for `nfsd`.
+
+**Rollout** — only `30_longhorn.yml` is affected; the ordering constraints of the surrounding
+playbooks are unchanged:
 
 ```bash
-# 1) Monitoring first — labels the Prometheus PVC out of the default backup group
-ansible-playbook infra/playbooks/41_monitoring.yml
+# Dry-run first. Check mode needs the chart repo locally, otherwise the Helm task errors out.
+helm repo add longhorn https://charts.longhorn.io
+ansible-playbook infra/playbooks/30_longhorn.yml --check --diff
 
-# Verify the label landed BEFORE running 30_longhorn.yml — see "Verification" below
-
-# 2) Longhorn — creates the credential Secret, sets the backup target, adds daily-backup
 ansible-playbook infra/playbooks/30_longhorn.yml
-
-# 3) Base role — ships the updated homelab-backup.sh (restic now covers the k3s datastore too)
-ansible-playbook infra/playbooks/10_base.yml -l raspi5
 ```
-
-The fresh-bootstrap order (30 before 41) is mandatory: if `41_monitoring.yml` runs before
-Longhorn is the default StorageClass, the Prometheus PVC lands on `local-path` and no label can
-move it to Longhorn afterwards. The reverse order (41 before 30) is only for retrofitting the
-backup target onto a running cluster. In both cases, check "Verification" below and confirm the
-Prometheus volume's labels are in place before `30_longhorn.yml`'s `daily-backup` job can run.
 
 **Verification:**
 
 ```bash
-# Prometheus volume carries the snapshot-only label, not the default recurring-job label.
-# Longhorn volume name = PV name `pvc-<uuid>`, not the PVC name — resolve it first.
-PROM_VOL=$(kubectl -n monitoring get pvc prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0 -o jsonpath='{.spec.volumeName}')
-kubectl -n longhorn-system get volumes.longhorn.io "$PROM_VOL" --show-labels
-# expect recurring-job-group.longhorn.io/snapshot-only=enabled present and .../default=enabled absent
-
-# Exactly 6 volumes remain in the default group (5 apps + grafana; Prometheus excluded)
-kubectl -n longhorn-system get volumes.longhorn.io -l recurring-job-group.longhorn.io/default=enabled --no-headers | wc -l
-
-# Backup target is set and becomes available (poll every few seconds, should flip within ~300s)
+# The setting matches cluster/values/longhorn.yaml
 kubectl -n longhorn-system get settings.longhorn.io backup-target -o jsonpath='{.value}'
+
+# The target becomes available within one poll interval (300 s) once the Mac is reachable
 kubectl -n longhorn-system get backuptargets.longhorn.io default -o jsonpath='{.status.available}'
 
-# After the first daily-backup run: 6 backup volumes, not 7 (Prometheus stays excluded)
-kubectl -n longhorn-system get backupvolumes.longhorn.io
+# Details when it stays false (wrong export path, firewall, Mac asleep, ...)
+kubectl -n longhorn-system get backuptargets.longhorn.io default -o yaml
 
-# Individual backups reach Completed
+# After a manual backup run
+kubectl -n longhorn-system get backupvolumes.longhorn.io
 kubectl -n longhorn-system get backups.longhorn.io
 ```
 
-**Manual / one-off backup** (same cron-edit pattern as the `daily-snapshot` smoke test above):
-temporarily edit `daily-backup`'s `spec.cron` to `"* * * * *"`
-(`kubectl -n longhorn-system edit recurringjobs.longhorn.io daily-backup`), wait for a `Backup`
-to reach `Completed` (`kubectl -n longhorn-system get backups.longhorn.io`), then revert `cron`
-back to `"0 4 * * *"` (or re-run `ansible-playbook infra/playbooks/30_longhorn.yml`).
+`available=false` while the Mac is off or off-LAN is **expected and harmless** — nothing on the
+cluster depends on the target, and it flips back within 300 s once the Mac returns.
 
-**Restore procedure (without the Longhorn UI):**
+**Manual backup:**
+
+```bash
+# From this repo on the Mac, with the Mac on the LAN and nfsd running:
+./scripts/longhorn-backup.sh              # default set, keep 7 backups per volume
+./scripts/longhorn-backup.sh --dry-run    # resolve + print, change nothing
+./scripts/longhorn-backup.sh --help       # all options
+./scripts/longhorn-backup.sh --pvc apps/n8n-data --retain 3
+```
+
+- **When:** at least monthly, and before every cluster or app upgrade (in addition to the
+  application-consistent pre-upgrade dumps).
+- **How it works:** per PVC it resolves the Longhorn volume from `spec.volumeName`, creates a
+  `Snapshot` CR, waits for `readyToUse`, creates a `Backup` CR referencing that snapshot, waits
+  for `Completed`, prunes old backups, then deletes the snapshot again (`--keep-snapshot` keeps
+  it, which makes the next run's delta computation cheaper).
+- **Retention:** `--retain N` (default 7) keeps the N newest *completed* backups **per volume**
+  that carry the label `homelab.furchert.ch/manual-backup=true`. Older ones are deleted.
+  **Deleting a Backup CR also deletes its data on the target** — Longhorn's backup controller
+  removes the remote data when the CR disappears. Backups that Longhorn re-imported from the
+  target (for example after a cluster rebuild) do not carry the label and are never pruned
+  automatically.
+- **Preflight:** the script refuses to run unless `nfsd` is running and exports the path,
+  `kubectl` reaches the cluster, the cluster's `backup-target` setting matches the script's
+  expectation, and `backuptargets.longhorn.io/default` reports `available=true` (it waits up to
+  330 s for the 300 s poll interval).
+
+**Restore procedure (without the Longhorn UI)** — the Mac must be on the LAN and exporting, so
+Longhorn can read the backup:
 
 ```bash
 # 1) Find the backup and its size
@@ -470,7 +476,7 @@ RESTORED=$(kubectl -n longhorn-system run restore-check --rm -i --image=busybox:
 
 # 8) Delete PVC -> PV -> Volume THE SAME DAY: a restored volume re-enters the `default`
 #    recurring-job group (it has no group label of its own) and would otherwise get
-#    snapshotted/backed up overnight as if it were live production data.
+#    snapshotted overnight as if it were live production data.
 kubectl -n longhorn-system delete pvc <restore-test-volume>
 kubectl delete pv <restore-test-volume>
 kubectl -n longhorn-system delete volumes.longhorn.io <restore-test-volume>
@@ -482,11 +488,6 @@ step 7 above for each run, so a mismatch is auditable after the fact, not just a
 | Date | Volume | Backup | Method | Hashes (live / restored) | Result |
 |------|--------|--------|--------|---------------------------|--------|
 | — | — | — | — | — | pending — filled at rollout |
-
-**Backblaze B2 swap:** change `backupTarget` in `cluster/values/longhorn.yaml` from
-`s3://homelab-longhorn@auto/` to `s3://<bucket>@<b2-region>/` (e.g. `eu-central-003`) and set
-`longhorn_backup_s3_endpoint` to `https://s3.<b2-region>.backblazeb2.com` — the Secret shape
-(`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_ENDPOINTS`) is identical.
 
 ---
 
@@ -1433,7 +1434,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
 | Verify Longhorn recurring snapshot job fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" above) |
-| Verify a Longhorn backup landed on R2 | Weekly | `kubectl -n longhorn-system get backups.longhorn.io` (see "Off-cluster backups (Longhorn BackupTarget)" above) |
+| Run a manual Longhorn backup | Monthly, and before every cluster/app upgrade | `./scripts/longhorn-backup.sh` on the Mac (see "Off-cluster backups (Longhorn BackupTarget)" above) |
 | Test backup restore | Monthly | Longhorn restore test (see "Off-cluster backups (Longhorn BackupTarget)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
@@ -1450,9 +1451,9 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
-| `30_longhorn.yml` | Longhorn storage system, default StorageClass, daily recurring snapshot job, and off-site backup target + daily backup job (#64) | 3-5 min | Yes |
+| `30_longhorn.yml` | Longhorn storage system, default StorageClass, daily recurring snapshot job, and the off-cluster backup target (#64) | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
-| `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) + Prometheus PVC snapshot-only label (#64) | 10-15 min | Yes |
+| `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |
 | `51_homeassistant.yml` | Home Assistant | 3-5 min | Yes |
 | `52_n8n.yml` | n8n deployment | 2-3 min | Yes |
