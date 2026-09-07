@@ -105,6 +105,38 @@
 
       logger -t "homelab-backup" "Backup gestartet"
 
+      # Consistent copy of the k3s SQLite (kine) datastore via sqlite3's online backup API
+      # (#64), taken before restic runs so the snapshot isn't torn by a concurrent writer.
+      # umask 077 + the EXIT trap ensure the copy — which contains every cluster Secret in
+      # plaintext — is never created world-readable and never survives past this run once
+      # restic has backed it up.
+      umask 077
+      SRC="{{ storage_k3s_state_db }}"
+      COPY="{{ storage_k3s_state_copy }}"
+      TMP="${COPY}.tmp"
+      rm -f "$TMP"
+      trap 'rm -f "$TMP" "$COPY"' EXIT
+
+      if [ -f "$SRC" ]; then
+      python3 - "$SRC" "$TMP" <<'PY' || { logger -p user.err -t homelab-backup "k3s datastore copy failed"; exit 1; }
+      {% raw %}
+      import sqlite3
+      import sys
+
+      src, tmp = sys.argv[1:3]
+      source = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+      dest = sqlite3.connect(tmp)
+      with dest:
+          source.backup(dest, pages=-1)
+      dest.close()
+      source.close()
+      {% endraw %}
+      PY
+      mv "$TMP" "$COPY"
+      else
+      logger -p user.warning -t homelab-backup "k3s datastore not found at $SRC, skipping"
+      fi
+
       restic backup --repo "${REPO}" {{ storage_backup_paths | join(' ') }}
 
       restic forget --repo "${REPO}" \
