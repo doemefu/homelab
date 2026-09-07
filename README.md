@@ -50,7 +50,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch)
 
 ### Kubernetes Platform
-- **Distribution**: k3s v1.32.2+k3s1 (lightweight, embedded etcd, ServiceLB)
+- **Distribution**: k3s v1.32.2+k3s1 (lightweight, embedded SQLite datastore on the single control plane, ServiceLB)
 - **Ingress**: Traefik (with Cloudflare Tunnel)
 - **TLS**: cert-manager v1.17.1 with Let's Encrypt (DNS-01 challenge via Cloudflare)
 - **CNI**: Flannel (VXLAN overlay)

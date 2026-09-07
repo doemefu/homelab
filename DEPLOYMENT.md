@@ -358,9 +358,11 @@ ansible-playbook infra/playbooks/30_longhorn.yml
 ansible-playbook infra/playbooks/10_base.yml -l raspi5
 ```
 
-Either order works as long as the Prometheus volume's labels are verified in place before
-`30_longhorn.yml`'s `daily-backup` job has a chance to run against it — always check
-"Verification" below before trusting either rollout to have excluded Prometheus correctly.
+The fresh-bootstrap order (30 before 41) is mandatory: if `41_monitoring.yml` runs before
+Longhorn is the default StorageClass, the Prometheus PVC lands on `local-path` and no label can
+move it to Longhorn afterwards. The reverse order (41 before 30) is only for retrofitting the
+backup target onto a running cluster. In both cases, check "Verification" below and confirm the
+Prometheus volume's labels are in place before `30_longhorn.yml`'s `daily-backup` job can run.
 
 **Verification:**
 
@@ -461,8 +463,10 @@ RESTORED=$(kubectl -n longhorn-system run restore-check --rm -i --image=busybox:
   --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.36","command":["sh","-c"],"args":["sha256sum /data/<known-file>"],"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"<restore-test-volume>"}}]}}' \
   | awk '{print $1}')
 
-# 7) Compare — fail loudly on a mismatch instead of eyeballing two hashes side by side
-[ "$LIVE" = "$RESTORED" ] || echo "MISMATCH: live=$LIVE restored=$RESTORED"
+# 7) Compare — exit non-zero on a missing hash (kubectl failed) or a mismatch, so the step
+#    cannot "pass" by printing a warning
+[ -n "$LIVE" ] && [ -n "$RESTORED" ] || { echo "hash missing (kubectl failed?): live=$LIVE restored=$RESTORED"; exit 1; }
+[ "$LIVE" = "$RESTORED" ] || { echo "MISMATCH: live=$LIVE restored=$RESTORED"; exit 1; }
 
 # 8) Delete PVC -> PV -> Volume THE SAME DAY: a restored volume re-enters the `default`
 #    recurring-job group (it has no group label of its own) and would otherwise get
