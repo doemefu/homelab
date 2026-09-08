@@ -514,9 +514,13 @@ comp_postgresql() {
 
 comp_influxdb2() {
   log "      influx backup (bolt + engine + SQL metadata store)"
-  # shellcheck disable=SC2016  # the admin token must be expanded by the pod's shell
+  # `influx backup` exits 0 even when the server answers 404 for a shard (it logs
+  # "Shard N removed during backup" and drops it), so the archive is only trusted when every
+  # shard directory on disk has a matching shard archive in the backup. Precreated but still
+  # empty shard groups have no directory and are expected to be skipped.
+  # shellcheck disable=SC2016  # the admin token and the engine path must be expanded by the pod's shell
   if ! stream_to_file "${RUN_DIR}/influxdb2-backup.tgz" \
-       exec -n "$APPS_NS" "$INFLUX_POD" -- sh -c 'rm -rf /tmp/influx-backup && influx backup /tmp/influx-backup --token "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN" >/dev/null && tar czf - -C /tmp influx-backup && rm -rf /tmp/influx-backup'; then
+       exec -n "$APPS_NS" "$INFLUX_POD" -- sh -c 'set -e; rm -rf /tmp/influx-backup; influx backup /tmp/influx-backup --token "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN" >/dev/null; on_disk=$(find "${INFLUXD_ENGINE_PATH:-/var/lib/influxdb2/engine}/data" -mindepth 3 -maxdepth 3 -type d -path "*/autogen/*" | wc -l); in_backup=$(ls /tmp/influx-backup/*.tar.gz 2>/dev/null | wc -l); echo "influx backup: ${on_disk} shard(s) on disk, ${in_backup} in the backup" >&2; [ "$on_disk" -eq "$in_backup" ] || { echo "influx backup incomplete: shard count mismatch" >&2; exit 1; }; tar czf - -C /tmp influx-backup; rm -rf /tmp/influx-backup'; then
     record influxdb2 "influxdb2-backup.tgz" "0" "FAILED"
     return 1
   fi

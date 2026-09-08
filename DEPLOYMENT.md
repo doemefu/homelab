@@ -209,8 +209,9 @@ Longhorn writes permanently to `/var/lib/longhorn` (root SD card on Pis). Since 
 repository — which lives on the same SD card — also ingests a ~710 MB k3s datastore copy every
 day (deduplicated by restic; retention 7 daily / 4 weekly / 6 monthly), adding to the root-disk
 pressure this section already tracks. `scripts/backup-app-data.sh` adds a transient consumer on
-top: `influx backup` stages a full copy of the InfluxDB data (~240 MB today) under `/tmp` inside
-the `influxdb2` pod — the node's root disk — before it is streamed out and removed again.
+top: `influx backup` stages a full copy of the InfluxDB data (164 KB today — Longhorn's
+`actualSize` of ~240 MB counts allocated replica blocks, not data) under `/tmp` inside the
+`influxdb2` pod — the node's root disk — before it is streamed out and removed again.
 
 ```bash
 # Check free space on root (min 10GB recommended)
@@ -978,7 +979,7 @@ backups and for every restore.
 | Component | Artifacts | Consistency |
 |-----------|-----------|-------------|
 | `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`) | application-consistent (`pg_dumpall --clean --if-exists`, `pg_dump -Fc`) |
-| `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`) |
+| `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`); the run fails if a shard directory on disk has no matching shard archive |
 | `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
 | `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
 | `mosquitto` | `mosquitto.db` | flushed with `kill -USR1` before copying |
@@ -1117,19 +1118,24 @@ kubectl -n monitoring delete pod restore-test-helper --wait=true
 
 # 5) Hash the same file from the restored volume. The checksum must live inside the container
 #    overrides (command + args): kubectl run treats anything after `--` as extra arguments to
-#    the image's entrypoint, so a bare `-- sha256sum ...` is silently dropped. --quiet plus
-#    `2>/dev/null | tail -1` strips kubectl's "pod deleted" noise from the captured output.
-RESTORED=$(kubectl -n monitoring run restore-check --rm -i --quiet --image=busybox:1.37.0 --restart=Never \
+#    the image's entrypoint, so a bare `-- sha256sum ...` is silently dropped. Do not capture
+#    the hash with `--rm -i`: `kubectl run -i` can lose the output of a container that exits
+#    within a second (the attach loses the race; seen on 2026-09-08, empty hash on the first
+#    invocation while the node still pulled the image). Letting the pod run to completion and
+#    reading its logs is deterministic.
+kubectl -n monitoring run restore-check --image=busybox:1.37.0 --restart=Never \
   --pod-running-timeout=120s \
-  --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.37.0","command":["sh","-c"],"args":["sha256sum /data/grafana.db"],"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"restore-test"}}]}}' \
-  2>/dev/null | tail -1 | awk '{print $1}')
+  --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.37.0","command":["sh","-c"],"args":["sha256sum /data/grafana.db"],"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"restore-test"}}]}}'
+kubectl -n monitoring wait --for=jsonpath='{.status.phase}'=Succeeded pod/restore-check --timeout=120s
+RESTORED=$(kubectl -n monitoring logs restore-check | tail -1 | awk '{print $1}')
+kubectl -n monitoring delete pod restore-check --wait=false
 
 # 6) Compare — non-zero exit on a missing hash (kubectl failed) or a mismatch
 [ -n "$SOURCE" ] && [ -n "$RESTORED" ] || { echo "hash missing (kubectl failed?): source=$SOURCE restored=$RESTORED"; exit 1; }
 [ "$SOURCE" = "$RESTORED" ] || { echo "MISMATCH: source=$SOURCE restored=$RESTORED"; exit 1; }
 
 # 7) Cleanup — MANDATORY, the scratch PVC is a full Longhorn volume
-kubectl -n monitoring delete pod restore-test-helper --ignore-not-found
+kubectl -n monitoring delete pod restore-test-helper restore-check --ignore-not-found
 kubectl -n monitoring delete pvc restore-test
 ```
 
