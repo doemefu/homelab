@@ -10,28 +10,9 @@
 # RF=2: Beide Keys sind nötig:
 #   defaultSettings.defaultReplicaCount — für Volumes die manuell im UI erstellt werden (String)
 #   persistence.defaultClassReplicaCount — für Volumes via StorageClass/PVC (Integer)
-#
-# Off-cluster backup target (#64): an NFS export on the operator's Mac
-# (/Users/dominic/informatik/homelab/backups/longhorn), reachable on the LAN only.
-# Rationale: no cloud account, no egress cost, and the Mac is the same machine that already
-# holds the manual pre-upgrade dumps. Trade-offs, all deliberate:
-#   - Backups are triggered MANUALLY via scripts/longhorn-backup.sh — there is no
-#     `backup` RecurringJob, because the Mac is not always on.
-#   - This is NOT off-site: a fire or theft at the flat destroys cluster and backups alike.
-#   - The Mac's IP is hardcoded below, so it needs a DHCP reservation on the router.
-#   - While the Mac is off or off-LAN, `backuptargets.longhorn.io/default` reports
-#     available=false. That is expected and harmless — nothing on the cluster depends on it;
-#     the target becomes available again within one poll interval (300 s) once the Mac is back.
-# NFS needs no credentials, so no credential Secret is configured for the target.
-# TODO(spike): Longhorn mounts this with NFSv4 and macOS nfsd is not a mainstream Longhorn
-# target. If the mount misbehaves, mount options can be appended to the URL as a query string
-# (`?nfsOptions=...`); Longhorn 1.7.2 defaults to `actimeo=1,soft,timeo=300,retry=2` and any
-# specified option list REPLACES those defaults, so re-state them alongside the new option.
-# See DEPLOYMENT.md "Off-cluster backups (Longhorn BackupTarget)" for the export setup.
 
 defaultSettings:
   defaultReplicaCount: "2"
-  backupTarget: "nfs://192.168.1.78:/Users/dominic/informatik/homelab/backups/longhorn"
 
 persistence:
   defaultClass: true
