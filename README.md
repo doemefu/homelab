@@ -199,7 +199,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | Item | Description | Status |
 |------|-------------|--------|
 | raspi4 SSH tunnel | Cloudflare Tunnel ingress not yet configured for raspi4 | ⚠️ Open (see below) |
-| Off-cluster app-data backups + restore tests | Manual app-data dumps to the operator's Mac + restic datastore fix implemented via #64 — see [DEPLOYMENT.md](DEPLOYMENT.md) "App-data backups to the operator's Mac (#64)" | 🚧 script merged, restore test pending (#64) |
+| Off-cluster app-data backups + restore tests | Manual app-data dumps to the operator's Mac + restic datastore fix implemented via #64 — see [DEPLOYMENT.md](DEPLOYMENT.md) "App-data backups to the operator's Mac (#64)" | ✅ Resolved (#64) — first run 2026-09-08, restore tests (a) PostgreSQL + (b) PVC archive PASS (DEPLOYMENT.md restore test log) |
 | `KubeControllerManagerDown` / `KubeSchedulerDown` / `KubeProxyDown` | Fired as permanent critical false positives since install (2026-05-16) — k3s embeds these 3 components with zero exposed scrape targets | ✅ Resolved (#68) — scrape configs + alert rule groups disabled, see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions) |
 
 > **Note on raspi4 SSH**: The SSH tunnel for raspi4 (`ssh-raspi4.furchert.ch → 192.168.1.163:22`) is not yet configured in `40_platform.yml`. To add: include `- hostname: ssh-raspi4.furchert.ch, service: ssh://192.168.1.163:22` in the ingress list, then re-run `ansible-playbook infra/playbooks/40_platform.yml`.

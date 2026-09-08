@@ -1050,6 +1050,13 @@ gzip -t "$RUN/pg-dumpall.sql.gz"
 tar -tzf "$RUN/n8n-data.tgz" >/dev/null
 ```
 
+**First run 2026-09-08.** The first full run took ~7 minutes on the LAN (21:58:09–22:04:53 CEST,
+exit 0, no `--quiesce`) and produced 12 artifacts totalling ≈ 2.2 GB, all `OK` in `MANIFEST.txt`
+and 13/13 in `shasum -a 256 -c SHA256SUMS`. A small `influxdb2-backup.tgz` (7.8 KB) is normal
+while `iot-bucket` is nearly empty; the script fails if a shard on disk is missing from the
+backup, and `influx backup`'s "Shard N removed during backup" warnings for precreated,
+still-empty shard groups are benign (metadata only, no data lost).
+
 **Restore test (a) — PostgreSQL into a throwaway database on the live server:**
 
 ```bash
@@ -1144,7 +1151,8 @@ after the fact:
 
 | Date | Run directory | Test | Values (source / restored) | Result |
 |------|---------------|------|----------------------------|--------|
-| — | — | — | — | pending — filled after the first run |
+| 2026-09-08 | 2026-09-08_215809 | (a) PostgreSQL homelabdb → restore_test | tables public: 8 / 8 | PASS |
+| 2026-09-08 | 2026-09-08_215809 | (b) grafana-data.tgz → scratch PVC | sha256 319b6602…896cb / 319b6602…896cb (full hash in the worklog) | PASS |
 
 ---
 
