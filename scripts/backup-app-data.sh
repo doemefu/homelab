@@ -34,9 +34,10 @@ readonly ALL_COMPONENTS="postgresql influxdb2 n8n open-webui mosquitto grafana"
 
 readonly PG_POD="postgresql-0"
 readonly PG_CONTAINER="postgresql"
-# Databases dumped individually on top of pg_dumpall (custom format = selective restore).
-# "postgres" is the maintenance database and is covered by pg_dumpall only.
-readonly PG_DATABASES="homelabdb n8n litellm club_assistant"
+# Databases are dumped individually on top of pg_dumpall (custom format = selective restore).
+# The list is read from the server at runtime, so a database created later is never silently
+# missed. Template databases and the "postgres" maintenance database are covered by pg_dumpall.
+readonly PG_DATABASE_QUERY="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
 
 readonly INFLUX_POD="influxdb2-0"
 
@@ -47,10 +48,13 @@ readonly RUN_DIR_PATTERN='^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}$'
 readonly HELPER_READY_TIMEOUT=120
 readonly SCALE_DELETE_TIMEOUT=180
 
+# Run lock. macOS ships bash 3.2 without flock, but mkdir is atomic — the directory is the lock.
+readonly LOCK_DIR="${TMPDIR:-/tmp}/backup-app-data.lock"
+
 # --- Options ---------------------------------------------------------------------------------
 KUBECONFIG_PATH="${HOME}/.kube/homelab.yaml"
 CONTEXT=""
-DEST="/Users/dominic/informatik/homelab/backups"
+DEST="${HOME}/informatik/homelab/backups"
 RETAIN=5
 QUIESCE=false
 DRY_RUN=false
@@ -68,7 +72,8 @@ Options:
   --kubeconfig PATH   kubeconfig to use (default: $HOME/.kube/homelab.yaml)
   --context NAME      kubectl context to use (default: the kubeconfig's current context).
                       Use "tunnel" when off-LAN — see the note on stream sizes below.
-  --dest DIR          backup root (default: /Users/dominic/informatik/homelab/backups)
+  --dest DIR          backup root (default: $HOME/informatik/homelab/backups). Must be an
+                      absolute path and may be neither / nor your home directory itself.
   --retain N          keep the N newest run directories, delete older ones (default: 5).
                       Pruning is skipped when the current run had any failure.
   --only COMPONENT    back up only this component; repeatable. One of:
@@ -84,8 +89,8 @@ Options:
 
 What lands in <dest>/<YYYY-MM-DD_HHMMSS>/:
   pg-dumpall.sql.gz          all databases, roles and grants (pg_dumpall --clean --if-exists)
-  pg-<db>.dump               custom-format dump per database (homelabdb n8n litellm
-                             club_assistant) for selective pg_restore
+  pg-<db>.dump               custom-format dump per database for selective pg_restore; the
+                             database list is read from the server at run time
   influxdb2-backup.tgz       "influx backup" output (bolt + engine + SQL metadata store)
   n8n-workflows.json         all workflows (n8n export:workflow --all)
   n8n-credentials.json       all credentials, ENCRYPTED — restoring them needs the same
@@ -107,6 +112,11 @@ Where to run it:
   On the LAN. n8n-data.tgz and open-webui-data.tgz are hundreds of megabytes to a few
   gigabytes; streaming those through the Cloudflare Tunnel port-forward has timed out before.
   Off-LAN (--context tunnel) the small components work fine; the big archives may not.
+  Helper pods sleep for 4 hours, so a single PVC archive must finish inside that window.
+
+After the first run:
+  Check the run directory by hand once — "ls -l <dest>/<run>" for plausible sizes, and open
+  n8n-workflows.json to confirm the export really contains every workflow.
 
 What this does NOT do:
   - It is not off-site: the dumps sit in the same flat as the cluster.
@@ -118,8 +128,10 @@ What this does NOT do:
     datastore (see DEPLOYMENT.md "Backup (Restic)").
 
 Retention:
-  Only directories directly under --dest whose name matches YYYY-MM-DD_HHMMSS are considered,
-  oldest first, and only when the run finished without failures.
+  Only directories directly under --dest whose name matches YYYY-MM-DD_HHMMSS and that contain
+  SHA256SUMS are considered, oldest first, and only when the run finished without failures.
+  An interrupted run is renamed to <run>.incomplete and is neither counted nor deleted — check
+  and remove those by hand.
 
 Exit status: 0 when every selected component succeeded, 1 otherwise.
 USAGE
@@ -159,6 +171,12 @@ if ! [[ "$RETAIN" =~ ^[1-9][0-9]*$ ]]; then
   die "--retain must be a positive integer, got: $RETAIN"
 fi
 [[ -n "$DEST" ]] || die "--dest must not be empty"
+# Run directories are created inside --dest and retention deletes directories under it, so
+# accept only a real, dedicated absolute path.
+[[ "$DEST" == /* ]] || die "--dest must be an absolute path, got: $DEST"
+case "$DEST" in
+  /|"$HOME"|"${HOME}/") die "--dest must not be / or your home directory, got: $DEST" ;;
+esac
 
 COMPONENTS=""
 if [[ -z "${ONLY// /}" ]]; then
@@ -200,18 +218,49 @@ SCALED=()
 ARTIFACTS=()
 COMP_RESULTS=""
 FAILED=0
+LOCK_HELD=false
 
 # --- Cleanup ---------------------------------------------------------------------------------
 restore_scales() {
   local entry ns rest name reps
+  local remaining=()
   if [[ ${#SCALED[@]} -eq 0 ]]; then
     return 0
   fi
   for entry in "${SCALED[@]}"; do
     ns="${entry%%/*}"; rest="${entry#*/}"; name="${rest%%/*}"; reps="${rest##*/}"
-    kc -n "$ns" scale "deploy/${name}" --replicas="$reps" >/dev/null 2>&1 \
-      || warn "could not scale ${ns}/${name} back to ${reps} replicas — do it by hand"
+    if kc -n "$ns" scale "deploy/${name}" --replicas="$reps" >/dev/null 2>&1; then
+      log "      restored ${ns}/${name} to ${reps} replicas"
+    else
+      warn "could not scale ${ns}/${name} back to ${reps} replicas — do it by hand"
+      FAILED=1
+      remaining+=("$entry")
+    fi
   done
+  # Drop everything that is back up so neither a later component nor the EXIT trap scales it
+  # a second time; only deployments that could not be restored stay on the list.
+  SCALED=()
+  if [[ ${#remaining[@]} -gt 0 ]]; then
+    SCALED=("${remaining[@]}")
+  fi
+}
+
+# A run is complete once SHA256SUMS exists. Anything else (crash, Ctrl-C, aborted stream)
+# leaves a partially written directory — rename it instead of deleting it, so retention skips
+# it and the operator decides what to keep.
+mark_incomplete() {
+  if [[ "$DRY_RUN" == true ]] || [[ ! -d "$RUN_DIR" ]] || [[ -f "${RUN_DIR}/SHA256SUMS" ]]; then
+    return 0
+  fi
+  if [[ -e "${RUN_DIR}.incomplete" ]]; then
+    warn "incomplete run left at ${RUN_DIR} (${RUN_DIR}.incomplete exists) — delete it by hand"
+    return 0
+  fi
+  if mv "$RUN_DIR" "${RUN_DIR}.incomplete"; then
+    warn "incomplete run — renamed to ${RUN_DIR}.incomplete; check and delete it by hand"
+  else
+    warn "incomplete run at ${RUN_DIR} could not be renamed — check and delete it by hand"
+  fi
 }
 
 cleanup() {
@@ -223,6 +272,10 @@ cleanup() {
     done
   fi
   restore_scales
+  mark_incomplete
+  if [[ "$LOCK_HELD" == true ]]; then
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 trap 'err "interrupted — cleaning up"; exit 130' INT TERM
@@ -311,7 +364,7 @@ stream_gzip_to_file() {
 
 resolve_pod() {
   local ns="$1" selector="$2" pod
-  pod="$(kc -n "$ns" get pod -l "$selector" \
+  pod="$(kc -n "$ns" get pod -l "$selector" --field-selector=status.phase=Running \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   if [[ -z "$pod" ]]; then
     err "no pod found in namespace ${ns} for selector ${selector}"
@@ -334,7 +387,12 @@ resolve_node() {
 quiesce_deploy() {
   local ns="$1" name="$2" selector="$3" reps
   reps="$(kc -n "$ns" get deploy "$name" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  [[ -n "$reps" ]] || reps=1
+  # Never guess the replica count: scaling to 0 without knowing what to scale back to would
+  # leave the workload down.
+  if [[ -z "$reps" ]]; then
+    err "could not read .spec.replicas of ${ns}/${name} — refusing to scale it down"
+    return 1
+  fi
   if [[ "$DRY_RUN" == true ]]; then
     plan "kubectl -n ${ns} scale deploy/${name} --replicas=0 (restored to ${reps} afterwards)"
     return 0
@@ -358,7 +416,7 @@ quiesce_deploy() {
 helper_pod_tar() {
   local comp="$1" ns="$2" claim="$3" node="$4" dest="$5" name overrides
   name="backup-helper-${comp}-${POD_TS}"
-  overrides="$(printf '{"spec":{"nodeName":"%s","containers":[{"name":"helper","image":"%s","command":["sleep","3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"%s"}}]}}' \
+  overrides="$(printf '{"spec":{"nodeName":"%s","containers":[{"name":"helper","image":"%s","command":["sleep","14400"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"%s"}}]}}' \
     "$node" "$HELPER_IMAGE" "$claim")"
 
   if [[ "$DRY_RUN" == true ]]; then
@@ -369,12 +427,14 @@ helper_pod_tar() {
   fi
 
   log "      helper pod ${name} on node ${node} (PVC ${claim})"
+  # Register before creating it: if the client times out after the API server already created
+  # the pod, cleanup must still delete it.
+  HELPER_PODS+=("${ns}/${name}")
   if ! kc -n "$ns" run "$name" --image="$HELPER_IMAGE" --restart=Never \
        --override-type=merge --overrides="$overrides" >/dev/null; then
     err "could not create helper pod ${ns}/${name}"
     return 1
   fi
-  HELPER_PODS+=("${ns}/${name}")
 
   if ! kcl -n "$ns" wait --for=condition=Ready "pod/${name}" \
        --timeout="${HELPER_READY_TIMEOUT}s" >/dev/null; then
@@ -394,7 +454,8 @@ helper_pod_tar() {
 
 # --- Components ------------------------------------------------------------------------------
 comp_postgresql() {
-  local rc=0 db
+  local rc=0 db db_list
+  local databases=()
   log "      pg_dumpall (all databases, roles and grants)"
   # The password is expanded inside the pod only; it never reaches this shell or any log line.
   # shellcheck disable=SC2016  # $POSTGRES_PASSWORD must be expanded by the pod's shell
@@ -406,7 +467,33 @@ comp_postgresql() {
     record postgresql "pg-dumpall.sql.gz" "0" "FAILED"; rc=1
   fi
 
-  for db in $PG_DATABASES; do
+  if [[ "$DRY_RUN" == true ]]; then
+    plan "kubectl exec ${PG_POD} -- psql -Atc \"${PG_DATABASE_QUERY}\""
+    plan "kubectl exec ${PG_POD} -- pg_dump -Fc <db> > pg-<db>.dump   (one per database)"
+    verify_artifact postgresql "${RUN_DIR}/pg-<db>.dump" pgdump
+    return "$rc"
+  fi
+
+  # The database list comes from the server, never from a hard-coded list in this script.
+  # shellcheck disable=SC2016  # $POSTGRES_PASSWORD must be expanded by the pod's shell
+  if ! db_list="$(kcl exec -n "$APPS_NS" "$PG_POD" -c "$PG_CONTAINER" -- \
+       sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U postgres -Atc "$1"' sh "$PG_DATABASE_QUERY")"; then
+    err "could not read the database list from ${PG_POD}"
+    record postgresql "pg-<db>.dump" "0" "FAILED"
+    return 1
+  fi
+  while IFS= read -r db; do
+    db="$(printf '%s' "$db" | tr -d '\r')"
+    [[ -n "$db" ]] || continue
+    databases+=("$db")
+  done <<< "$db_list"
+  if [[ ${#databases[@]} -eq 0 ]]; then
+    err "the database list from ${PG_POD} is empty"
+    record postgresql "pg-<db>.dump" "0" "FAILED"
+    return 1
+  fi
+
+  for db in "${databases[@]}"; do
     log "      pg_dump -Fc ${db}"
     # shellcheck disable=SC2016  # $POSTGRES_PASSWORD must be expanded by the pod's shell
     if stream_to_file "${RUN_DIR}/pg-${db}.dump" \
@@ -444,7 +531,10 @@ comp_n8n() {
   n8n_export "$pod" credentials "${RUN_DIR}/n8n-credentials.json" || rc=1
 
   if [[ "$QUIESCE" == true ]]; then
-    quiesce_deploy "$APPS_NS" n8n app=n8n || return 1
+    if ! quiesce_deploy "$APPS_NS" n8n app=n8n; then
+      restore_scales
+      return 1
+    fi
   else
     warn "n8n-data.tgz will be crash-consistent (SQLite) — use --quiesce for a clean archive"
   fi
@@ -493,7 +583,10 @@ comp_open_webui() {
   log "      pod ${pod} on node ${node}"
 
   if [[ "$QUIESCE" == true ]]; then
-    quiesce_deploy "$APPS_NS" open-webui app=open-webui || return 1
+    if ! quiesce_deploy "$APPS_NS" open-webui app=open-webui; then
+      restore_scales
+      return 1
+    fi
   else
     warn "open-webui-data.tgz will be crash-consistent (SQLite + vector_db) — use --quiesce"
   fi
@@ -591,20 +684,37 @@ write_checksums() {
 }
 
 prune_runs() {
-  local existing count excess dir
+  local candidates existing="" count excess dir incomplete dry_note=""
+  incomplete="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d -name '*.incomplete' -print 2>/dev/null \
+    | grep -c . || true)"
+  if [[ "$incomplete" -gt 0 ]]; then
+    warn "${incomplete} incomplete run(s) in ${DEST} — never counted, never pruned; delete by hand"
+  fi
   if [[ "$FAILED" -ne 0 ]]; then
     warn "run had failures — skipping retention pruning"
     return 0
   fi
-  existing="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null \
+  candidates="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null \
     | sed 's#.*/##' | grep -E "$RUN_DIR_PATTERN" | sort || true)"
-  count="$(printf '%s\n' "$existing" | grep -c . || true)"
+  # Only complete runs (SHA256SUMS present) count against --retain and may be deleted.
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    if [[ -f "${DEST}/${dir}/SHA256SUMS" ]]; then
+      existing="${existing}${dir}"$'\n'
+    fi
+  done <<< "$candidates"
+  count="$(printf '%s' "$existing" | grep -c . || true)"
+  if [[ "$DRY_RUN" == true ]]; then
+    # The directory of this run does not exist in dry-run mode — count it anyway.
+    count=$(( count + 1 ))
+    dry_note=" (+1 for this run)"
+  fi
   excess=$(( count - RETAIN ))
   if [[ "$excess" -le 0 ]]; then
-    log "Retention: ${count} run(s) kept, --retain ${RETAIN} not exceeded"
+    log "Retention: ${count} complete run(s)${dry_note}, --retain ${RETAIN} not exceeded"
     return 0
   fi
-  log "Retention: ${count} run(s) present, deleting the ${excess} oldest"
+  log "Retention: ${count} complete run(s)${dry_note}, deleting the ${excess} oldest"
   printf '%s\n' "$existing" | sed -n "1,${excess}p" | while IFS= read -r dir; do
     [[ -n "$dir" && -d "${DEST}/${dir}" ]] || continue
     if [[ "$DRY_RUN" == true ]]; then
@@ -619,6 +729,8 @@ prune_runs() {
 # --- Main ------------------------------------------------------------------------------------
 command -v kubectl >/dev/null 2>&1 || die "kubectl not found in PATH"
 [[ -r "$KUBECONFIG_PATH" ]] || die "kubeconfig not readable: ${KUBECONFIG_PATH}"
+mkdir "$LOCK_DIR" 2>/dev/null || die "another backup-app-data.sh run is active (lock $LOCK_DIR)"
+LOCK_HELD=true
 kc get namespace "$APPS_NS" -o name >/dev/null 2>&1 \
   || die "cannot reach the cluster (kubeconfig: ${KUBECONFIG_PATH}, context: ${CONTEXT:-current})"
 CONTEXT_NAME="${CONTEXT:-$(kc config current-context 2>/dev/null || echo unknown)}"
@@ -633,9 +745,11 @@ log "  retain      ${RETAIN}"
 if [[ "$DRY_RUN" == true ]]; then
   log "  MODE        dry-run — nothing is created, scaled or deleted"
 else
-  # -m on mkdir -p only applies to directories it actually creates, so chmod the root too.
-  mkdir -p "$DEST"
-  chmod 700 "$DEST"
+  # Only tighten what this script creates: an existing --dest keeps the mode it has.
+  if [[ ! -d "$DEST" ]]; then
+    mkdir -p "$DEST"
+    chmod 700 "$DEST"
+  fi
   mkdir -m 700 "$RUN_DIR"
 fi
 

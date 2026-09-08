@@ -208,7 +208,9 @@ kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80
 Longhorn writes permanently to `/var/lib/longhorn` (root SD card on Pis). Since #64, the restic
 repository — which lives on the same SD card — also ingests a ~710 MB k3s datastore copy every
 day (deduplicated by restic; retention 7 daily / 4 weekly / 6 monthly), adding to the root-disk
-pressure this section already tracks.
+pressure this section already tracks. `scripts/backup-app-data.sh` adds a transient consumer on
+top: `influx backup` stages a full copy of the InfluxDB data (~240 MB today) under `/tmp` inside
+the `influxdb2` pod — the node's root disk — before it is streamed out and removed again.
 
 ```bash
 # Check free space on root (min 10GB recommended)
@@ -919,6 +921,19 @@ deploy/device-service`, then re-check the logs.
   shape as the backup helper above), `kubectl cp` the backup back in, `kubectl exec
   n8n-backup-helper -c helper -- tar xzf /tmp/n8n-data.tgz -C /data`, delete the helper, scale back
   to 1.
+- **InfluxDB restore** (`influxdb2-backup.tgz` from an app-data run): copy the archive into the
+  pod, unpack it and restore in place:
+  ```bash
+  kubectl -n apps cp ~/informatik/homelab/backups/<run>/influxdb2-backup.tgz influxdb2-0:/tmp/influxdb2-backup.tgz
+  kubectl -n apps exec influxdb2-0 -- sh -c 'rm -rf /tmp/influx-backup && tar xzf /tmp/influxdb2-backup.tgz -C /tmp'
+  kubectl -n apps exec influxdb2-0 -- sh -c 'influx restore /tmp/influx-backup --full --token "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"'
+  # only one bucket, leaving the token/user store untouched:
+  # kubectl -n apps exec influxdb2-0 -- sh -c 'influx restore /tmp/influx-backup --bucket iot-bucket --token "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"'
+  kubectl -n apps exec influxdb2-0 -- rm -rf /tmp/influx-backup /tmp/influxdb2-backup.tgz
+  ```
+  `--full` replaces the token and user store too, so afterwards re-check that the admin token
+  device-service uses still works (restart it and watch its logs); prefer `--bucket` when only
+  measurement data has to come back.
 - **LiteLLM**: stop the workload and recreate the database before restoring — do not `pg_restore`
   over an already-migrated schema:
   ```bash
@@ -962,7 +977,7 @@ backups and for every restore.
 
 | Component | Artifacts | Consistency |
 |-----------|-----------|-------------|
-| `postgresql` | `pg-dumpall.sql.gz`, `pg-homelabdb.dump`, `pg-n8n.dump`, `pg-litellm.dump`, `pg-club_assistant.dump` | application-consistent (`pg_dumpall --clean --if-exists`, `pg_dump -Fc`) |
+| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`) | application-consistent (`pg_dumpall --clean --if-exists`, `pg_dump -Fc`) |
 | `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`) |
 | `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
 | `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
@@ -995,13 +1010,16 @@ port-forward has timed out before (see "Off-LAN kubectl / Ansible Access"). Off-
 always scales them back to the previous replica count — on success, on failure and on Ctrl-C.
 Both store SQLite databases, so without it those two archives are only crash-consistent.
 
-**Where it lands:** `/Users/dominic/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>/` (override
+**Where it lands:** `~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>/` (override
 with `--dest`). That folder is the parent workspace directory, outside every git repo — the
 dumps contain credentials and PII and must never be committed or uploaded. Run directories are
 created mode 700 and artifacts mode 600. `--retain N` (default 5) deletes the oldest run
 directories after a successful run; it only ever considers directories whose name matches
-`YYYY-MM-DD_HHMMSS`, so anything else in the folder (for example `backups/restic/`) is never
-touched, and pruning is skipped entirely when the run had a failure.
+`YYYY-MM-DD_HHMMSS` **and** that contain `SHA256SUMS`, so anything else in the folder (for
+example `backups/restic/`) is never touched, and pruning is skipped entirely when the run had a
+failure. A run that was interrupted (Ctrl-C, crash, aborted stream) is renamed to
+`<run>.incomplete` instead of being deleted; those are never counted or pruned — check and
+remove them by hand.
 
 **What this does not do:**
 
@@ -1019,10 +1037,12 @@ touched, and pruning is skipped entirely when the run had a failure.
 
 **Verification.** The script verifies every artifact itself (gzip/tar readability, the `PGDMP`
 magic for custom-format dumps, non-empty size), deletes anything that fails verification, and
-exits non-zero if any component failed. To re-check an existing run directory:
+exits non-zero if any component failed. The first real run is also its acceptance test: check
+`ls -l "$RUN"` for plausible sizes and open `n8n-workflows.json` to confirm the export really
+contains every workflow. To re-check an existing run directory:
 
 ```bash
-RUN=/Users/dominic/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
+RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
 cat "$RUN/MANIFEST.txt"                        # every row must read OK
 (cd "$RUN" && shasum -a 256 -c SHA256SUMS)     # every line must read OK
 gzip -t "$RUN/pg-dumpall.sql.gz"
@@ -1032,7 +1052,7 @@ tar -tzf "$RUN/n8n-data.tgz" >/dev/null
 **Restore test (a) — PostgreSQL into a throwaway database on the live server:**
 
 ```bash
-RUN=/Users/dominic/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
+RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
 
 # 1) The dump is a readable custom-format archive
 kubectl -n apps cp "$RUN/pg-homelabdb.dump" postgresql-0:/tmp/restore-test.dump -c postgresql
@@ -1059,7 +1079,7 @@ kubectl -n apps exec postgresql-0 -c postgresql -- rm -f /tmp/restore-test.dump
 **Restore test (b) — one PVC archive into a scratch volume** (Grafana is the smallest):
 
 ```bash
-RUN=/Users/dominic/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
+RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
 
 # 1) The archive is readable and holds the expected file
 tar -tzf "$RUN/grafana-data.tgz" | grep -x './grafana.db'
@@ -1085,25 +1105,31 @@ spec:
       storage: 1Gi
 EOF
 kubectl -n monitoring run restore-test-helper --image=busybox:1.37.0 --restart=Never \
-  --override-type=merge \
+  --override-type=merge --pod-running-timeout=120s \
   --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.37.0","command":["sleep","3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"restore-test"}}]}}'
 kubectl -n monitoring wait --for=condition=Ready pod/restore-test-helper --timeout=120s
 kubectl -n monitoring exec -i restore-test-helper -c helper -- tar xzf - -C /data < "$RUN/grafana-data.tgz"
 
-# 4) Hash the same file from the restored volume. The checksum must live inside the container
+# 4) Release the volume BEFORE the check pod starts. The scratch PVC is ReadWriteOnce: while
+#    restore-test-helper still holds it, restore-check cannot mount it (it may also land on a
+#    different node) and would hang until its timeout.
+kubectl -n monitoring delete pod restore-test-helper --wait=true
+
+# 5) Hash the same file from the restored volume. The checksum must live inside the container
 #    overrides (command + args): kubectl run treats anything after `--` as extra arguments to
 #    the image's entrypoint, so a bare `-- sha256sum ...` is silently dropped. --quiet plus
 #    `2>/dev/null | tail -1` strips kubectl's "pod deleted" noise from the captured output.
 RESTORED=$(kubectl -n monitoring run restore-check --rm -i --quiet --image=busybox:1.37.0 --restart=Never \
+  --pod-running-timeout=120s \
   --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.37.0","command":["sh","-c"],"args":["sha256sum /data/grafana.db"],"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"restore-test"}}]}}' \
   2>/dev/null | tail -1 | awk '{print $1}')
 
-# 5) Compare — non-zero exit on a missing hash (kubectl failed) or a mismatch
+# 6) Compare — non-zero exit on a missing hash (kubectl failed) or a mismatch
 [ -n "$SOURCE" ] && [ -n "$RESTORED" ] || { echo "hash missing (kubectl failed?): source=$SOURCE restored=$RESTORED"; exit 1; }
 [ "$SOURCE" = "$RESTORED" ] || { echo "MISMATCH: source=$SOURCE restored=$RESTORED"; exit 1; }
 
-# 6) Cleanup — MANDATORY, the scratch PVC is a full Longhorn volume
-kubectl -n monitoring delete pod restore-test-helper
+# 7) Cleanup — MANDATORY, the scratch PVC is a full Longhorn volume
+kubectl -n monitoring delete pod restore-test-helper --ignore-not-found
 kubectl -n monitoring delete pvc restore-test
 ```
 
