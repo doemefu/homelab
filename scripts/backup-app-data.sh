@@ -177,6 +177,11 @@ fi
 case "$DEST" in
   /|"$HOME"|"${HOME}/") die "--dest must not be / or your home directory, got: $DEST" ;;
 esac
+# "." and ".." components would let --dest resolve somewhere else (e.g. "$HOME/backups/.."
+# is $HOME), so reject them instead of trying to normalise the path.
+case "/${DEST}/" in
+  */./*|*/../*) die "--dest must not contain . or .. path components, got: $DEST" ;;
+esac
 
 COMPONENTS=""
 if [[ -z "${ONLY// /}" ]]; then
@@ -784,7 +789,8 @@ if [[ ${#ARTIFACTS[@]} -gt 0 ]]; then
   done
 fi
 log ""
-printf '%s' "$COMP_RESULTS"
+log ""
+log "Components: $(printf '%s' "$COMP_RESULTS" | tr '|' '=' | tr '\n' ' ')"
 log ""
 
 prune_runs
