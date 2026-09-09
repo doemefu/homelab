@@ -334,6 +334,7 @@ From `40_platform.yml` (platform):
 - **Access Modes**: ReadWriteOnce (RWO), ReadWriteMany (RWX via RWX storage class)
 - **Survives**: Node failures, k3s restarts
 - **Recurring snapshots**: every Longhorn volume without a more specific recurring-job assignment is automatically covered by the daily `default`-group `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7) — local-only, does not survive PVC/Volume deletion. See DEPLOYMENT.md "Recurring Snapshots (#63)".
+- **Off-cluster backups**: there is no Longhorn `BackupTarget`. The off-cluster copy of the application data is made by hand with `scripts/backup-app-data.sh`, which dumps PostgreSQL, InfluxDB, n8n, Open WebUI, mosquitto and Grafana into a timestamped directory on the operator's Mac. See DEPLOYMENT.md "App-data backups to the operator's Mac (#64)".
 
 **Source of Truth**: `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml`
 

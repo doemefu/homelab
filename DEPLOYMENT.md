@@ -32,7 +32,7 @@ Before starting any deployment or upgrade, verify:
 ### Secrets Check
 
 - [ ] `infra/inventory/group_vars/all.sops.yml` exists and is decrypted
-- [ ] All required variables set (see [CONTRIBUTING.md](CONTRIBUTING.md))
+- [ ] All required variables set (see INTERFACES.md § 7 "Required SOPS Variables")
 - [ ] SOPS key available: `export SOPS_AGE_KEY_FILE=~/.config/age/homelab.key`
 
 ### External Dependencies
@@ -205,7 +205,13 @@ kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80
 
 #### Root Disk Monitoring
 
-Longhorn writes permanently to `/var/lib/longhorn` (root SD card on Pis).
+Longhorn writes permanently to `/var/lib/longhorn` (root SD card on Pis). Since #64, the restic
+repository — which lives on the same SD card — also ingests a ~710 MB k3s datastore copy every
+day (deduplicated by restic; retention 7 daily / 4 weekly / 6 monthly), adding to the root-disk
+pressure this section already tracks. `scripts/backup-app-data.sh` adds a transient consumer on
+top: `influx backup` stages a full copy of the InfluxDB data (164 KB today — Longhorn's
+`actualSize` of ~240 MB counts allocated replica blocks, not data) under `/tmp` inside the
+`influxdb2` pod — the node's root disk — before it is streamed out and removed again.
 
 ```bash
 # Check free space on root (min 10GB recommended)
@@ -237,10 +243,11 @@ takes a snapshot of every Longhorn volume once a day:
 - **Retention:** 7 snapshots per volume (Longhorn prunes older ones automatically).
 - **Concurrency:** 1 (snapshots run one volume at a time).
 - **Coverage:** `groups: [default]` — Longhorn applies a `default`-group job to every volume
-  that has no more specific recurring-job/group assignment of its own. As of 2026-09-04 that
-  covers all 5 stateful `apps` volumes (`postgresql`, `influxdb2`, `mosquitto`, `n8n`,
-  `open-webui`) with no per-volume labeling required, and will automatically cover any future
-  stateful volume the same way unless it's later opted into something more specific.
+  that has no more specific recurring-job/group assignment of its own. As of 2026-09-07 that
+  covers all 7 stateful volumes — the 5 `apps` volumes (`postgresql`, `influxdb2`, `mosquitto`,
+  `n8n`, `open-webui`) plus the 2 `monitoring` volumes (`grafana`, `prometheus`) — with no
+  per-volume labeling required, and will automatically cover any future stateful volume the same
+  way unless it's later opted into something more specific.
 
 **This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
 disks/replicas as the primary data (see the SD-card root-disk risk noted in
@@ -249,9 +256,10 @@ disks/replicas as the primary data (see the SD-card root-disk risk noted in
 hardware failure or a cluster-wide incident. It also does **not** protect against deleting the
 PVC or Longhorn Volume itself — Longhorn's volume controller deletes a volume's associated
 snapshots as part of tearing the volume down, so once the volume is gone, so are its local
-snapshots; only a genuinely off-cluster backup can recover from that. Off-cluster durability (a
-Longhorn `BackupTarget` + restic restore testing) is tracked separately in #64 and not yet
-implemented.
+snapshots; only a genuinely off-cluster copy can recover from that. That copy is made by hand
+with `scripts/backup-app-data.sh` — see "App-data backups to the operator's Mac (#64)" below.
+There is no Longhorn `BackupTarget`; the snapshots described here are local to the cluster's own
+disks by design.
 
 ```bash
 # Confirm the job exists and its spec
@@ -735,6 +743,11 @@ chmod 700 ~/homelab-backups ~/homelab-backups/$(date +%F)  # -m only applies to 
 These dumps can contain credentials/PII — keep them local-only (never commit, never upload) and
 delete the directory once the new version has run cleanly through a burn-in period.
 
+`scripts/backup-app-data.sh` runs every component procedure below in one go and uses its own
+directory convention (`backups/<YYYY-MM-DD_HHMMSS>/`, retained automatically) — see
+"App-data backups to the operator's Mac (#64)" at the end of this section. Use the
+per-component blocks below for targeted, one-off backups and for every restore.
+
 #### Open WebUI (SQLite DB + vector DB + uploads)
 
 Known regressions on Open WebUI v0.11.x (unfixed in any released tag, 2026-08-28): toggling a
@@ -909,6 +922,19 @@ deploy/device-service`, then re-check the logs.
   shape as the backup helper above), `kubectl cp` the backup back in, `kubectl exec
   n8n-backup-helper -c helper -- tar xzf /tmp/n8n-data.tgz -C /data`, delete the helper, scale back
   to 1.
+- **InfluxDB restore** (`influxdb2-backup.tgz` from an app-data run): copy the archive into the
+  pod, unpack it and restore in place:
+  ```bash
+  kubectl -n apps cp ~/informatik/homelab/backups/<run>/influxdb2-backup.tgz influxdb2-0:/tmp/influxdb2-backup.tgz
+  kubectl -n apps exec influxdb2-0 -- sh -c 'rm -rf /tmp/influx-backup && tar xzf /tmp/influxdb2-backup.tgz -C /tmp'
+  kubectl -n apps exec influxdb2-0 -- sh -c 'influx restore /tmp/influx-backup --full --token "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"'
+  # only one bucket, leaving the token/user store untouched:
+  # kubectl -n apps exec influxdb2-0 -- sh -c 'influx restore /tmp/influx-backup --bucket iot-bucket --token "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"'
+  kubectl -n apps exec influxdb2-0 -- rm -rf /tmp/influx-backup /tmp/influxdb2-backup.tgz
+  ```
+  `--full` replaces the token and user store too, so afterwards re-check that the admin token
+  device-service uses still works (restart it and watch its logs); prefer `--bucket` when only
+  measurement data has to come back.
 - **LiteLLM**: stop the workload and recreate the database before restoring — do not `pg_restore`
   over an already-migrated schema:
   ```bash
@@ -940,6 +966,193 @@ deploy/device-service`, then re-check the logs.
   - (c) **Full-PVC alternative**: scale the `postgresql` StatefulSet to 0 and revert the
     pre-upgrade Longhorn snapshot of `data-postgresql-0` (see the Longhorn snapshot subsection
     above), then scale back up under the older image.
+
+#### App-data backups to the operator's Mac (#64)
+
+`scripts/backup-app-data.sh` runs every per-component procedure above in one pass and writes the
+result to the operator's Mac, outside the cluster. It is the homelab's off-cluster copy of the
+application data; the per-component blocks above remain the reference for targeted one-off
+backups and for every restore.
+
+**What it produces** — one directory per run:
+
+| Component | Artifacts | Consistency |
+|-----------|-----------|-------------|
+| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`) | application-consistent (`pg_dumpall --clean --if-exists`, `pg_dump -Fc`) |
+| `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`); the run fails if a shard directory on disk has no matching shard archive |
+| `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
+| `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
+| `mosquitto` | `mosquitto.db` | flushed with `kill -USR1` before copying |
+| `grafana` | `grafana-data.tgz` | crash-consistent |
+
+Plus `MANIFEST.txt` (run metadata and one row per artifact) and `SHA256SUMS`.
+
+`n8n-credentials.json` is exported **encrypted** (never `--decrypted`): restoring it requires the
+same `N8N_ENCRYPTION_KEY` from the `n8n-secrets` Secret (SOPS). Do not rotate that key between
+backup and restore.
+
+**How to run** — from this repo on the Mac:
+
+```bash
+./scripts/backup-app-data.sh --help                # all options
+./scripts/backup-app-data.sh --dry-run             # resolve + print, change nothing
+./scripts/backup-app-data.sh                       # every component
+./scripts/backup-app-data.sh --quiesce             # scale n8n + open-webui to 0 while tarring
+./scripts/backup-app-data.sh --only postgresql --only influxdb2
+./scripts/backup-app-data.sh --context tunnel --only postgresql   # off-LAN, small components
+```
+
+Run it **on the LAN**. `n8n-data.tgz` and `open-webui-data.tgz` are hundreds of megabytes to a
+few gigabytes streamed through `kubectl exec`; pushing that through the Cloudflare Tunnel
+port-forward has timed out before (see "Off-LAN kubectl / Ansible Access"). Off-LAN, combine
+`--context tunnel` with `--only` for the small components.
+
+`--quiesce` scales `open-webui` and `n8n` to 0 replicas for the duration of their PVC archive and
+always scales them back to the previous replica count — on success, on failure and on Ctrl-C.
+Both store SQLite databases, so without it those two archives are only crash-consistent.
+
+**Where it lands:** `~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>/` (override
+with `--dest`). That folder is the parent workspace directory, outside every git repo — the
+dumps contain credentials and PII and must never be committed or uploaded. Run directories are
+created mode 700 and artifacts mode 600. `--retain N` (default 5) deletes the oldest run
+directories after a successful run; it only ever considers directories whose name matches
+`YYYY-MM-DD_HHMMSS` **and** that contain `SHA256SUMS`, so anything else in the folder (for
+example `backups/restic/`) is never touched, and pruning is skipped entirely when the run had a
+failure. A run that was interrupted (Ctrl-C, crash, aborted stream) is renamed to
+`<run>.incomplete` instead of being deleted; those are never counted or pruned — check and
+remove them by hand.
+
+**What this does not do:**
+
+- **Not off-site.** The Mac sits in the same flat as the cluster — a fire, flood or burglary
+  takes both.
+- **It does not replace Longhorn's snapshots.** The `daily-snapshot` RecurringJob (02:00, retain
+  7, see "Recurring Snapshots (#63)") stays the fast whole-volume rollback path, but it is local
+  to the cluster's own disks.
+- **There is no Longhorn `BackupTarget`.** Longhorn 1.7.2 mounts NFS backupstores as NFSv4 only
+  (its vendored `backupstore/nfs/nfs.go` mounts with fstype `nfs4`, minor versions 4.2/4.1/4.0)
+  and macOS ships no NFSv4 server; no cloud target is wanted (owner decision, 2026-09-08). These
+  dumps are the off-cluster copy instead.
+- **Kubernetes objects are not dumped here.** restic on raspi5 covers `/etc/rancher/k3s`, the
+  server token and a consistent copy of the k3s SQLite datastore — see "Backup (Restic)".
+
+**Verification.** The script verifies every artifact itself (gzip/tar readability, the `PGDMP`
+magic for custom-format dumps, non-empty size), deletes anything that fails verification, and
+exits non-zero if any component failed. The first real run is also its acceptance test: check
+`ls -l "$RUN"` for plausible sizes and open `n8n-workflows.json` to confirm the export really
+contains every workflow. To re-check an existing run directory:
+
+```bash
+RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
+cat "$RUN/MANIFEST.txt"                        # every row must read OK
+(cd "$RUN" && shasum -a 256 -c SHA256SUMS)     # every line must read OK
+gzip -t "$RUN/pg-dumpall.sql.gz"
+tar -tzf "$RUN/n8n-data.tgz" >/dev/null
+```
+
+**First run 2026-09-08.** The first full run took ~7 minutes on the LAN (21:58:09–22:04:53 CEST,
+exit 0, no `--quiesce`) and produced 12 artifacts totalling ≈ 2.2 GB, all `OK` in `MANIFEST.txt`
+and 13/13 in `shasum -a 256 -c SHA256SUMS`. A small `influxdb2-backup.tgz` (7.8 KB) is normal
+while `iot-bucket` is nearly empty; the script fails if a shard on disk is missing from the
+backup, and `influx backup`'s "Shard N removed during backup" warnings for precreated,
+still-empty shard groups are benign (metadata only, no data lost).
+
+**Restore test (a) — PostgreSQL into a throwaway database on the live server:**
+
+```bash
+RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
+
+# 1) The dump is a readable custom-format archive
+kubectl -n apps cp "$RUN/pg-homelabdb.dump" postgresql-0:/tmp/restore-test.dump -c postgresql
+kubectl -n apps exec postgresql-0 -c postgresql -- pg_restore --list /tmp/restore-test.dump | head -10
+
+# 2) Restore it next to the live database — never over it
+kubectl -n apps exec postgresql-0 -c postgresql -- createdb -U postgres restore_test
+kubectl -n apps exec postgresql-0 -c postgresql -- \
+  pg_restore -U postgres -d restore_test --no-owner /tmp/restore-test.dump
+
+# 3) Compare the table counts with the live database — they must be identical
+LIVE=$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -d homelabdb \
+  -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';")
+RESTORED=$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -d restore_test \
+  -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';")
+[ -n "$LIVE" ] && [ -n "$RESTORED" ] || { echo "count missing (kubectl failed?): live=$LIVE restored=$RESTORED"; exit 1; }
+[ "$LIVE" = "$RESTORED" ] || { echo "MISMATCH: live=$LIVE restored=$RESTORED"; exit 1; }
+
+# 4) Cleanup — MANDATORY
+kubectl -n apps exec postgresql-0 -c postgresql -- dropdb -U postgres restore_test
+kubectl -n apps exec postgresql-0 -c postgresql -- rm -f /tmp/restore-test.dump
+```
+
+**Restore test (b) — one PVC archive into a scratch volume** (Grafana is the smallest):
+
+```bash
+RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
+
+# 1) The archive is readable and holds the expected file
+tar -tzf "$RUN/grafana-data.tgz" | grep -x './grafana.db'
+
+# 2) Reference hash, taken from the archive itself. Comparing against the LIVE pod is not a
+#    valid gate here: grafana.db is written continuously, so it legitimately differs from any
+#    backup taken earlier. The archive is the source of truth for "did the restore land
+#    intact"; test (a) above is the live-versus-restored comparison.
+SOURCE=$(tar -xzOf "$RUN/grafana-data.tgz" ./grafana.db | shasum -a 256 | awk '{print $1}')
+
+# 3) Scratch PVC plus a helper pod, and extract the archive into it
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: restore-test
+  namespace: monitoring
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+kubectl -n monitoring run restore-test-helper --image=busybox:1.37.0 --restart=Never \
+  --override-type=merge --pod-running-timeout=120s \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.37.0","command":["sleep","3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"restore-test"}}]}}'
+kubectl -n monitoring wait --for=condition=Ready pod/restore-test-helper --timeout=120s
+kubectl -n monitoring exec -i restore-test-helper -c helper -- tar xzf - -C /data < "$RUN/grafana-data.tgz"
+
+# 4) Release the volume BEFORE the check pod starts. The scratch PVC is ReadWriteOnce: while
+#    restore-test-helper still holds it, restore-check cannot mount it (it may also land on a
+#    different node) and would hang until its timeout.
+kubectl -n monitoring delete pod restore-test-helper --wait=true
+
+# 5) Hash the same file from the restored volume. The checksum must live inside the container
+#    overrides (command + args): kubectl run treats anything after `--` as extra arguments to
+#    the image's entrypoint, so a bare `-- sha256sum ...` is silently dropped. Do not capture
+#    the hash with `--rm -i`: `kubectl run -i` can lose the output of a container that exits
+#    within a second (the attach loses the race; seen on 2026-09-08, empty hash on the first
+#    invocation while the node still pulled the image). Letting the pod run to completion and
+#    reading its logs is deterministic.
+kubectl -n monitoring run restore-check --image=busybox:1.37.0 --restart=Never \
+  --pod-running-timeout=120s \
+  --overrides='{"spec":{"containers":[{"name":"restore-check","image":"busybox:1.37.0","command":["sh","-c"],"args":["sha256sum /data/grafana.db"],"volumeMounts":[{"name":"v","mountPath":"/data"}]}],"volumes":[{"name":"v","persistentVolumeClaim":{"claimName":"restore-test"}}]}}'
+kubectl -n monitoring wait --for=jsonpath='{.status.phase}'=Succeeded pod/restore-check --timeout=120s
+RESTORED=$(kubectl -n monitoring logs restore-check | tail -1 | awk '{print $1}')
+kubectl -n monitoring delete pod restore-check --wait=false
+
+# 6) Compare — non-zero exit on a missing hash (kubectl failed) or a mismatch
+[ -n "$SOURCE" ] && [ -n "$RESTORED" ] || { echo "hash missing (kubectl failed?): source=$SOURCE restored=$RESTORED"; exit 1; }
+[ "$SOURCE" = "$RESTORED" ] || { echo "MISMATCH: source=$SOURCE restored=$RESTORED"; exit 1; }
+
+# 7) Cleanup — MANDATORY, the scratch PVC is a full Longhorn volume
+kubectl -n monitoring delete pod restore-test-helper restore-check --ignore-not-found
+kubectl -n monitoring delete pvc restore-test
+```
+
+**Restore test log** — records the hashes/counts from both tests so a mismatch stays auditable
+after the fact:
+
+| Date | Run directory | Test | Values (source / restored) | Result |
+|------|---------------|------|----------------------------|--------|
+| 2026-09-08 | 2026-09-08_215809 | (a) PostgreSQL homelabdb → restore_test | tables public: 8 / 8 | PASS |
+| 2026-09-08 | 2026-09-08_215809 | (b) grafana-data.tgz → scratch PVC | sha256 319b6602…896cb / 319b6602…896cb (full hash in the worklog) | PASS |
 
 ---
 
@@ -1018,23 +1231,35 @@ ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"
 
 #### Restore Test (Non-Destructive)
 
+Restic now covers `/etc/rancher/k3s` (kubeconfig + certs), `/var/lib/rancher/k3s/server/token`,
+and a consistent copy of the k3s SQLite (kine) datastore (`k3s-state.db`, produced each run by
+`homelab-backup.sh` via sqlite3's online backup API — see `infra/roles/storage/tasks/main.yml`).
+Restore into `/var/lib/backup/restore-test` (mode `0700`, root-only) — **the restored
+`k3s-state.db` contains every cluster Secret in plaintext**, so treat the restore target like a
+secret itself and always run the cleanup step below.
+
 ```bash
 # List snapshots
 ssh raspi5 "sudo restic snapshots \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password"
 
-# Restore to /tmp/restore-test
+# Restore to /var/lib/backup/restore-test (root-only)
+ssh raspi5 "sudo mkdir -p -m 0700 /var/lib/backup/restore-test"
 ssh raspi5 "sudo restic restore latest \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password \
-  --target /tmp/restore-test"
+  --target /var/lib/backup/restore-test"
 
-# Verify k3s etcd snapshots
-ssh raspi5 "ls -lh /tmp/restore-test/var/lib/rancher/k3s/server/db/snapshots/"
+# Verify the restored k3s config + token are present
+ssh raspi5 "ls -lh /var/lib/backup/restore-test/etc/rancher/k3s/"
+ssh raspi5 "ls -lh /var/lib/backup/restore-test/var/lib/rancher/k3s/server/token"
 
-# Cleanup
-ssh raspi5 "sudo rm -rf /tmp/restore-test"
+# Integrity check on the restored SQLite datastore copy
+ssh raspi5 "sudo python3 -c \"import sqlite3; print(sqlite3.connect('/var/lib/backup/restore-test/var/lib/backup/k3s-state.db').execute('PRAGMA integrity_check').fetchone())\""
+
+# Cleanup — MANDATORY, do not leave a plaintext copy of every cluster Secret on disk
+ssh raspi5 "sudo rm -rf /var/lib/backup/restore-test"
 ```
 
 #### Full Restore (Disaster Recovery)
@@ -1045,11 +1270,16 @@ Only when k3s is stopped and node is freshly provisioned:
 # Stop k3s
 ssh raspi5 "sudo systemctl stop k3s"
 
-# Restore from specific snapshot
+# Restore from a specific snapshot
 ssh raspi5 "sudo restic restore <snapshot-id> \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password \
   --target /"
+
+# Restic restores the datastore copy to its backed-up path, not the live datastore location —
+# put it back, and drop any stale WAL/SHM files so k3s starts from a clean checkpoint
+ssh raspi5 "sudo cp /var/lib/backup/k3s-state.db /var/lib/rancher/k3s/server/db/state.db"
+ssh raspi5 "sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/rancher/k3s/server/db/state.db-shm"
 
 # Start k3s
 ssh raspi5 "sudo systemctl start k3s"
@@ -1188,10 +1418,11 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 
 ### Full Cluster Reset
 
-1. **Backup etcd snapshots** from raspi5:
-   ```bash
-   scp ansible@raspi5:/var/lib/rancher/k3s/server/db/snapshots/* ./backup-$(date +%Y%m%d)/
-   ```
+1. **Backup the k3s datastore** from raspi5 — k3s runs the embedded SQLite (kine) datastore, not
+   etcd, so there is no `db/snapshots/` directory to copy; use the restic restore instead (see
+   "Backup (Restic)" → "Restore Test (Non-Destructive)" above) to pull a recent
+   `/etc/rancher/k3s`, `server/token`, and `k3s-state.db` onto your workstation before wiping
+   the node.
 
 2. **Wipe k3s from all nodes**:
    ```bash
@@ -1210,11 +1441,13 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify all pods Running | Daily | `kubectl get pods -A` |
 | Check node resource usage | Daily | `kubectl top nodes` |
 | Verify Longhorn volume health | Daily | `kubectl get volumes -n longhorn-system` |
-| Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` |
+| Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
 | Verify Longhorn recurring snapshot job fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" above) |
-| Test backup restore | Monthly | Non-destructive restore test (see above) |
+| Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
+| Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
+| Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
 | Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |

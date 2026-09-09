@@ -12,7 +12,7 @@
 #   local-path wird als Roh-Manifest von k3s verwaltet (kein HelmChart).
 #   Der Patch auf is-default-class: "false" kann bei k3s-Neustart oder -Upgrade
 #   zurückgesetzt werden. Playbook nach k3s-Upgrades erneut ausführen.
-#   Siehe OPERATIONS.md — Abschnitt "Longhorn Storage".
+#   Siehe DEPLOYMENT.md — Abschnitt "Longhorn Storage".
 - name: Longhorn — Storage Platform deployen
   hosts: k3s_server
   gather_facts: false

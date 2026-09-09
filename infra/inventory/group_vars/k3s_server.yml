@@ -14,4 +14,11 @@ storage_run_restic_backup: true
 storage_restic_repo: "/var/lib/backup/restic-repo"  # interim; nach SSD-Anschluss auf /mnt/backup/restic-repo ändern
 storage_backup_paths:
   - /etc/rancher/k3s
-  - /var/lib/rancher/k3s/server/db/snapshots  # k3s etcd-Snapshots (konsistent, auto-erstellt)
+  # k3s runs the embedded SQLite (kine) datastore, not etcd — server/db/snapshots/ only exists
+  # with --cluster-init (embedded etcd), so it is never present here and was silently skipped
+  # by restic before #64. server/token is needed to rejoin/restore a node without regenerating
+  # cluster identity.
+  - /var/lib/rancher/k3s/server/token
+  # Consistent copy of the live SQLite datastore, produced each run by homelab-backup.sh
+  # (infra/roles/storage/tasks/main.yml) via sqlite3's online backup API before restic runs.
+  - "{{ storage_k3s_state_copy }}"

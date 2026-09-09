@@ -32,6 +32,7 @@ Follow this loop for **every change** to this repository:
 | Longhorn storage | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` | `30_longhorn.yml` |
 | Longhorn recurring snapshot schedule/retention | `infra/playbooks/30_longhorn.yml` (`daily-snapshot` RecurringJob task) | `30_longhorn.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
+| App-data backup script (components, retention, verification) | `scripts/backup-app-data.sh` | none (run the script) |
 | cert-manager / TLS | `infra/playbooks/40_platform.yml`, `cluster/values/cert-manager.yaml` | `40_platform.yml` |
 | Cloudflare Tunnel | `infra/playbooks/40_platform.yml`, `cluster/values/cloudflared.yaml` | `40_platform.yml` |
 | Cloudflare Tunnel ingress list | `infra/playbooks/40_platform.yml` (`cf_ingress_body` fact) | `40_platform.yml` |
