@@ -1153,6 +1153,7 @@ after the fact:
 |------|---------------|------|----------------------------|--------|
 | 2026-09-08 | 2026-09-08_215809 | (a) PostgreSQL homelabdb → restore_test | tables public: 8 / 8 | PASS |
 | 2026-09-08 | 2026-09-08_215809 | (b) grafana-data.tgz → scratch PVC | sha256 319b6602…896cb / 319b6602…896cb (full hash in the worklog) | PASS |
+| 2026-09-09 | restic snapshot `c8d10fe4` (raspi5) | (c) restic `restore latest` → `/var/lib/backup/restore-test` | `k3s-state.db` 710176768 B, `PRAGMA integrity_check` = ok, 2520 kine rows; `server/token` sha256 identical to live | PASS |
 
 ---
 
