@@ -110,6 +110,8 @@ config:
 - **Default**: Yes — PVCs without `storageClassName` use Longhorn automatically
 - **Survives**: Node failures, k3s restarts
 - **Use for**: Databases and stateful workloads that need persistence
+- **Auto-snapshotted**: every Longhorn PVC is automatically covered by the daily `default`-group recurring snapshot job (retain 7) unless opted into a different group. This protects against accidental in-place data changes but not PVC/Volume deletion or node/disk failure — node/disk failure and PVC deletion are covered by the manual app-data dumps below. See DEPLOYMENT.md "Recurring Snapshots (#63)".
+- **Off-cluster backup**: there is no Longhorn `BackupTarget`. Application data is dumped by hand to the operator's Mac with `scripts/backup-app-data.sh`, so a new stateful workload is **not** backed up automatically: add a component for it to that script. See DEPLOYMENT.md "App-data backups to the operator's Mac (#64)".
 
 ### Fallback: local-path
 

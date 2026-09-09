@@ -29,7 +29,7 @@ spec:
           # Fixes CVE-2026-49468 (critical host-header auth bypass) + 4 further advisories since 1.83.7.
           # Multi-arch index digest sha256:157aaf0a519713663ec6abefe73fa48bf12f638b0e63fb2b209ba0eae68e6bd7
           # resolved 2026-09-04 via `docker buildx imagetools inspect` (#57).
-          image: docker.litellm.ai/berriai/litellm-non_root:v1.98.0@sha256:157aaf0a519713663ec6abefe73fa48bf12f638b0e63fb2b209ba0eae68e6bd7
+          image: docker.litellm.ai/berriai/litellm-non_root:v1.100.0@sha256:d7e14f6897f78dcd7481fea9139b76c65765cc68d08c0d82f702a5b742ac9792
           args:
             - "--config"
             - "/app/proxy_config.yaml"

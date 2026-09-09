@@ -16,9 +16,15 @@ storage_backup_fstype: "ext4"
 storage_run_restic_backup: false
 
 # Restic Repository-Pfad (lokales Verzeichnis, interim bis externe SSD angeschlossen)
-# Follow-up: /mnt/backup/restic-repo nach SSD-Anschluss (Prozess in OPERATIONS.md)
+# Follow-up: /mnt/backup/restic-repo nach SSD-Anschluss (Prozess in DEPLOYMENT.md)
 storage_restic_repo: "{{ storage_backup_dir }}/restic-repo"
 
 # Pfade die gesichert werden — safe default (leer; wird in k3s_server.yml überschrieben)
 # Nicht k3s-spezifische Pfade im Default, um Fehler auf Nicht-k3s-Nodes zu vermeiden
 storage_backup_paths: []
+
+# k3s SQLite (kine) datastore — the live file, and where the pre-backup consistent copy is
+# written (#64). k3s runs the embedded SQLite datastore here, not etcd, so there are no
+# etcd snapshots under server/db/snapshots/ to back up directly (see homelab-backup.sh).
+storage_k3s_state_db: /var/lib/rancher/k3s/server/db/state.db
+storage_k3s_state_copy: "{{ storage_backup_dir }}/k3s-state.db"

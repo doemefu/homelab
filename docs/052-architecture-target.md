@@ -331,7 +331,7 @@ Services run locally via `./mvnw spring-boot:run` and connect to infrastructure 
 
 ```bash
 # Port-forward cluster services for local dev
-kubectl port-forward -n apps svc/postgres 5432:5432 &
+kubectl port-forward -n apps svc/postgresql 5432:5432 &
 kubectl port-forward -n apps svc/influxdb2 8086:80 &
 kubectl port-forward -n apps svc/mosquitto 1883:1883 &
 
@@ -345,10 +345,10 @@ cd terrarium-auth-service
 - **Cluster:** K3s (raspi5 as control-plane, raspi4 as worker) — **already running**
 - **Namespace:** `apps`
 - **Ingress:** Cloudflare Tunnel (TLS at edge, no K8s Ingress resources)
-- **Storage:** Longhorn (RF=2) for PostgreSQL and InfluxDB PVCs
+- **Storage:** Longhorn (RF=2) for PostgreSQL and InfluxDB PVCs; daily local Longhorn snapshots + manual app-data dumps to the operator's Mac (`DEPLOYMENT.md` "App-data backups to the operator's Mac", #64)
 - **Secrets:** SOPS + age (encrypted in infra repo)
 - **Images:** Multi-arch (linux/arm64 + linux/amd64), pushed to GHCR
-- **Resource limits:** CPU 50m-500m, Memory 64Mi-256Mi per service
+- **Resource limits:** CPU 100m (request) - 1000m (limit), Memory 256Mi (request) - 512Mi (limit) per service; 300 s startup probe budget (verified against auth-service/device-service `k8s/deployment.yaml` on `origin/main`, commit `fd16353`/`93b5fcb` — see PR #78)
 - **JVM tuning:** `-Xmx128m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m`
 - **Infrastructure services (PostgreSQL, InfluxDB, Mosquitto):** Deployed and managed by IaC repo, not this project
 
