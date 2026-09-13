@@ -330,11 +330,15 @@ snapshot protection needed.
     purges removed/system snapshots). Delete the leftover `daily-sn-*` Snapshot CRs: list them
     with
     `kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq -r '.items[] | select(.spec.volume=="<volume-name>") | .metadata.name'`,
-    delete each with `kubectl -n longhorn-system delete snapshots.longhorn.io <name> ...`, then
-    wait for the engine's purge to finish before measuring:
+    delete each with `kubectl -n longhorn-system delete snapshots.longhorn.io <name>`. Before
+    deleting, check the volume's health (`kubectl -n longhorn-system get volumes.longhorn.io
+    <volume-name> -o jsonpath='{.status.robustness}'`, expect `healthy`) and free disk space on
+    its replica nodes — a purge needs temporary space and can stall on a nearly full disk. Then
+    wait for the engine's purge to finish before checking size:
     `kubectl -n longhorn-system get engines.longhorn.io -l longhornvolume=<volume-name> -o jsonpath='{.items[0].status.purgeStatus}'`
-    — `actualSize` then drops to about the nominal size. This is how the Prometheus volume's
-    pre-#101 chain (≈ 40 G) was removed, once.
+    — after a successful purge `actualSize` decreases substantially but can stay above the
+    nominal size (the volume head keeps every block the filesystem ever wrote until a filesystem
+    trim). This is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
 - **Verify:**
   ```bash
   kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
