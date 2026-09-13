@@ -152,6 +152,48 @@
       no_log: true
       delegate_to: localhost
 
+    # --- Prometheus PVC: opt out of the Longhorn default snapshot group (#101) ---
+    # The `daily-snapshot` RecurringJob (30_longhorn.yml) covers every Longhorn
+    # volume without a more specific recurring-job label. Prometheus' TSDB
+    # rewrites blocks constantly, so its snapshot chain exceeded twice the
+    # volume size and filled raspi4 (DiskPressure 2026-09-11). Labelling the
+    # PVC as recurring-job "source" makes Longhorn sync the PVC's recurring-job
+    # labels to the Volume, where they override the auto-added `default` label;
+    # group `metrics` only carries the snapshot-cleanup job defined in 30.
+    # The PVC is created by the Prometheus Operator after the Helm release is
+    # up, hence the wait (60 × 10 s covers a fresh cluster). In --check mode on
+    # a fresh cluster this wait times out — expected; on a live cluster it
+    # resolves at once and the patch below shows the label diff.
+    # Removing this task does NOT remove the labels from the PVC; re-run this
+    # playbook after any recreation of the PVC (restore, template change).
+    - name: Prometheus PVC abwarten
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: monitoring
+        name: prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0
+      register: prometheus_pvc_info
+      until: prometheus_pvc_info.resources | length > 0
+      retries: 60
+      delay: 10
+      delegate_to: localhost
+
+    - name: Prometheus PVC aus der Longhorn default-Snapshot-Gruppe nehmen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: monitoring
+        name: prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0
+        definition:
+          metadata:
+            labels:
+              recurring-job.longhorn.io/source: enabled
+              recurring-job-group.longhorn.io/metrics: enabled
+      delegate_to: localhost
+
     # --- ServiceMonitors ---
     # All ServiceMonitors live in the monitoring namespace with label release: kube-prometheus-stack
     # so the Prometheus Operator discovers them automatically.
