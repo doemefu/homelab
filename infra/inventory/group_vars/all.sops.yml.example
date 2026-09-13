@@ -128,3 +128,12 @@ mistral_codestral_api_key: "CHANGE_ME_mistral_codestral_api_key"
 # LiteLLM OIDC client secret — shared with auth-service for SSO UI login
 # Generate: openssl rand -hex 32
 litellm_client_secret: "CHANGE_ME_openssl_rand_hex_32"
+
+# furchert-ch Auth.js session secret (openssl rand -base64 33)
+furchert_ch_auth_secret: "CHANGE_ME_openssl_rand_base64_33"
+
+# furchert-ch OIDC client secret, plain value (auth-service stores it "{noop}"-prefixed)
+auth_service_furchert_ch_client_secret: "CHANGE_ME_openssl_rand_hex_32"
+
+# Infomaniak application password for info@furchert.ch (contact-form SMTP, furchert-ch#46)
+furchert_ch_smtp_password: "CHANGE_ME_infomaniak_smtp_app_password"
