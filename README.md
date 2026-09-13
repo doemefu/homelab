@@ -59,7 +59,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **Primary**: Longhorn v1.7.2 (distributed block storage, RF=2, default StorageClass)
 - **Fallback**: local-path (non-default, for node-local/ephemeral storage)
 - **Backup**: Restic (daily at 03:00 on raspi5, repository on root filesystem; covers `/etc/rancher/k3s`, the k3s server token, and a consistent copy of the k3s SQLite datastore)
-- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui plus the two monitoring volumes); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
+- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui plus grafana; the Prometheus TSDB volume is excluded into a separate `metrics` group, see DEPLOYMENT.md #101); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
 - **Off-cluster app data**: manual dumps to the operator's Mac via `scripts/backup-app-data.sh` (pg_dumpall + per-database dumps, `influx backup`, n8n exports, PVC archives for n8n/open-webui/grafana, mosquitto.db) into `backups/<run>/`; there is no Longhorn `BackupTarget`, and the dumps are LAN-local, not off-site — see DEPLOYMENT.md "App-data backups to the operator's Mac (#64)"
 
 ### Observability
@@ -102,7 +102,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
 | **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch}` |
-| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`) + manual app-data dumps to the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `scripts/backup-app-data.sh` |
+| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`, Prometheus TSDB excluded — #101) + manual app-data dumps to the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `scripts/backup-app-data.sh` |
 
 ---
 

@@ -243,11 +243,52 @@ takes a snapshot of every Longhorn volume once a day:
 - **Retention:** 7 snapshots per volume (Longhorn prunes older ones automatically).
 - **Concurrency:** 1 (snapshots run one volume at a time).
 - **Coverage:** `groups: [default]` — Longhorn applies a `default`-group job to every volume
-  that has no more specific recurring-job/group assignment of its own. As of 2026-09-07 that
-  covers all 7 stateful volumes — the 5 `apps` volumes (`postgresql`, `influxdb2`, `mosquitto`,
-  `n8n`, `open-webui`) plus the 2 `monitoring` volumes (`grafana`, `prometheus`) — with no
-  per-volume labeling required, and will automatically cover any future stateful volume the same
-  way unless it's later opted into something more specific.
+  that has no more specific recurring-job/group assignment of its own. As of 2026-09-13 that
+  covers 6 stateful volumes — the 5 `apps` volumes (`postgresql`, `influxdb2`, `mosquitto`,
+  `n8n`, `open-webui`) plus the `monitoring` volume `grafana` — with no per-volume labeling
+  required, and will automatically cover any future stateful volume the same way unless it's
+  later opted into something more specific. The Prometheus TSDB volume opts out into the
+  `metrics` group instead — see "Excluded volumes: the metrics group (#101)" below.
+
+#### Excluded volumes: the metrics group (#101)
+
+The Prometheus TSDB PVC
+(`prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0`,
+namespace `monitoring`, 20 Gi, retention 14 d) is excluded from `daily-snapshot`: its TSDB
+rewrites blocks constantly, so the snapshot chain reached 46 G (7 snapshots = 40.7 G) and filled
+raspi4's 58 G SD card, causing DiskPressure on 2026-09-11 — metrics are a 14-day cache, no
+snapshot protection needed.
+
+- **Mechanism:** `infra/playbooks/41_monitoring.yml` labels the PVC
+  `recurring-job.longhorn.io/source=enabled` and `recurring-job-group.longhorn.io/metrics=enabled`.
+  Longhorn syncs a PVC's recurring-job labels to its Volume, overriding the auto-added
+  `recurring-job-group.longhorn.io/default` label (added only when a volume has no recurring-job
+  label at all).
+- **Cleanup job:** group `metrics` carries one `RecurringJob`, `metrics-snapshot-cleanup`
+  (`infra/playbooks/30_longhorn.yml`, task `snapshot-cleanup`, cron `0 4 * * *` node-local, retain
+  0, concurrency 1) — purges removed/system snapshots (e.g. replica rebuilds) and keeps the
+  group's labels backed by a real job. 04:00 is clear of the 02:00 snapshot window and the 03:00
+  restic cron on raspi5.
+- **Excluding another volume:** label its PVC the same way —
+  `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
+  — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
+  minute; verify with
+  `kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.metadata.labels}'`
+  (expect `recurring-job-group.longhorn.io/metrics: enabled`, no `default`).
+- **Verify:**
+  ```bash
+  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
+  kubectl -n monitoring get pvc <name> --show-labels
+  kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume>")] | length'
+  ```
+- **Warnings:** removing the labeling task from `41_monitoring.yml` does NOT remove the labels —
+  clear them explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
+  Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
+  returning the volume to `default`; recover by re-running `30_longhorn.yml` and
+  `41_monitoring.yml`. Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC
+  (restore, `volumeClaimTemplate` change) — labels don't survive it. `--check` of
+  `41_monitoring.yml` on a fresh cluster stops at the PVC wait (expected — the PVC only exists
+  after the real Helm deploy).
 
 **This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
 disks/replicas as the primary data (see the SD-card root-disk risk noted in
@@ -1445,7 +1486,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
-| Verify Longhorn recurring snapshot job fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" above) |
+| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
