@@ -343,7 +343,7 @@ snapshot protection needed.
   ```bash
   kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
   kubectl -n monitoring get pvc <name> --show-labels
-  kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume>")] | length'
+  kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume-name>")] | length'
   ```
 - **Warnings:**
   - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them

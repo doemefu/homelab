@@ -80,6 +80,9 @@ brew install helm@3 kubectl
 
 # Secrets + GitOps CLI
 brew install sops age fluxcd/tap/flux
+
+# jq (used by the Longhorn snapshot runbook commands)
+brew install jq
 ```
 
 > **Helm 4 Warning**: `brew install helm` installs Helm 4.x, which is NOT supported by `kubernetes.core.helm` (constraint `<4.0.0`). You **MUST** use helm@3. Set the path in `infra/inventory/group_vars/all.yml`:
