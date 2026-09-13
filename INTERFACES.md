@@ -289,6 +289,7 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 | `litellm-secrets` | `apps` | LiteLLM master key, salt key, DB password, Mistral API keys | LiteLLM | **`litellm_salt_key` MUST NEVER rotate** — invalidates all virtual keys in DB |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
+| `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), SMTP password (`smtp-password`, contact-form delivery, furchert-ch#46) | furchert-ch | Rotate via `59_app_services.yml`; `smtp-password` is an Infomaniak application password, independently revocable from the mailbox login password |
 | `cloudflare-api-token` | `platform` | Cloudflare API token | cert-manager DNS-01 challenges | Set in `40_platform.yml` |
 
 ### Required SOPS Variables
@@ -301,6 +302,9 @@ From `59_app_services.yml` (app secrets):
 - `influxdb_admin_token`
 - `auth_service_grafana_client_secret`, `auth_service_ha_client_secret`
 - `auth_service_device_service_client_secret`, `auth_service_n8n_client_secret`
+- `furchert_ch_auth_secret`
+- `auth_service_furchert_ch_client_secret`
+- `furchert_ch_smtp_password` (Infomaniak application password for `info@furchert.ch`, furchert-ch#46)
 - `n8n_encryption_key` (generate with `openssl rand -hex 32`)
 - `auth_service_rsa_private_key`, `auth_service_rsa_public_key`
 - `litellm_master_key` (starts with `sk-`)

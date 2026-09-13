@@ -18,6 +18,7 @@
 #   auth_service_n8n_client_secret:           <choose a random secret for n8n OIDC client>
 #   auth_service_furchert_ch_client_secret:   <random secret for furchert-ch OIDC client (plain, no {noop}); auth-service gets "{noop}<value>", furchert-ch gets "<value>">
 #   furchert_ch_auth_secret:                  <Auth.js session secret, e.g. openssl rand -base64 33>
+#   furchert_ch_smtp_password:                <Infomaniak application password for info@furchert.ch (contact-form SMTP, furchert-ch#46)>
 #   n8n_encryption_key:                       <32+ char random key, e.g. openssl rand -hex 32>
 #       auth-service receives "{noop}<value>" (prefix added by playbook)
 #       device-service receives "<value>" (plain, as OAuth2 client-secret)
@@ -79,6 +80,7 @@
           - litellm_client_secret is defined and litellm_client_secret | length > 0
           - auth_service_furchert_ch_client_secret is defined and auth_service_furchert_ch_client_secret | length > 0
           - furchert_ch_auth_secret is defined and furchert_ch_auth_secret | length > 0
+          - furchert_ch_smtp_password is defined and furchert_ch_smtp_password | length > 0
         fail_msg: >-
           One or more required SOPS variables are missing.
           Add them to infra/inventory/group_vars/all.sops.yml — see the header comment in this playbook.
@@ -218,7 +220,7 @@
       no_log: true
       delegate_to: localhost
 
-    - name: Create furchert-ch-secrets (Auth.js session + OIDC client secret)
+    - name: Create furchert-ch-secrets (Auth.js session, OIDC client secret, SMTP password)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -233,6 +235,9 @@
             # Plain client secret — must equal the plaintext stored "{noop}"-prefixed for the
             # furchert-ch OIDC client in homelab-auth-secrets above, so they match by construction.
             oidc-client-secret: "{{ auth_service_furchert_ch_client_secret }}"
+            # Infomaniak application password for info@furchert.ch — used by
+            # furchert-ch's contact-form SMTP delivery (furchert-ch#46).
+            smtp-password: "{{ furchert_ch_smtp_password }}"
       no_log: true
       delegate_to: localhost
 
