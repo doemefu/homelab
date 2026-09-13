@@ -250,48 +250,6 @@ takes a snapshot of every Longhorn volume in the `default` group once a day:
   later opted into something more specific. The Prometheus TSDB volume opts out into the
   `metrics` group instead — see "Excluded volumes: the metrics group (#101)" below.
 
-#### Excluded volumes: the metrics group (#101)
-
-The Prometheus TSDB PVC
-(`prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0`,
-namespace `monitoring`, 20 Gi, retention 14 d) is excluded from `daily-snapshot`: its TSDB
-rewrites blocks constantly, so the snapshot chain reached 46 G (7 snapshots = 40.7 G) and filled
-raspi4's 58 G SD card, causing DiskPressure on 2026-09-11 — metrics are a 14-day cache, no
-snapshot protection needed.
-
-- **Mechanism:** `infra/playbooks/41_monitoring.yml` labels the PVC
-  `recurring-job.longhorn.io/source=enabled` and `recurring-job-group.longhorn.io/metrics=enabled`.
-  Longhorn syncs a PVC's recurring-job labels to its Volume, overriding the auto-added
-  `recurring-job-group.longhorn.io/default` label (added only when a volume has no recurring-job
-  label at all).
-- **Cleanup job:** group `metrics` carries one `RecurringJob`, `metrics-snapshot-cleanup`
-  (`infra/playbooks/30_longhorn.yml`, task `snapshot-cleanup`, cron `0 4 * * *` node-local, retain
-  0, concurrency 1) — purges removed/system snapshots (e.g. replica rebuilds) and keeps the
-  group's labels backed by a real job. 04:00 is clear of the 02:00 snapshot window and the 03:00
-  restic cron on raspi5.
-- **Excluding another volume:** label its PVC the same way —
-  `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
-  — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
-  minute; verify with
-  `kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.metadata.labels}'`
-  (expect `recurring-job-group.longhorn.io/metrics: enabled`, no `default`).
-- **Verify:**
-  ```bash
-  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
-  kubectl -n monitoring get pvc <name> --show-labels
-  kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume>")] | length'
-  ```
-- **Warnings:**
-  - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
-    explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
-  - Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
-    returning the volume to `default`; recover by re-running `30_longhorn.yml` and
-    `41_monitoring.yml`.
-  - Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC (restore,
-    `volumeClaimTemplate` change) — labels don't survive it.
-  - `--check` of `41_monitoring.yml` on a fresh cluster stops at the PVC wait (expected — the
-    PVC only exists after the real Helm deploy).
-
 **This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
 disks/replicas as the primary data (see the SD-card root-disk risk noted in
 `cluster/values/longhorn.yaml`'s header comment), so this protects against logical mistakes
@@ -337,6 +295,63 @@ NOT delete the `RecurringJob` CR — `kubernetes.core.k8s` with a `definition:` 
 what's present, it doesn't prune resources removed from the playbook (unlike Flux's
 `Kustomization` pruning). Delete it explicitly if it's ever decommissioned:
 `kubectl -n longhorn-system delete recurringjobs.longhorn.io daily-snapshot`.
+
+#### Excluded volumes: the metrics group (#101)
+
+The Prometheus TSDB PVC
+(`prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0`,
+namespace `monitoring`, 20 Gi, retention 14 d) is excluded from `daily-snapshot`: its TSDB
+rewrites blocks constantly, so the snapshot chain reached 46 G (7 snapshots = 40.7 G) and filled
+raspi4's 58 G SD card, causing DiskPressure on 2026-09-11 — metrics are a 14-day cache, no
+snapshot protection needed.
+
+- **Mechanism:** `infra/playbooks/41_monitoring.yml` labels the PVC
+  `recurring-job.longhorn.io/source=enabled` and `recurring-job-group.longhorn.io/metrics=enabled`.
+  Longhorn syncs a PVC's recurring-job labels to its Volume, overriding the auto-added
+  `recurring-job-group.longhorn.io/default` label (added only when a volume has no recurring-job
+  label at all). When introducing a new group, apply `30_longhorn.yml` (creates the group's
+  `RecurringJob`) before `41_monitoring.yml` (adds the labels) — labelling first leaves the
+  volume in a group with no job behind it: still out of `default`, but nothing purges it and
+  Longhorn never cleans up the dangling label.
+- **Cleanup job:** group `metrics` carries one `RecurringJob`, `metrics-snapshot-cleanup`
+  (`infra/playbooks/30_longhorn.yml`, task `snapshot-cleanup`, cron `0 4 * * *` node-local, retain
+  0, concurrency 1) — purges removed/system snapshots (e.g. replica rebuilds) and keeps the
+  group's labels backed by a real job. 04:00 is clear of the 02:00 snapshot window and the 03:00
+  restic cron on raspi5.
+- **Excluding another volume:** label its PVC the same way —
+  `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
+  — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
+  minute; verify with
+  `kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.metadata.labels}'`
+  (`<volume-name>` is the PV name, not the PVC name — resolve it via the `jsonpath='{.spec.volumeName}'`
+  recipe above; expect `recurring-job-group.longhorn.io/metrics: enabled`, no `default`).
+  - Leaving `default` only stops *new* snapshots — it does not remove ones already taken
+    (`retain` no longer applies once a volume is out of the group, and `snapshot-cleanup` only
+    purges removed/system snapshots). Delete the leftover `daily-sn-*` Snapshot CRs: list them
+    with
+    `kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq -r '.items[] | select(.spec.volume=="<volume-name>") | .metadata.name'`,
+    delete each with `kubectl -n longhorn-system delete snapshots.longhorn.io <name> ...`, then
+    wait for the engine's purge to finish before measuring:
+    `kubectl -n longhorn-system get engines.longhorn.io -l longhornvolume=<volume-name> -o jsonpath='{.items[0].status.purgeStatus}'`
+    — `actualSize` then drops to about the nominal size. This is how the Prometheus volume's
+    pre-#101 chain (≈ 40 G) was removed, once.
+- **Verify:**
+  ```bash
+  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
+  kubectl -n monitoring get pvc <name> --show-labels
+  kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume>")] | length'
+  ```
+- **Warnings:**
+  - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
+    explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
+  - Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
+    returning the volume to `default`; recover by re-running `30_longhorn.yml` and
+    `41_monitoring.yml`.
+  - Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC (restore,
+    `volumeClaimTemplate` change) — labels don't survive it.
+  - `--check` of `41_monitoring.yml` on a fresh cluster stops at the PVC wait for about 10
+    minutes (60 × 10 s) before failing (expected, not a hang — the PVC only exists after the
+    real Helm deploy).
 
 ---
 

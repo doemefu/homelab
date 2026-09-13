@@ -162,8 +162,9 @@
     # group `metrics` only carries the snapshot-cleanup job defined in 30.
     # The PVC is created by the Prometheus Operator after the Helm release is
     # up, hence the wait (60 × 10 s covers a fresh cluster). In --check mode on
-    # a fresh cluster this wait times out — expected; on a live cluster it
-    # resolves at once and the patch below shows the label diff.
+    # a fresh cluster this wait times out after about 10 minutes (60 × 10 s) —
+    # expected, not a hang; on a live cluster it resolves at once and the
+    # patch below shows the label diff.
     # Removing this task does NOT remove the labels from the PVC; re-run this
     # playbook after any recreation of the PVC (restore, template change).
     - name: Prometheus PVC abwarten
