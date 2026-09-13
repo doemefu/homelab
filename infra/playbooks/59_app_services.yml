@@ -18,7 +18,7 @@
 #   auth_service_n8n_client_secret:           <choose a random secret for n8n OIDC client>
 #   auth_service_furchert_ch_client_secret:   <random secret for furchert-ch OIDC client (plain, no {noop}); auth-service gets "{noop}<value>", furchert-ch gets "<value>">
 #   furchert_ch_auth_secret:                  <Auth.js session secret, e.g. openssl rand -base64 33>
-#   furchert_ch_smtp_password:                 <Infomaniak application password for info@furchert.ch (contact-form SMTP, furchert-ch#46)>
+#   furchert_ch_smtp_password:                <Infomaniak application password for info@furchert.ch (contact-form SMTP, furchert-ch#46)>
 #   n8n_encryption_key:                       <32+ char random key, e.g. openssl rand -hex 32>
 #       auth-service receives "{noop}<value>" (prefix added by playbook)
 #       device-service receives "<value>" (plain, as OAuth2 client-secret)
