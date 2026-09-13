@@ -232,7 +232,7 @@ ansible-playbook infra/playbooks/30_longhorn.yml
 #### Recurring Snapshots (#63)
 
 A Longhorn `RecurringJob` named `daily-snapshot` (applied by `infra/playbooks/30_longhorn.yml`)
-takes a snapshot of every Longhorn volume once a day:
+takes a snapshot of every Longhorn volume in the `default` group once a day:
 
 - **Schedule:** `0 2 * * *` (02:00 **node-local time** daily — one hour ahead of the existing
   03:00 restic backup cron so the two don't overlap; there is no functional dependency between
@@ -281,14 +281,16 @@ snapshot protection needed.
   kubectl -n monitoring get pvc <name> --show-labels
   kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume>")] | length'
   ```
-- **Warnings:** removing the labeling task from `41_monitoring.yml` does NOT remove the labels —
-  clear them explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
-  Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
-  returning the volume to `default`; recover by re-running `30_longhorn.yml` and
-  `41_monitoring.yml`. Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC
-  (restore, `volumeClaimTemplate` change) — labels don't survive it. `--check` of
-  `41_monitoring.yml` on a fresh cluster stops at the PVC wait (expected — the PVC only exists
-  after the real Helm deploy).
+- **Warnings:**
+  - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
+    explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
+  - Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
+    returning the volume to `default`; recover by re-running `30_longhorn.yml` and
+    `41_monitoring.yml`.
+  - Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC (restore,
+    `volumeClaimTemplate` change) — labels don't survive it.
+  - `--check` of `41_monitoring.yml` on a fresh cluster stops at the PVC wait (expected — the
+    PVC only exists after the real Helm deploy).
 
 **This is a local snapshot, not an off-cluster backup:** snapshots live on the same physical
 disks/replicas as the primary data (see the SD-card root-disk risk noted in

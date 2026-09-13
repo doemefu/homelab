@@ -59,7 +59,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **Primary**: Longhorn v1.7.2 (distributed block storage, RF=2, default StorageClass)
 - **Fallback**: local-path (non-default, for node-local/ephemeral storage)
 - **Backup**: Restic (daily at 03:00 on raspi5, repository on root filesystem; covers `/etc/rancher/k3s`, the k3s server token, and a consistent copy of the k3s SQLite datastore)
-- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui plus grafana; the Prometheus TSDB volume is excluded into a separate `metrics` group, see DEPLOYMENT.md #101); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
+- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui plus grafana; the Prometheus TSDB volume is excluded into a separate `metrics` group, see DEPLOYMENT.md "Excluded volumes: the metrics group (#101)"); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
 - **Off-cluster app data**: manual dumps to the operator's Mac via `scripts/backup-app-data.sh` (pg_dumpall + per-database dumps, `influx backup`, n8n exports, PVC archives for n8n/open-webui/grafana, mosquitto.db) into `backups/<run>/`; there is no Longhorn `BackupTarget`, and the dumps are LAN-local, not off-site — see DEPLOYMENT.md "App-data backups to the operator's Mac (#64)"
 
 ### Observability
