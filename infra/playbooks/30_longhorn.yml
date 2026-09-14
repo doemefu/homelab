@@ -79,12 +79,13 @@
 
     # --- Recurring snapshot job (#63) ---
     # `groups: [default]` applies this job to every Longhorn volume that has
-    # no more specific recurring-job/group assignment of its own — today
-    # that's all 5 stateful apps volumes (postgresql, influxdb2, mosquitto,
-    # n8n, open-webui) with zero per-volume labeling required, and covers
-    # any future stateful volume the same way unless it opts into something
-    # more specific later. See DEPLOYMENT.md "Longhorn Storage" for the
-    # schedule/retention rationale and how to verify/smoke-test it.
+    # no more specific recurring-job/group label of its own — today the six
+    # volumes postgresql, influxdb2, mosquitto, n8n, open-webui and grafana —
+    # and covers any future stateful volume the same way. Volumes that must
+    # NOT be snapshotted daily opt into the `metrics` group instead (the
+    # Prometheus TSDB PVC, labelled in 41_monitoring.yml — see the
+    # metrics-snapshot-cleanup task below and DEPLOYMENT.md "Longhorn Storage"
+    # for the schedule/retention rationale and how to verify/smoke-test it).
     - name: Longhorn RecurringJob for daily snapshots anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -107,5 +108,40 @@
             groups:
               - default
             retain: 7
+            concurrency: 1
+      delegate_to: localhost
+
+    # --- Recurring snapshot cleanup for excluded volumes (#101) ---
+    # Volumes that opt out of the `default` snapshot group join the `metrics`
+    # group (today: the Prometheus TSDB PVC, labelled in 41_monitoring.yml).
+    # Prometheus' TSDB churn made its daily-snapshot chain grow past twice the
+    # volume size (46 G on raspi4's 58 G SD card → DiskPressure 2026-09-11).
+    # This job gives the group a real RecurringJob, so the group labels stay
+    # meaningful, and purges removed/system snapshots (e.g. from replica
+    # rebuilds) that no snapshot job would clean up otherwise.
+    # 04:00 node-local: clear of the 02:00 snapshot window and of the 03:00
+    # restic cron on raspi5, which holds a Prometheus replica.
+    # `retain: 0` is the value Longhorn's webhook mutates snapshot-cleanup jobs
+    # to (retain has no effect for this task), so declaring 0 keeps the task
+    # idempotent.
+    # ⚠️ Deleting this CR makes Longhorn strip the `metrics` labels from the PVC
+    # and the Volume — the volume silently falls back to `default` and the daily
+    # snapshots resume (see DEPLOYMENT.md).
+    - name: Longhorn RecurringJob metrics-snapshot-cleanup anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: RecurringJob
+          metadata:
+            name: metrics-snapshot-cleanup
+            namespace: longhorn-system
+          spec:
+            name: metrics-snapshot-cleanup
+            cron: "0 4 * * *"
+            task: snapshot-cleanup
+            groups:
+              - metrics
+            retain: 0
             concurrency: 1
       delegate_to: localhost

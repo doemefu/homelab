@@ -31,6 +31,7 @@ Follow this loop for **every change** to this repository:
 | k3s version pinning | `infra/roles/k3s/defaults/main.yml` (`k3s_version`) | `20_k3s.yml` |
 | Longhorn storage | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` | `30_longhorn.yml` |
 | Longhorn recurring snapshot schedule/retention | `infra/playbooks/30_longhorn.yml` (`daily-snapshot` RecurringJob task) | `30_longhorn.yml` |
+| Longhorn recurring snapshot per-volume exclusions (PVC labels) | the playbook owning the PVC — today `infra/playbooks/41_monitoring.yml` (Prometheus PVC) | `41_monitoring.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
 | App-data backup script (components, retention, verification) | `scripts/backup-app-data.sh` | none (run the script) |
 | cert-manager / TLS | `infra/playbooks/40_platform.yml`, `cluster/values/cert-manager.yaml` | `40_platform.yml` |
@@ -79,6 +80,9 @@ brew install helm@3 kubectl
 
 # Secrets + GitOps CLI
 brew install sops age fluxcd/tap/flux
+
+# jq (used by the Longhorn snapshot runbook commands)
+brew install jq
 ```
 
 > **Helm 4 Warning**: `brew install helm` installs Helm 4.x, which is NOT supported by `kubernetes.core.helm` (constraint `<4.0.0`). You **MUST** use helm@3. Set the path in `infra/inventory/group_vars/all.yml`:
