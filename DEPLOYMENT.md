@@ -318,6 +318,33 @@ snapshot protection needed.
   0, concurrency 1) — purges removed/system snapshots (e.g. replica rebuilds) and keeps the
   group's labels backed by a real job. 04:00 is clear of the 02:00 snapshot window and the 03:00
   restic cron on raspi5.
+- **Filesystem trim job (#106):** group `metrics` carries a second `RecurringJob`,
+  `metrics-filesystem-trim` (`infra/playbooks/30_longhorn.yml`, task `filesystem-trim`, cron
+  `0 5 * * *` node-local, retain 0, concurrency 1). It exists because an excluded volume keeps a
+  frozen base forever: Longhorn never deletes a volume's *newest* snapshot, it only marks it
+  removed and merges it once a newer snapshot appears — and with no snapshot job on the volume,
+  no newer snapshot ever appears. After the #101 cleanup the Prometheus volume went from 21.3 G
+  back to 22.0 G within a day, on its way to ~40 G (2 x the 20 Gi volume). A trim reclaims the
+  blocks the filesystem no longer uses, both in the volume head **and** in the continuous chain
+  of already-removed snapshots below it, so the frozen base shrinks too; valid (not removed)
+  snapshots are immutable and are never trimmed, which is why the `default`-group volumes keep
+  their chains. 05:00 is simply clear of the 02:00, 03:00 and 04:00 windows — the cleanup job
+  is not a precondition for the trim. The job ends with a snapshot purge, which is a no-op
+  unless a replica rebuild left a system snapshot behind.
+  - Prerequisites: a trimmable filesystem (ext4 or XFS — the `longhorn` StorageClass formats
+    ext4, check with `kubectl get sc longhorn -o jsonpath='{.parameters.fsType}'`) and the volume
+    **attached and mounted**. The workload keeps running; no `discard` mount option is needed.
+  - Every failure mode is silent: a detached volume (workload scaled to 0, node down) is skipped
+    with a log warning only, and a trim does nothing while a replica is rebuilding. The line
+    `Finished recurring filesystem trim` in the job pod's log is the only proof that a run did
+    something — see the weekly maintenance checklist.
+  - ⚠️ Do **not** enable the global setting `remove-snapshots-during-filesystem-trim` to "help"
+    this job. It is unnecessary here (the leftover snapshot is already marked removed) and it is
+    cluster-wide: it would mark the newest snapshot of *every* volume as removed during a trim,
+    including the app volumes that rely on `daily-snapshot` for rollback.
+  - ext4 remembers which blocks it has already discarded. A snapshot that is marked removed
+    *after* a trim may therefore keep its blocks until the filesystem is remounted — restart the
+    Prometheus pod and let the next trim run if a removed snapshot refuses to shrink.
 - **Excluding another volume:** label its PVC the same way —
   `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
   — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
@@ -338,19 +365,29 @@ snapshot protection needed.
     `kubectl -n longhorn-system get engines.longhorn.io -l longhornvolume=<volume-name> -o jsonpath='{.items[0].status.purgeStatus}'`
     — after a successful purge `actualSize` decreases substantially but can stay above the
     nominal size (the volume head keeps every block the filesystem ever wrote until a filesystem
-    trim). This is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
+    trim — for `metrics`-group volumes that is what `metrics-filesystem-trim` does nightly). This
+    is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
 - **Verify:**
   ```bash
-  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
+  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup + metrics-filesystem-trim
   kubectl -n monitoring get pvc <name> --show-labels
   kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume-name>")] | length'
+
+  # Did the nightly trim actually run? (a skipped volume logs a warning and nothing else)
+  kubectl -n longhorn-system get pods --sort-by=.metadata.creationTimestamp | grep metrics-filesystem-trim
+  kubectl -n longhorn-system logs <that pod> | grep 'Finished recurring filesystem trim'
+
+  # Did it free anything? Compare before and after a run; actualSize should approach "Used".
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.actualSize}'
+  kubectl -n monitoring exec prometheus-kube-prometheus-stack-prometheus-0 -c prometheus -- df -h /prometheus
   ```
 - **Warnings:**
   - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
     explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
-  - Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
-    returning the volume to `default`; recover by re-running `30_longhorn.yml` and
-    `41_monitoring.yml`.
+  - Deleting the *last* `RecurringJob` of the group strips the labels from PVC and Volume,
+    silently returning the volume to `default`; recover by re-running `30_longhorn.yml` and
+    `41_monitoring.yml`. With both `metrics-snapshot-cleanup` and `metrics-filesystem-trim` in
+    place, deleting one of the two is safe — deleting both is not.
   - Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC (restore,
     `volumeClaimTemplate` change) — labels don't survive it.
   - `--check` of `41_monitoring.yml` on a fresh cluster stops at the PVC wait for about 10
@@ -1507,7 +1544,8 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
-| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup metrics-filesystem-trim` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify the metrics-group trim is still working | Weekly | `kubectl -n longhorn-system get volumes.longhorn.io <prometheus-volume> -o jsonpath='{.status.actualSize}'` (flat, not trending towards 40 G) + `kubectl -n longhorn-system logs <latest metrics-filesystem-trim pod>` showing `Finished recurring filesystem trim` — every failure mode of the trim is silent; alerting is tracked in #92 |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
