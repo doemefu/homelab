@@ -159,7 +159,8 @@
     # volume size and filled raspi4 (DiskPressure 2026-09-11). Labelling the
     # PVC as recurring-job "source" makes Longhorn sync the PVC's recurring-job
     # labels to the Volume, where they override the auto-added `default` label;
-    # group `metrics` only carries the snapshot-cleanup job defined in 30.
+    # group `metrics` takes no snapshots at all: it carries the
+    # snapshot-cleanup and filesystem-trim jobs defined in 30.
     # The PVC is created by the Prometheus Operator after the Helm release is
     # up, hence the wait (60 × 10 s covers a fresh cluster). In --check mode on
     # a fresh cluster this wait times out after about 10 minutes (60 × 10 s) —

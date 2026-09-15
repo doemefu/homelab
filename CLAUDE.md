@@ -47,7 +47,7 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 ## Cluster context (quick reference)
 
 - k3s v1.32.2+k3s1: control plane `raspi5` (arm64, 192.168.1.61), workers `raspi4` (arm64), `mba1`/`mba2` (amd64). Ubuntu 24.04.
-- Namespaces: `apps`, `platform` (cert-manager, cloudflared), `monitoring` (kube-prometheus-stack), `longhorn-system` (Longhorn, replication 2; `daily-snapshot` 02:00 local-only; Prometheus TSDB PVC excluded into the `metrics` group (#101); no BackupTarget — app data is dumped manually to the operator's Mac, restic 03:00 on raspi5 covers k3s config/token + a SQLite datastore copy — #64), `flux-system` (Flux CD image automation), `homeassistant`.
+- Namespaces: `apps`, `platform` (cert-manager, cloudflared), `monitoring` (kube-prometheus-stack), `longhorn-system` (Longhorn, replication 2; `daily-snapshot` 02:00 local-only; Prometheus TSDB PVC excluded into the `metrics` group, which trims nightly instead of snapshotting (#101, #106); no BackupTarget — app data is dumped manually to the operator's Mac, restic 03:00 on raspi5 covers k3s config/token + a SQLite datastore copy — #64), `flux-system` (Flux CD image automation), `homeassistant`.
 - `apps` workloads: auth-service, device-service, furchert-ch, open-webui, litellm, n8n, postgresql (pgvector), influxdb2, mosquitto — see hostnames/ports in `DEPLOYMENT.md`.
 - Home Assistant runs in k3s (namespace `homeassistant`, `51_homeassistant.yml`, pajikos Helm chart) — not in Docker.
 - Ingress: Traefik (bundled with k3s) + cert-manager (Let's Encrypt). External access only via Cloudflare Tunnel.
