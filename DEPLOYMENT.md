@@ -345,6 +345,9 @@ snapshot protection needed.
   - ext4 remembers which blocks it has already discarded. A snapshot that is marked removed
     *after* a trim may therefore keep its blocks until the filesystem is remounted — restart the
     Prometheus pod and let the next trim run if a removed snapshot refuses to shrink.
+  - Cost: the trim runs as `fstrim` in the host mount namespace with a one-hour timeout. The first
+    run discards the whole accumulated free space at once and loads the replica nodes noticeably;
+    steady-state runs discard only one day of churn.
 - **Excluding another volume:** label its PVC the same way —
   `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
   — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
@@ -377,9 +380,16 @@ snapshot protection needed.
   kubectl -n longhorn-system get pods --sort-by=.metadata.creationTimestamp | grep metrics-filesystem-trim
   kubectl -n longhorn-system logs <that pod> | grep 'Finished recurring filesystem trim'
 
+  # Volume attached and running the expected engine image (a detached volume is skipped silently)
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.state}{"  "}{.status.currentImage}'
+
   # Did it free anything? Compare before and after a run; actualSize should approach "Used".
   kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.actualSize}'
   kubectl -n monitoring exec prometheus-kube-prometheus-stack-prometheus-0 -c prometheus -- df -h /prometheus
+
+  # On-disk proof on each replica node — this is the number that filled raspi4's SD card
+  ssh raspi5 'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
+  ssh mba1   'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
   ```
 - **Warnings:**
   - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
