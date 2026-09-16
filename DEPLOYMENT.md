@@ -1435,8 +1435,14 @@ ssh ansible@<mba-ip> "systemctl list-timers homelab-scheduled-reboot.timer --all
 ssh ansible@<mba-ip> "sudo systemd-analyze verify /etc/systemd/system/homelab-scheduled-reboot.timer"
 ssh ansible@<mba-ip> "systemd-analyze calendar '*-*-* 06:10:00' --iterations=3"
 
-# The real functional test: must print "no reboot needed" and exit 0
-ssh ansible@<mba-ip> "sudo systemctl start homelab-scheduled-reboot.service && \
+# Functional test — this is not a passive check: below the threshold it prints "no reboot
+# needed" and exits 0, but once uptime >= mac_tweaks_reboot_min_uptime_seconds (3.5 d) this
+# command IS the reboot. That makes it the recommended, attended end-to-end test: run it
+# deliberately once a node's uptime crosses 3.5 d (mba2 first, mba1 >= 60 min later) and
+# watch the graceful shutdown end to end — kubectl -n apps logs postgresql-0 --previous |
+# tail -5 for "database system is shut down" and journalctl -u k3s-agent -f for the
+# shutdown-manager handoff — instead of waiting for the unattended timer slot.
+ssh ansible@<mba-ip> "cat /proc/uptime; sudo systemctl start homelab-scheduled-reboot.service && \
   journalctl -u homelab-scheduled-reboot -n 5 --no-pager"
 
 # logind delay: 30 s before the rollout, 60 s after
@@ -1444,12 +1450,33 @@ ssh ansible@<mba-ip> "busctl get-property org.freedesktop.login1 /org/freedeskto
   org.freedesktop.login1.Manager InhibitDelayMaxUSec"
 ssh ansible@<mba-ip> "systemd-analyze cat-config systemd/logind.conf | grep -n -B2 -A2 InhibitDelayMaxSec"
 
+# Inhibitor lock: expect a kubelet "delay" lock for shutdown here. The role's
+# flush_handlers restarts systemd-logind mid-role, which drops any held inhibitor locks;
+# whether kubelet 1.32 re-acquires one without its own restart is unverified — check this
+# explicitly rather than assuming the busctl delay above means a lock is actually held.
+ssh ansible@<mba-ip> "systemd-inhibit --list"
+
 # Kubelet: the drop-in is in place and the shutdown manager did NOT give up
 ssh ansible@<mba-ip> "sudo ls -l /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/"
 ssh ansible@<mba-ip> "sudo journalctl -u k3s-agent -b --no-pager | grep -i 'shutdown manager'"
 ```
 
-After the first scheduled reboot:
+**Mandatory gate — did the timer actually fire?** Before treating any given night as a test of
+the T2 hypothesis, confirm on the morning after the first expected slot (e.g. 2026-09-20 at
+08:30 CEST or later) that each node picked up a new boot at its slot time:
+
+```bash
+ssh ansible@<mba-ip> "sudo journalctl --list-boots"                 # new boot ≈ 06:10 (mba2) / ≈ 07:40 (mba1)
+ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"            # a shutdown entry, not a bare crash
+ssh ansible@<mba-ip> "sudo journalctl -u homelab-scheduled-reboot -b -1 --no-pager | tail -3"
+  # expect: "uptime <n>s >= <min_uptime>s — rebooting before the T2 5-day reset"
+```
+
+If there is no boot at the expected slot time, no shutdown entry, or the service journal line
+above is missing, the timer did not fire and that night's outcome is inconclusive — fix the
+timer (see Troubleshooting) and re-run before drawing any conclusion about the T2 hypothesis.
+
+After the first scheduled reboot, the fuller verification:
 
 ```bash
 ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"          # a shutdown entry, not a bare crash
@@ -1461,7 +1488,21 @@ kubectl get nodes -o wide
 kubectl -n longhorn-system get volumes.longhorn.io                # all robustness=healthy
 ```
 
-**Rollback**, one variable each, both idempotent:
+**How to read 2026-09-20/21**
+
+| Observation | Meaning |
+|---|---|
+| 09-20 ≥ 08:30: new boot ≈ 06:10/07:40, shutdown entry in `last -x`, service journal line present | Timer fired — the night is a valid test of the T2 hypothesis. |
+| 09-20 ≥ 08:30: no such boot | Timer did not fire — the night proves nothing; fix and re-run. |
+| 09-21: `uptime -s` still shows the 09-20 morning boot, no later boot | Hypothesis TRUE (the countdown restarts at host boot) — keep the mitigation as-is. |
+| 09-21: a boot ≈ 09-20 21:39 CEST (mba2) / ≈ 22:50 CEST (mba1), previous journal ending at monotonic ≈ 55 700 s / ≈ 54 600 s, no shutdown record | Hypothesis FALSE (phase-locked to the T2, not to host-boot age) — a five-figure end-of-journal instead of ≈ 432 000 s is the cleanest proof; apply the fallback section below or the rollback. |
+| 09-21: boot at any other time, or journal ending at a third monotonic value | Unrelated failure — investigate separately, do not attribute it to the T2 cycle. |
+
+**Rollback**, one variable each, both idempotent. Trigger: a node still resets at its 5-day
+mark on 2026-09-20 evening even though its morning timer fired (per the mandatory gate above) —
+that means the reboot does not reset the T2 countdown, so run this on 2026-09-21, or apply the
+fallback section below instead; otherwise the timer just adds one pointless reboot per cycle
+without preventing the reset:
 
 ```bash
 ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
@@ -1470,10 +1511,16 @@ ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e k3s_graceful_shutdown_
 
 **If a warm reboot does not reset the T2 countdown**, the timer cannot prevent the reset — it can
 only make sure the node is drained and cleanly stopped when it fires. In that case keep the
-plumbing and replace the uptime guard with a phase guard derived from a pinned per-node reference
-(mba2 `2026-09-10 21:29:11`, mba1 `2026-09-10 23:00:11`, +5 d per cycle, drifting +37 s / +80 s),
-fire the timer every 15 minutes, and escalate: move the stateful workloads off the MacBooks and
-take the root cause upstream to t2linux. That reference has to be re-pinned every few months.
+plumbing and replace the uptime guard with a phase guard derived from a pinned per-node
+reference. Re-pinned from the 2026-09-15 boots — mba2 `2026-09-15 21:39:09`, mba1
+`2026-09-15 22:50:46` — +5 d per cycle, drifting +54 s / +62 s (measured boot-to-boot deltas
+432 054 s / 432 062 s, 2026-09-10 → 2026-09-15); fire the timer every 15 minutes, and escalate:
+move the stateful workloads off the MacBooks and take the root cause upstream to t2linux. That
+reference has to be re-pinned every few months. Each crashed boot's journal still ends at
+monotonic ≈ 431 940–431 975 s (the reset itself lands ≈ 432 000–432 018 s in), but the
+`bce_vhci_free_device` teardown line that used to mark the cut was absent on the 2026-09-15
+cycle — do not rely on it as the reset's signature; the monotonic-time window above is the only
+signal confirmed so far.
 
 **The `softdog` watchdog was removed** (`mac_tweaks_watchdog_enabled: false`). It never worked on
 the t2 kernels — there is no `/dev/watchdog`, `softdog` does not load, and `watchdog.service` sat
