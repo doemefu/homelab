@@ -1461,20 +1461,27 @@ ssh ansible@<mba-ip> "sudo ls -l /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/"
 ssh ansible@<mba-ip> "sudo journalctl -u k3s-agent -b --no-pager | grep -i 'shutdown manager'"
 ```
 
-**Mandatory gate — did the timer actually fire?** Before treating any given night as a test of
-the T2 hypothesis, confirm on the morning after the first expected slot (e.g. 2026-09-20 at
-08:30 CEST or later) that each node picked up a new boot at its slot time:
+**Mandatory gate — did the scheduled reboot actually complete?** Before treating any given
+night as a test of the T2 hypothesis, confirm on the morning after the first expected slot
+(e.g. 2026-09-20 at 08:30 CEST or later) that each node picked up a new boot at its slot time:
 
 ```bash
 ssh ansible@<mba-ip> "sudo journalctl --list-boots"                 # new boot ≈ 06:10 (mba2) / ≈ 07:40 (mba1)
 ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"            # a shutdown entry, not a bare crash
-ssh ansible@<mba-ip> "sudo journalctl -u homelab-scheduled-reboot -b -1 --no-pager | tail -3"
-  # expect: "uptime <n>s >= <min_uptime>s — rebooting before the T2 5-day reset"
+ssh ansible@<mba-ip> "systemctl list-timers homelab-scheduled-reboot.timer --all"   # timer activation, not just the service outcome
+ssh ansible@<mba-ip> "sudo journalctl -u homelab-scheduled-reboot -b -1 --no-pager"
+  # expect: "uptime <n>s >= <min_uptime>s — rebooting before the T2 5-day reset"; read the
+  # full unit journal, not just the tail — "no reboot needed" here would itself be unexpected
+  # once uptime has passed the 3.5 d threshold, and is a different failure mode from the timer
+  # never having activated at all
 ```
 
-If there is no boot at the expected slot time, no shutdown entry, or the service journal line
-above is missing, the timer did not fire and that night's outcome is inconclusive — fix the
-timer (see Troubleshooting) and re-run before drawing any conclusion about the T2 hypothesis.
+If there is no boot at the expected slot time, no shutdown entry, or no matching "rebooting
+before the T2 5-day reset" line, the scheduled reboot did not complete — but that alone does
+not prove the timer never fired. Check timer activation (`systemctl list-timers`) and the
+service's own journal separately: the timer can activate and the service can still exit
+without rebooting (e.g. a stale uptime read) or fail mid-run. Diagnose which of the three
+failed (see Troubleshooting) and re-run before drawing any conclusion about the T2 hypothesis.
 
 After the first scheduled reboot, the fuller verification:
 
@@ -1492,17 +1499,17 @@ kubectl -n longhorn-system get volumes.longhorn.io                # all robustne
 
 | Observation | Meaning |
 |---|---|
-| 09-20 ≥ 08:30: new boot ≈ 06:10/07:40, shutdown entry in `last -x`, service journal line present | Timer fired — the night is a valid test of the T2 hypothesis. |
-| 09-20 ≥ 08:30: no such boot | Timer did not fire — the night proves nothing; fix and re-run. |
+| 09-20 ≥ 08:30: new boot ≈ 06:10/07:40, shutdown entry in `last -x`, service journal line present | Scheduled reboot completed — the night is a valid test of the T2 hypothesis. |
+| 09-20 ≥ 08:30: no such boot | Scheduled reboot did not complete — the night proves nothing. Check timer activation and the service journal separately before assuming it's a timer bug; fix and re-run. |
 | 09-21: `uptime -s` still shows the 09-20 morning boot, no later boot | Hypothesis TRUE (the countdown restarts at host boot) — keep the mitigation as-is. |
 | 09-21: a boot ≈ 09-20 21:39 CEST (mba2) / ≈ 22:50 CEST (mba1), previous journal ending at monotonic ≈ 55 700 s / ≈ 54 600 s, no shutdown record | Hypothesis FALSE (phase-locked to the T2, not to host-boot age) — a five-figure end-of-journal instead of ≈ 432 000 s is the cleanest proof; apply the fallback section below or the rollback. |
 | 09-21: boot at any other time, or journal ending at a third monotonic value | Unrelated failure — investigate separately, do not attribute it to the T2 cycle. |
 
 **Rollback**, one variable each, both idempotent. Trigger: a node still resets at its 5-day
-mark on 2026-09-20 evening even though its morning timer fired (per the mandatory gate above) —
-that means the reboot does not reset the T2 countdown, so run this on 2026-09-21, or apply the
-fallback section below instead; otherwise the timer just adds one pointless reboot per cycle
-without preventing the reset:
+mark on 2026-09-20 evening even though its scheduled reboot completed that morning (per the
+mandatory gate above) — that means the reboot does not reset the T2 countdown, so run this on
+2026-09-21, or apply the fallback section below instead; otherwise the timer just adds one
+pointless reboot per cycle without preventing the reset:
 
 ```bash
 ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
