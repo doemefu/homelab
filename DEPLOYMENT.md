@@ -699,6 +699,22 @@ forward instead of erasing it; `0` means "never succeeded".
   written, on purpose: the run holding the lock owns the metrics. A permanently stuck lock surfaces
   as `ResticBackupStale` after about 26 h.
 
+**Rollout order (matters):** the `ResticBackupStale` rule has an `absent()` branch, and
+`homelab-backup.sh` only writes its metric file when it runs. Apply in this order:
+
+1. `ansible-playbook infra/playbooks/10_base.yml` — **all nodes**. Creates the textfile directory
+   fleet-wide and installs the metric-writing script. node-exporter is not reading the directory
+   yet at this point.
+2. `ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"` — one manual run, so the `.prom` file
+   exists before anything scrapes it.
+3. `ansible-playbook infra/playbooks/41_monitoring.yml` — loads the rules and rolls the
+   node-exporter DaemonSet on all 4 nodes.
+
+In that order `absent()` is never true and no alert fires during the rollout. Running step 3
+before step 2 leaves a gap that lasts until the next 03:00 cron — up to about 24 hours — during
+which `ResticBackupStale` fires (correctly, in the sense that there is genuinely no evidence of a
+successful backup). `for: 2h` softens that window but does not close it.
+
 **Verify after a rollout:**
 
 ```bash

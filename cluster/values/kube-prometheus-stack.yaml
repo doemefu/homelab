@@ -91,8 +91,14 @@ additionalPrometheusRulesMap:
           # 26 h = the 24 h schedule + DST slack (both crons are node-local, so the
           # spring/autumn gaps are 23 h and 25 h) + one evaluation cycle.
           # max() strips every label so the two branches of the `or` share one identity.
-          # The absent() branch also covers "the metric never appeared at all", which is
-          # the state between rolling this out and the first backup run — hence for: 2h.
+          # The absent() branch also covers "the metric never appeared at all".
+          # ⚠️ Rollout order matters because of that branch: run 10_base.yml (installs the
+          # script + the directory) and then ONE manual `homelab-backup.sh` on raspi5
+          # BEFORE running 41_monitoring.yml. Doing it in that order means the .prom file
+          # already exists when node-exporter starts reading the directory, so absent() is
+          # never true. Applying 41_monitoring.yml first leaves a window that lasts until
+          # the next 03:00 cron — up to ~24 h, which `for: 2h` only softens, it does not
+          # close. The order is documented in DEPLOYMENT.md "Backup alerting (#92)".
           - alert: ResticBackupStale
             expr: >-
               (time() - max(homelab_backup_last_success_timestamp_seconds) > 26 * 3600)
