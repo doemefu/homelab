@@ -52,6 +52,113 @@ defaultRules:
     kubeSchedulerAlerting: false
     kubeProxy: false
 
+# Backup alerting (#92). Two backup mechanisms run on/inside the cluster and neither
+# was observable before: the Longhorn RecurringJobs in longhorn-system and the restic
+# cron (03:00) on raspi5. The Mac-side app-data dumps (scripts/backup-app-data.sh) are
+# deliberately NOT covered — the Mac is not a cluster node and any automatic signal
+# would need a new component (see DEPLOYMENT.md "Backup alerting (#92)").
+#
+# A *failed* Longhorn recurring-job run is already caught by the chart's own
+# KubeJobFailed (kube_job_failed{namespace=~".*"} > 0, for 15m, warning), which routes
+# to the same Discord receiver — no duplicate rule is added here on purpose. Do not
+# switch that rule off via defaultRules.disabled without replacing the coverage.
+#
+# All rules are warning severity: the single Alertmanager route (injected by
+# 41_monitoring.yml) sends everything to Discord regardless, and the chart's inhibit
+# rules only suppress across an equal alertname, so these never mask each other.
+additionalPrometheusRulesMap:
+  homelab-backups:
+    groups:
+      - name: homelab-backups
+        rules:
+          # --- restic on raspi5 ---
+          # Metrics are written by homelab-backup.sh (infra/roles/storage) into the
+          # node-exporter textfile collector directory configured further down.
+          # node-exporter series carry no `nodename` target label (only node_uname_info
+          # does), so the node is named literally — restic runs on raspi5 only
+          # (storage_run_restic_backup is true for the k3s_server group only).
+          - alert: ResticBackupFailed
+            expr: homelab_backup_exit_code > 0
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "restic backup on raspi5 failed"
+              description: >-
+                homelab-backup.sh on raspi5 ({{ $labels.instance }}) exited with code {{ $value }}.
+                Inspect `journalctl -t homelab-backup` on raspi5; runbook in DEPLOYMENT.md
+                "Backup alerting (#92)". Resolves automatically after the next successful run.
+          # 26 h = the 24 h schedule + DST slack (both crons are node-local, so the
+          # spring/autumn gaps are 23 h and 25 h) + one evaluation cycle.
+          # max() strips every label so the two branches of the `or` share one identity.
+          # The absent() branch also covers "the metric never appeared at all", which is
+          # the state between rolling this out and the first backup run — hence for: 2h.
+          - alert: ResticBackupStale
+            expr: >-
+              (time() - max(homelab_backup_last_success_timestamp_seconds) > 26 * 3600)
+              or absent(homelab_backup_last_success_timestamp_seconds)
+            for: 2h
+            labels:
+              severity: warning
+            annotations:
+              summary: "No successful restic backup on raspi5 for more than 26h"
+              description: >-
+                Either the 03:00 restic cron on raspi5 stopped running, or node-exporter is no
+                longer exposing homelab_backup_last_success_timestamp_seconds. Runbook in
+                DEPLOYMENT.md "Backup alerting (#92)".
+          # --- Longhorn recurring jobs ---
+          # Anchored on kube_cronjob_created, NOT on the age of the last success:
+          # kube-state-metrics emits kube_cronjob_status_last_successful_time only once
+          # .status.lastSuccessfulTime is set, so a job that has never succeeded has no
+          # series at all and a plain staleness comparison could never fire for it.
+          # The LHS also gives a newly created job a 26 h grace period before it counts.
+          # Namespace-wide on purpose: every current and future Longhorn recurring job is
+          # covered without editing this rule. No kube-state-metrics-up guard is needed —
+          # if kube-state-metrics is down, both operands vanish and the LHS is empty.
+          - alert: LonghornRecurringJobNotSucceeding
+            expr: >-
+              max by (cronjob) (kube_cronjob_created{namespace="longhorn-system"}) < time() - 26 * 3600
+              unless
+              max by (cronjob) (kube_cronjob_status_last_successful_time{namespace="longhorn-system"} > time() - 26 * 3600)
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "Longhorn recurring job {{ $labels.cronjob }} has not succeeded for more than 26h"
+              description: >-
+                The CronJob longhorn-system/{{ $labels.cronjob }} has no successful run in the last
+                26 h (or has never succeeded). Check `kubectl -n longhorn-system get cronjobs,jobs`;
+                runbook in DEPLOYMENT.md "Backup alerting (#92)".
+          # Deleting the last RecurringJob of a Longhorn group makes Longhorn strip the
+          # group labels from the PVC and the Volume, so the volume silently falls back to
+          # the `default` group (#101). The job object then disappears entirely, which the
+          # rule above cannot see, because it has no series left to be stale.
+          # Both existing recurring jobs are guarded in one rule: absent() carries the
+          # matcher labels, so the `or` union yields at most one series per missing job,
+          # each with its own `cronjob` label. Two separately declared rules with the same
+          # alertname and the same static labels are rejected by `promtool check rules`
+          # as duplicates, even though their firing label sets would differ at runtime.
+          # The `and on()` clause suppresses the alert while kube-state-metrics itself is
+          # down or rolling — that case is the chart's TargetDown, not a backup problem.
+          # metrics-filesystem-trim (#106, PR #107) joins this list once that PR merges.
+          - alert: LonghornRecurringJobMissing
+            expr: >-
+              (absent(kube_cronjob_info{namespace="longhorn-system", cronjob="daily-snapshot"})
+              or absent(kube_cronjob_info{namespace="longhorn-system", cronjob="metrics-snapshot-cleanup"}))
+              and on() (count(up{job="kube-state-metrics"} == 1) > 0)
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "Longhorn recurring job {{ $labels.cronjob }} no longer exists"
+              description: >-
+                The CronJob longhorn-system/{{ $labels.cronjob }} is gone, so whatever it covered
+                has stopped. Longhorn also strips a group's labels from the PVC and the Volume when
+                that group's last job is deleted, which drops the Prometheus TSDB volume back into
+                the `default` snapshot group and can repeat the #101 disk-pressure incident.
+                Re-apply infra/playbooks/30_longhorn.yml; runbook in DEPLOYMENT.md
+                "Backup alerting (#92)".
+
 prometheus:
   prometheusSpec:
     # arm64-only is intentional, not a resource-sizing constraint:
@@ -114,6 +221,36 @@ nodeExporter:
     limits:
       cpu: 100m
       memory: 64Mi
+
+# node-exporter subchart values (alias `prometheus-node-exporter`, version 4.43.*).
+# Textfile collector for the restic backup metrics (#92): homelab-backup.sh on raspi5
+# writes homelab-backup.prom into the host directory below, node-exporter reads it
+# read-only. The path is the other half of a contract with
+# `storage_textfile_collector_dir` in infra/roles/storage/defaults/main.yml — change
+# both or the metric disappears and ResticBackupStale fires.
+#
+# ⚠️ extraArgs is a list, and Helm replaces lists wholesale: the two
+# --collector.filesystem.*-exclude values below are the chart's own defaults and MUST
+# stay here verbatim. Dropping them makes node-exporter report every docker/kubelet
+# bind mount as a filesystem and the NodeFilesystem* alerts turn noisy.
+#
+# hostPath type DirectoryOrCreate makes kubelet create the directory on every node, not
+# just on raspi5 — node-exporter sets node_textfile_scrape_error=1 (alert
+# NodeTextFileCollectorScrapeError) when the configured directory cannot be read.
+# The storage role creates the same directory via Ansible as well.
+prometheus-node-exporter:
+  extraArgs:
+    # yamllint disable-line rule:line-length
+    - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+    # yamllint disable-line rule:line-length
+    - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$
+    - --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
+  extraHostVolumeMounts:
+    - name: textfile-collector
+      hostPath: /var/lib/node_exporter/textfile_collector
+      type: DirectoryOrCreate
+      mountPath: /var/lib/node_exporter/textfile_collector
+      readOnly: true
 
 kubeStateMetrics:
   resources:
