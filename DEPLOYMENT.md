@@ -1365,24 +1365,119 @@ ansible <node> -m reboot --become
 kubectl uncordon <node>
 ```
 
-### MacBook Watchdog
+### MacBook nodes: controlled reboots (#102)
 
-MacBook Air workers (mba1, mba2) run a kernel watchdog (`softdog`) that auto-reboots on kernel freeze/panic.
+Both MacBook Air workers are power-cycled by their T2 chip at monotonic **432 000 s (5 d) ± 10 s
+after every host boot**. The journal of every crashed boot ends with the apple-bce driver tearing
+down the T2's virtual USB host controller (`bce_vhci_free_device`), there is no oops, no panic, no
+thermal event, and `/sys/fs/pstore/` is empty — the reset is initiated by the firmware, below
+Linux. mba2 has done this on an unbroken 5-day cycle since 2026-04-13, mba1 since 2026-07-02.
+
+The mitigation is a schedule, not a fix: keep every boot shorter than five days. Two pieces run on
+the nodes.
+
+**1. A daily timer with an uptime guard** (`mac_tweaks` role). `homelab-scheduled-reboot.timer`
+fires once a day and runs a script that reboots **only** when `/proc/uptime` is at least
+`mac_tweaks_reboot_min_uptime_seconds` (3.5 d), otherwise it logs `no reboot needed` and exits 0.
+Worst case is therefore 3.5 d + 1 d = 4.5 d, twelve hours before the deadline, and the schedule
+re-derives itself from actual uptime after any unplanned reboot. The script uses
+`systemctl --no-block reboot`: only the logind path honours the kubelet's shutdown inhibitor, and
+`--no-block` keeps the oneshot unit out of its own shutdown transaction.
+
+| Node | Slot | Why |
+|------|------|-----|
+| `mba2` | `*-*-* 06:10:00` | after the 05:00 `metrics-filesystem-trim` window |
+| `mba1` | `*-*-* 07:40:00` | 90 min after mba2, so a Longhorn rebuild finishes first |
+
+Slots and threshold are role defaults (`infra/roles/mac_tweaks/defaults/main.yml`), so the role
+works without inventory edits. Override a single host from the untracked inventory
+(`host_vars/<node>.yml`) or with `-e mac_tweaks_reboot_on_calendar="*-*-* 08:00:00"`.
+
+**2. Kubelet graceful node shutdown** (`k3s` role, `mac` group only). The kubelet gets
+`shutdownGracePeriod: 60s` / `shutdownGracePeriodCriticalPods: 20s` through
+`/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/50-graceful-shutdown.conf`. k3s passes
+`--config-dir` for that directory and merges every `*.conf` at start; the `00-`/`10-`/`20-`
+prefixes are k3s' own (it rewrites `00-k3s-defaults.conf` at every start), which is why ours is
+`50-`. Do **not** switch this to `--kubelet-arg=config=`: k3s strips that flag and copies the file
+in one-way as `10-cli-config.conf`, which a rollback would not revert.
+
+This only works if logind's inhibitor delay is at least as long as the grace period. Ubuntu caps it
+at 30 s (`/usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf`), and when the
+kubelet cannot raise it, it logs `Failed to start node shutdown manager` **and carries on with the
+feature disabled** — a silent degradation. The `mac_tweaks` role therefore ships
+`/etc/systemd/logind.conf.d/zz-homelab-kubelet.conf` with `InhibitDelayMaxSec=60`; the `zz-` prefix
+wins logind's lexical merge and Ubuntu's file is left untouched.
+
+**Rollout order matters**: `10_base.yml` (logind delay) before `20_k3s.yml` (kubelet), and one node
+at a time — mba2 first, mba1 at least 60 minutes later.
 
 ```bash
-# Verify watchdog health
-ssh ansible@<mba-ip> "systemctl is-active watchdog && lsmod | grep softdog"
+# mba2 first. --diff is safe here.
+ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks
 
-# Temporarily disable for maintenance
-ansible-playbook infra/playbooks/10_base.yml -l <node> -e "mac_tweaks_watchdog_enabled=false"
+# 20_k3s.yml: --check only, NEVER --diff. k3s-agent.service.j2 embeds K3S_TOKEN, so a
+# diff of that template prints the token to the terminal and into any log.
+ansible-playbook infra/playbooks/20_k3s.yml -l mba2 --check
+ansible-playbook infra/playbooks/20_k3s.yml -l mba2
 
-# Re-enable
-ansible-playbook infra/playbooks/10_base.yml -l <node>
-
-# Check unexpected reboots
-ssh ansible@<mba-ip> "sudo journalctl -b -1 --no-pager | tail -50"
-ssh ansible@<mba-ip> "sudo last -x reboot | head -5"
+# Then repeat both for mba1, >= 60 min later.
 ```
+
+**Verify** (before the first scheduled fire; safe while uptime is below the threshold):
+
+```bash
+ssh ansible@<mba-ip> "systemctl list-timers homelab-scheduled-reboot.timer --all"
+ssh ansible@<mba-ip> "sudo systemd-analyze verify /etc/systemd/system/homelab-scheduled-reboot.timer"
+ssh ansible@<mba-ip> "systemd-analyze calendar '*-*-* 06:10:00' --iterations=3"
+
+# The real functional test: must print "no reboot needed" and exit 0
+ssh ansible@<mba-ip> "sudo systemctl start homelab-scheduled-reboot.service && \
+  journalctl -u homelab-scheduled-reboot -n 5 --no-pager"
+
+# logind delay: 30 s before the rollout, 60 s after
+ssh ansible@<mba-ip> "busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager InhibitDelayMaxUSec"
+ssh ansible@<mba-ip> "systemd-analyze cat-config systemd/logind.conf | grep -n -B2 -A2 InhibitDelayMaxSec"
+
+# Kubelet: the drop-in is in place and the shutdown manager did NOT give up
+ssh ansible@<mba-ip> "sudo ls -l /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/"
+ssh ansible@<mba-ip> "sudo journalctl -u k3s-agent -b --no-pager | grep -i 'shutdown manager'"
+```
+
+After the first scheduled reboot:
+
+```bash
+ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"          # a shutdown entry, not a bare crash
+ssh ansible@<mba-ip> "uptime -s; journalctl --list-boots | tail -3"
+ssh ansible@<mba-ip> "journalctl -u homelab-scheduled-reboot -b -1 --no-pager | tail -3"
+ssh ansible@<mba-ip> "sudo journalctl -b -1 -u k3s-agent --no-pager | grep -i shutdown"
+kubectl -n apps logs postgresql-0 --previous | tail -5            # "database system is shut down"
+kubectl get nodes -o wide
+kubectl -n longhorn-system get volumes.longhorn.io                # all robustness=healthy
+```
+
+**Rollback**, one variable each, both idempotent:
+
+```bash
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
+ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e k3s_graceful_shutdown_enabled=false
+```
+
+**If a warm reboot does not reset the T2 countdown**, the timer cannot prevent the reset — it can
+only make sure the node is drained and cleanly stopped when it fires. In that case keep the
+plumbing and replace the uptime guard with a phase guard derived from a pinned per-node reference
+(mba2 `2026-09-10 21:29:11`, mba1 `2026-09-10 23:00:11`, +5 d per cycle, drifting +37 s / +80 s),
+fire the timer every 15 minutes, and escalate: move the stateful workloads off the MacBooks and
+take the root cause upstream to t2linux. That reference has to be re-pinned every few months.
+
+**The `softdog` watchdog was removed** (`mac_tweaks_watchdog_enabled: false`). It never worked on
+the t2 kernels — there is no `/dev/watchdog`, `softdog` does not load, and `watchdog.service` sat
+in `failed` state on both nodes — and a software watchdog cannot stop a firmware power cut anyway.
+Leaving it enabled also made `10_base.yml` fail on the Macs, because the service task runs with
+`state: started` and the `modprobe` task is unguarded (a `--check` run passes, a real run does
+not). The role's cleanup branch removes `/etc/watchdog.conf` and
+`/etc/modules-load.d/watchdog.conf` on the next run.
 
 ---
 
@@ -1523,7 +1618,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Playbook | Purpose | Runtime | Idempotent |
 |----------|---------|---------|------------|
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
-| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog | 3-5 min | Yes |
+| `10_base.yml` | Base packages, hardening, UFW, fail2ban, MacBook scheduled reboot (#102) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
