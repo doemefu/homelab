@@ -1401,6 +1401,10 @@ prefixes are k3s' own (it rewrites `00-k3s-defaults.conf` at every start), which
 `50-`. Do **not** switch this to `--kubelet-arg=config=`: k3s strips that flag and copies the file
 in one-way as `10-cli-config.conf`, which a rollback would not revert.
 
+On a **fresh** node the drop-in directory does not exist until k3s-agent has started once, so the
+role installs and starts the agent first and only then waits (up to 150 s) for
+`00-k3s-defaults.conf`, fails loudly if it never appears, and writes the drop-in.
+
 This only works if logind's inhibitor delay is at least as long as the grace period. Ubuntu caps it
 at 30 s (`/usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf`), and when the
 kubelet cannot raise it, it logs `Failed to start node shutdown manager` **and carries on with the

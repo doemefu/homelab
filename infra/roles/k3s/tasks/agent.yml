@@ -1,43 +1,4 @@
 ---
-# --- Kubelet graceful node shutdown (homelab#102) ---
-# k3s writes 00-k3s-defaults.conf into this directory at every start, so its absence
-# means this k3s build does not support the kubelet drop-in directory and the graceful
-# shutdown config would silently have no effect. Fail loudly instead.
-- name: Kubelet graceful shutdown — verify the k3s kubelet drop-in directory
-  ansible.builtin.stat:
-    path: "{{ k3s_kubelet_config_dir }}/00-k3s-defaults.conf"
-  register: k3s_kubelet_defaults_drop_in
-  when: k3s_graceful_shutdown_enabled
-
-- name: Kubelet graceful shutdown — fail if the drop-in directory is not in use
-  ansible.builtin.fail:
-    msg: >-
-      {{ k3s_kubelet_config_dir }}/00-k3s-defaults.conf is missing, so this k3s build does
-      not manage the kubelet through --config-dir. Writing 50-graceful-shutdown.conf there
-      would have no effect. Check the k3s version (expected v1.32.2+k3s1 or newer) before
-      enabling k3s_graceful_shutdown_enabled.
-  when:
-    - k3s_graceful_shutdown_enabled
-    - not k3s_kubelet_defaults_drop_in.stat.exists
-    - not ansible_check_mode
-
-- name: Kubelet graceful shutdown — install the kubelet drop-in
-  ansible.builtin.template:
-    src: kubelet-graceful-shutdown.conf.j2
-    dest: "{{ k3s_kubelet_config_dir }}/50-graceful-shutdown.conf"
-    owner: root
-    group: root
-    mode: "0600"
-  when: k3s_graceful_shutdown_enabled
-  notify: Restart k3s
-
-- name: Kubelet graceful shutdown — remove the kubelet drop-in
-  ansible.builtin.file:
-    path: "{{ k3s_kubelet_config_dir }}/50-graceful-shutdown.conf"
-    state: absent
-  when: not k3s_graceful_shutdown_enabled
-  notify: Restart k3s
-
 - name: K3s Agent Systemd-Service anlegen
   ansible.builtin.template:
     src: k3s-agent.service.j2
@@ -55,3 +16,50 @@
     state: started
     enabled: true
   ignore_errors: "{{ ansible_check_mode }}"
+
+# --- Kubelet graceful node shutdown (homelab#102) ---
+# This block runs AFTER the agent is installed and started: k3s writes
+# 00-k3s-defaults.conf into the kubelet drop-in directory when it starts, so on a fresh
+# node the directory does not exist before the first agent start.
+- name: Kubelet graceful shutdown — wait for the k3s kubelet drop-in directory
+  ansible.builtin.stat:
+    path: "{{ k3s_kubelet_config_dir }}/00-k3s-defaults.conf"
+  register: k3s_kubelet_defaults_drop_in
+  until: k3s_kubelet_defaults_drop_in.stat.exists
+  retries: 30
+  delay: 5
+  failed_when: false
+  when: k3s_graceful_shutdown_enabled
+
+# k3s rewrites 00-k3s-defaults.conf at every start, so if it is still missing after
+# 150 s this k3s build does not manage the kubelet through --config-dir and our drop-in
+# would silently have no effect. Fail loudly instead of installing a dead file.
+- name: Kubelet graceful shutdown — fail if the drop-in directory is not in use
+  ansible.builtin.fail:
+    msg: >-
+      {{ k3s_kubelet_config_dir }}/00-k3s-defaults.conf did not appear within 150 s of the
+      k3s-agent start, so this k3s build does not manage the kubelet through --config-dir.
+      Writing 50-graceful-shutdown.conf there would have no effect. Check the k3s version
+      (expected v1.32.2+k3s1 or newer) and that k3s-agent is running before enabling
+      k3s_graceful_shutdown_enabled.
+  when:
+    - k3s_graceful_shutdown_enabled
+    - not ansible_check_mode
+    - not k3s_kubelet_defaults_drop_in.stat.exists
+
+- name: Kubelet graceful shutdown — install the kubelet drop-in
+  ansible.builtin.template:
+    src: kubelet-graceful-shutdown.conf.j2
+    dest: "{{ k3s_kubelet_config_dir }}/50-graceful-shutdown.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  when: k3s_graceful_shutdown_enabled
+  notify: Restart k3s
+
+- name: Kubelet graceful shutdown — remove the kubelet drop-in
+  ansible.builtin.file:
+    path: "{{ k3s_kubelet_config_dir }}/50-graceful-shutdown.conf"
+    state: absent
+  when: not k3s_graceful_shutdown_enabled
+  notify: Restart k3s
