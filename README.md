@@ -252,7 +252,7 @@ infra/
     base/                     # Hostname, timezone, NTP, packages, unattended-upgrades
     hardening/                # UFW, fail2ban, SSH hardening
     storage/                  # Restic, backup directories, external mount
-    mac_tweaks/               # Lid-close fix, T2 kernel modules, watchdog
+    mac_tweaks/               # Lid-close fix, T2 kernel modules, scheduled reboot (#102)
     k3s/                      # k3s server + agent install
     longhorn_prereqs/         # open-iscsi, nfs-common, kernel modules
     observability_agent/      # Node Exporter preparation (placeholder)
