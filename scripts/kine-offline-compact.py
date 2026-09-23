@@ -70,7 +70,9 @@ con = sqlite3.connect(DB, isolation_level=None, timeout=60)
 cur = con.cursor()
 q = lambda s, p=(): cur.execute(s, p).fetchone()
 
-print("integrity_check (pre):", q("PRAGMA integrity_check")[0])
+# Cheap report queries only — kept out of the dry-run's way is PRAGMA integrity_check below,
+# an O(N log N) full-table scan that would add real I/O load to an already-struggling live
+# datastore. The dry-run is meant to be safe to run with k3s still up.
 print("legacy key_value table rows:", q("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='key_value'")[0])
 rows0 = q("SELECT COUNT(*) FROM kine")[0]
 current_rev = q("SELECT MAX(id) FROM kine")[0] or 0
@@ -79,6 +81,14 @@ target = max(current_rev - MIN_RETAIN, 0)
 print(f"rows={rows0} current_rev={current_rev} compact_rev={compact_rev} target={target}")
 if DRY:
     sys.exit(0)
+
+integrity_pre = q("PRAGMA integrity_check")[0]
+print("integrity_check (pre):", integrity_pre)
+if integrity_pre != "ok":
+    print(f"ABORT: pre-compaction integrity_check returned {integrity_pre!r}, not 'ok' — "
+          "refusing to compact a datastore that already fails an integrity check.",
+          file=sys.stderr)
+    sys.exit(1)
 
 t0 = time.time()
 iter_rev = compact_rev
@@ -94,10 +104,36 @@ while iter_rev < target:
 
 print("checkpoint:", q("PRAGMA wal_checkpoint(TRUNCATE)"))
 tv = time.time(); cur.execute("VACUUM"); print(f"VACUUM done in {time.time()-tv:.0f}s")
-print("integrity_check (post):", q("PRAGMA integrity_check")[0])
-print("rows:", q("SELECT COUNT(*), MIN(id), MAX(id) FROM kine"))
-print("compact_rev_key:", q("SELECT prev_revision FROM kine WHERE name='compact_rev_key'")[0], "(expect", target, ")")
-print("tombstones <= target:", q("SELECT COUNT(*) FROM kine WHERE deleted != 0 AND id <= ?", (target,))[0], "(expect 0)")
-print("superseded <= target:", q("SELECT COUNT(*) FROM kine kv WHERE kv.id <= ? AND kv.id IN (SELECT prev_revision FROM kine WHERE prev_revision != 0 AND name != 'compact_rev_key')", (target,))[0], "(expect a small non-zero count — see docstring)")
-print(f"total {time.time()-t0:.0f}s")
+
+integrity_post = q("PRAGMA integrity_check")[0]
+rows_final = q("SELECT COUNT(*), MIN(id), MAX(id) FROM kine")
+compact_rev_final = q("SELECT prev_revision FROM kine WHERE name='compact_rev_key'")[0]
+tombstones = q("SELECT COUNT(*) FROM kine WHERE deleted != 0 AND id <= ?", (target,))[0]
+superseded = q("SELECT COUNT(*) FROM kine kv WHERE kv.id <= ? AND kv.id IN (SELECT prev_revision FROM kine WHERE prev_revision != 0 AND name != 'compact_rev_key')", (target,))[0]
 con.close()
+
+print("integrity_check (post):", integrity_post)
+print("rows:", rows_final)
+print("compact_rev_key:", compact_rev_final, "(expect", target, ")")
+print("tombstones <= target:", tombstones, "(expect 0)")
+print("superseded <= target:", superseded, "(expect a small non-zero count — see docstring)")
+print(f"total {time.time()-t0:.0f}s")
+
+# Hard-fail the whole run (nonzero exit) on any of these — the caller (kine-offline-compact.sh)
+# must not start k3s back up against a datastore that fails its own verification. "superseded"
+# is deliberately excluded: a small non-zero count there is expected kine behavior, not a fault.
+failures = []
+if integrity_post != "ok":
+    failures.append(f"integrity_check (post) = {integrity_post!r}, expected 'ok'")
+if compact_rev_final != target:
+    failures.append(f"compact_rev_key = {compact_rev_final}, expected {target}")
+if tombstones != 0:
+    failures.append(f"{tombstones} tombstone(s) remain at/before target, expected 0")
+if failures:
+    print("VERIFICATION FAILED after compaction — state.db has already been modified:", file=sys.stderr)
+    for f in failures:
+        print(" -", f, file=sys.stderr)
+    print("Do not start k3s against this datastore without investigating. Restore the backup "
+          "instead — see the Rollback section in DEPLOYMENT.md \"k3s datastore (kine/SQLite) "
+          "maintenance\".", file=sys.stderr)
+    sys.exit(1)

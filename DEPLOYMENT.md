@@ -225,7 +225,7 @@ import sqlite3
 c = sqlite3.connect('file:/var/lib/rancher/k3s/server/db/state.db?mode=ro', uri=True, timeout=30)
 print('rows', c.execute('SELECT COUNT(*) FROM kine').fetchone()[0])
 print('max_id', c.execute('SELECT MAX(id) FROM kine').fetchone()[0])
-print('compact_rev', c.execute(\"SELECT prev_revision FROM kine WHERE name='compact_rev_key'\").fetchone()[0])
+print('compact_rev', c.execute(\"SELECT MAX(prev_revision) FROM kine WHERE name='compact_rev_key'\").fetchone()[0])
 "
 
 # datastore + WAL file sizes on disk
