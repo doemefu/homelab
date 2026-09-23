@@ -463,7 +463,7 @@ To integrate your app with Prometheus monitoring:
 
 | Target | ServiceMonitor | Port / path | Alert rules | Source |
 |--------|----------------|-------------|-------------|--------|
-| data-service (`apps`) | `monitoring/data-service` (job `data-service`) | `http` (8082) `/actuator/prometheus`, 30 s, no auth | `homelab-netmon` group: `NetmonCollectorStale` (per collector on `netmon_collector_last_success_timestamp_seconds{collector}`; thresholds 26h daily / 3h hourly / 90m lan+reputation / 15m all others; NaN = never succeeded once the pod is older than the threshold), `NetmonDataServiceDown` (`up == 0` or absent, 10 min) | ServiceMonitor in `41_monitoring.yml`; rules in `cluster/values/kube-prometheus-stack.yaml` `additionalPrometheusRulesMap.homelab-netmon` (NM-3/NM-2 append to it) — `docs/060-network-monitoring.md` §4.1, §7.1 |
+| data-service (`apps`) | `monitoring/data-service` (job `data-service`) | `http` (8082) `/actuator/prometheus`, 30 s, no auth | `homelab-netmon` group: `NetmonCollectorStale` (per collector on `netmon_collector_last_success_timestamp_seconds{collector}`; thresholds 26h daily / 3h hourly / 90m lan+reputation / 15m all others; NaN = never succeeded once the pod is older than the threshold), `NetmonDataServiceDown` (`up == 0` or absent, 10 min) | ServiceMonitor in `41_monitoring.yml`; rules in `cluster/values/kube-prometheus-stack.yaml` `additionalPrometheusRulesMap.homelab-netmon` (NM-1 only; NM-3 uses `homelab-netmon-node` (PR #132), NM-2 uses `homelab-netmon-egress` (PR #133), backups use `homelab-backups` (PR #109)) — `docs/060-network-monitoring.md` §4.1, §7.1 |
 
 ---
 

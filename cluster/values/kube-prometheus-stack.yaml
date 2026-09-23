@@ -52,7 +52,7 @@ defaultRules:
     kubeSchedulerAlerting: false
     kubeProxy: false
 
-# Network monitoring alerting (docs/060-network-monitoring.md §4.1, §7.1; NM-1 #116).
+# Network monitoring alerting (docs/060-network-monitoring.md §4.1, §7.1; NM-1, PR #131 / issue #116).
 # data-service exports netmon_collector_last_success_timestamp_seconds{collector} on
 # /actuator/prometheus (ServiceMonitor "data-service" in 41_monitoring.yml, job
 # "data-service"). The gauge is NaN until a collector's first success and is re-seeded
@@ -70,11 +70,16 @@ defaultRules:
 # threshold (noisy, never silent) until it is given its own class here.
 # Contract with data-service: a disabled collector (e.g. reputation without an AbuseIPDB
 # key) must not export the gauge, or branch 2 fires permanently for it.
-# NM-3 (§5.6) and NM-2 (§6.4) append their rules to this same homelab-netmon group.
 #
-# ⚠️ PR #109 (backup alerts) creates the same top-level key `additionalPrometheusRulesMap`
-# at this exact position. Whichever PR merges second must resolve the git conflict by
-# keeping ONE key with both entries (homelab-backups, homelab-netmon) — never two keys.
+# One map entry (key) per sub-project, all under ONE top-level additionalPrometheusRulesMap:
+#   homelab-netmon         NM-1 collector freshness (this block; PR #131, issue #116)
+#   homelab-netmon-node    NM-3 node-script rules (PR #132)
+#   homelab-netmon-egress  NM-2 coroot-node-agent rules (PR #133)
+#   homelab-backups        backup alerts (PR #109)
+# ⚠️ Each of those PRs adds the top-level key at this same position, so every merge after
+# the first hits a git conflict here on purpose. Resolve it by keeping ONE
+# additionalPrometheusRulesMap key with all entries side by side — never two top-level
+# keys (a duplicate YAML key would silently drop one map).
 additionalPrometheusRulesMap:
   homelab-netmon:
     groups:
