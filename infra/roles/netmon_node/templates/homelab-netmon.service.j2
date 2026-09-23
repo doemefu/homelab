@@ -1,0 +1,26 @@
+# Managed by Ansible (role netmon_node) — do not edit manually
+[Unit]
+Description=Collect LAN connection, UFW block and sshd auth textfile metrics (homelab#117)
+Documentation=https://github.com/doemefu/homelab/issues/117
+
+[Service]
+Type=oneshot
+# Root: conntrack needs CAP_NET_ADMIN and the kernel/sshd journal needs read access.
+ExecStart=/usr/bin/python3 {{ netmon_node_script }} \
+  --node {{ inventory_hostname }} \
+  --lan-cidr {{ netmon_node_lan_cidr }} \
+  --pod-cidr {{ netmon_node_pod_cidr }} \
+  --ports {{ netmon_node_ports | join(',') }} \
+  --max-series {{ netmon_node_max_series }} \
+  --bucket-seconds {{ netmon_node_bucket_seconds }} \
+  --sshd-unit {{ netmon_node_sshd_unit }} \
+  --output {{ netmon_node_textfile_dir }}/homelab_netmon.prom
+TimeoutStartSec=50
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+# "-": a missing directory (PR #109 not rolled out yet) must not fail namespace setup;
+# the script then exits with a clear error instead.
+ReadWritePaths=-{{ netmon_node_textfile_dir }}

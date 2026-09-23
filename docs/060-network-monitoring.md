@@ -503,7 +503,7 @@ homelab_lan_connections{node="raspi5",dport="1883",src_ip="192.168.1.50",state="
 homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.77",dport="23",proto="TCP"} 4
 # HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket.
 # TYPE homelab_sshd_auth_bucket gauge
-homelab_sshd_auth_bucket{node="raspi5",src_ip="10.42.0.12",outcome="failed"} 2
+homelab_sshd_auth_bucket{node="raspi5",src_ip="10.42.0.0/16",outcome="failed"} 2
 # HELP homelab_netmon_bucket_end_timestamp_seconds End (exclusive, unix seconds) of the bucket the *_bucket gauges describe.
 # TYPE homelab_netmon_bucket_end_timestamp_seconds gauge
 homelab_netmon_bucket_end_timestamp_seconds{node="raspi5"} 1758620700
@@ -515,9 +515,10 @@ homelab_netmon_last_success_timestamp_seconds{node="raspi5"} 1758620765
 homelab_netmon_truncated_series{node="raspi5",metric="homelab_ufw_blocks_bucket"} 0
 ```
 
-- **`node` label:** written by the script from the Ansible `inventory_hostname`. If the node-exporter scrape config already attaches a `node` label, Prometheus renames the file's label to `exported_node`, and the NM-3 plan must then align the §4.6 queries (unverified).
-- **`src_ip` values:** an IP inside `lan_cidr` is kept verbatim. An IP inside `pod_cidr` becomes the literal `10.42.0.0/16`. Anything else becomes `other`. For `ufw` and `sshd`, public IPs are also kept verbatim, because these are the attack signals. Tunnelled SSH appears as a pod or node IP.
-- **Cardinality bound:** the /24 LAN has 254 sources, times 5 ports and a few states. The hard cap is `netmon_node_max_series` per metric per node. The overflow is summed into `src_ip="other"` and counted in `homelab_netmon_truncated_series`.
+- **`node` label:** written by the script from the Ansible `inventory_hostname` (`raspi5`, `raspi4`, `mba1`, `mba2`). Verified: the node-exporter ServiceMonitor (chart 69.3.1) sets `honorLabels: true` and adds no `node` target label, so the file's label is kept as `node`, not `exported_node`, and the §4.6 queries stand (amended 2026-09-23, NM-3: homelab PR for #117).
+- **`src_ip` values:** an IP inside `lan_cidr` is kept verbatim. An IP inside `pod_cidr` becomes the literal `10.42.0.0/16` (for all three metrics; the sshd example above was corrected accordingly). Anything else becomes `other`. For `ufw` and `sshd`, public (globally routable) IPs are also kept verbatim, because these are the attack signals. Tunnelled SSH appears as a pod or node IP.
+- **Own outbound flows:** `homelab_lan_connections` skips conntrack entries whose original source is one of the node's own addresses (`ip -o addr show`) — the node is then the client (e.g. the API server calling another node's kubelet on :10250), and the receiving node already counts the flow as inbound (amended 2026-09-23, NM-3: homelab PR for #117).
+- **Cardinality bound:** the /24 LAN has 254 sources, times 5 ports and a few states. The hard cap is `netmon_node_max_series` per metric per node. The highest-valued series are kept verbatim; the overflow is summed into `src_ip="other"` (other labels kept) and counted in `homelab_netmon_truncated_series` (number of input series not emitted verbatim). For `homelab_ufw_blocks_bucket` the overflow also collapses `dport` to `0`, because one scanner sweeping ports would otherwise stay unbounded; an overflow row is therefore `{src_ip="other",dport="0",proto=<proto>}` (amended 2026-09-23, NM-3: homelab PR for #117).
 
 ### 5.3 Why gauges and buckets, not counters (decided)
 
@@ -556,7 +557,7 @@ NM-3 leaves `net.netfilter.nf_conntrack_acct` **unchanged** (default 0), because
 
 ### 5.6 PrometheusRules (NM-3)
 
-NM-3 creates `additionalPrometheusRulesMap.homelab-netmon` — NM-2 **appends** to this same map in §6.4, it does not create it, since the node script ships before coroot in the owner-approved order (NM-0 → NM-1 → NM-3 → NM-2 → NM-4).
+NM-1 creates `additionalPrometheusRulesMap.homelab-netmon` (data-service rules). NM-3 puts its rules under its **own** key `additionalPrometheusRulesMap.homelab-netmon-node` (group `homelab-netmon-node`), so the NM-1 and NM-3 PRs stay independently mergeable and each key renders its own PrometheusRule; NM-2 appends to one of the two in §6.4 (amended 2026-09-23, NM-3: decision of the overnight run, main session). `NetmonSeriesTruncated` is `info`, which the chart's `InfoInhibitor` keeps out of Discord unless a warning fires in the same namespace; it stays visible in Prometheus/Alertmanager.
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -623,7 +624,7 @@ Every criterion must hold on **both** raspi5 and mba1:
 
 ### 6.4 PrometheusRules
 
-These go in `additionalPrometheusRulesMap.homelab-netmon`, **created by NM-3 (§5.6)**; NM-2 appends to that same map, following the `homelab-backups` precedent from PR #109.
+These go in `additionalPrometheusRulesMap.homelab-netmon`, **created by NM-1** (§5.6; NM-3's node-script rules live in the separate key `homelab-netmon-node`); NM-2 appends to that same map, following the `homelab-backups` precedent from PR #109 (amended 2026-09-23, NM-3).
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -1082,7 +1083,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 |---|---|---|---|
 | Q1 | Cloudflare token creation, plus whether Firewall Services:Read is needed | **NM-1 (blocker)** | — (owner action) |
 | Q2 | Free-plan availability of `clientIP`, `clientASNDescription` and `userAgent` (§4.2 probe) | **NM-1 (blocker if `clientIP` is missing)** | Drop the optional fields |
-| Q3 | `homelab` PR #109 merged (textfile collector) | **NM-3 (blocker)** | Rebase NM-3 on #109 |
+| Q3 | `homelab` PR #109 merged (textfile collector) | **NM-3 (blocker)** | NM-3's PR does not duplicate #109 and targets `main`; #109 merges first, then NM-3 resolves the `additionalPrometheusRulesMap` conflict (one key, all entries) (amended 2026-09-23, NM-3) |
 | Q4 | Go for the coroot spike, then for the all-node rollout | **NM-2 (blocker)** | — (owner action) |
 | Q5 | data-service dependency set — see the table below. It must be approved before NM-0 implementation starts. | **NM-0 (blocker: approval)** | — |
 | Q6 | Reuse the `furchert-ch` client (chosen) or a dedicated client | non-blocker | Reuse |

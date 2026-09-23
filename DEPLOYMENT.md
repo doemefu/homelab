@@ -848,6 +848,60 @@ Backups need no change: `scripts/backup-app-data.sh` reads the database list at 
 
 ---
 
+### Network monitoring: node LAN metrics (NM-3)
+
+Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the apt package `conntrack`, the Python 3 stdlib script `/usr/local/sbin/homelab-netmon-collect` and `homelab-netmon.service` (oneshot, root) + `homelab-netmon.timer` (every minute at :05). Each run writes `/var/lib/node_exporter/textfile_collector/homelab_netmon.prom` atomically; node-exporter exposes it on `:9100`, Prometheus keeps it 14 d as transport, and data-service snapshots it into `netmon` (docs/060 §4.6). Contract (names, labels, bucket semantics, cardinality cap): `docs/060-network-monitoring.md` §5.
+
+| Metric | Meaning |
+|--------|---------|
+| `homelab_lan_connections{node,dport,src_ip,state}` | current conntrack TCP entries to ports 1883, 22, 8123, 6443, 10250 (the node's own outbound flows excluded) |
+| `homelab_ufw_blocks_bucket{node,src_ip,dport,proto}` | `[UFW BLOCK]` kernel log lines in the last completed 15-min bucket — a lower bound, UFW logging is rate-limited |
+| `homelab_sshd_auth_bucket{node,src_ip,outcome}` | sshd `accepted` / `failed` / `invalid_user` in the same bucket; usernames are never emitted |
+| `homelab_netmon_bucket_end_timestamp_seconds{node}` | end (exclusive) of the bucket the two `*_bucket` gauges describe |
+| `homelab_netmon_last_success_timestamp_seconds{node}` | last successful run → alert `NetmonNodeScriptStale` (> 10 min, warning) |
+| `homelab_netmon_truncated_series{node,metric}` | series folded into `src_ip="other"` by the cap `netmon_node_max_series` (200) → alert `NetmonSeriesTruncated` (info) |
+
+**Dependency: homelab PR #109.** The textfile directory (storage role) and node-exporter's `--collector.textfile.directory` + hostPath (kube-prometheus-stack values) come from #109; this role does not create them. Merge #109 first. Before #109 is rolled out, `homelab-netmon.service` fails once a minute with `textfile collector directory … is missing` and recovers by itself once the directory exists. The alert rules sit in `additionalPrometheusRulesMap.homelab-netmon-node` and need `41_monitoring.yml`.
+
+#### Rollout
+
+```bash
+# 1. After #109 (storage role + 41_monitoring.yml) and this PR are merged.
+#    One node first; --diff is safe (no secrets in these templates).
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node
+ansible-playbook infra/playbooks/10_base.yml --tags netmon_node          # all nodes
+ansible-playbook infra/playbooks/10_base.yml --tags netmon_node          # 2nd run: changed=0
+
+# 2. Alert rules (homelab-netmon-node PrometheusRule)
+ansible-playbook infra/playbooks/41_monitoring.yml
+```
+
+#### Verify
+
+```bash
+ssh ansible@<node-ip> "systemctl list-timers homelab-netmon.timer --all"
+ssh ansible@<node-ip> "sudo systemd-analyze verify /etc/systemd/system/homelab-netmon.service"
+ssh ansible@<node-ip> "sudo systemctl start homelab-netmon.service; systemctl status homelab-netmon.service --no-pager | head -5"
+ssh ansible@<node-ip> "cat /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
+curl -s http://<node-ip>:9100/metrics | grep '^homelab_'          # from the LAN (UFW allows 9100)
+curl -s http://<node-ip>:9100/metrics | grep '^node_textfile_scrape_error'   # expect 0
+# sshd really logs under unit "ssh" (docs/060 §12 unverified item)
+ssh ansible@<node-ip> "sudo journalctl -u ssh --since -1h -o cat | grep -c -E '^(Accepted|Failed|Invalid user)'"
+kubectl -n monitoring get prometheusrule | grep homelab-netmon-node
+```
+
+Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(lan_connections|ufw_blocks_bucket|sshd_auth_bucket)"})`). Tunnelled SSH (`ssh.furchert.ch`) shows up with the cloudflared pod or node IP as source, not the real client.
+
+#### Troubleshooting
+
+- **`NetmonNodeScriptStale`**: `journalctl -u homelab-netmon -n 20` on the node. `CalledProcessError` = conntrack or journalctl failed; `FileNotFoundError` = textfile directory missing (#109 not rolled out).
+- **Metric has `exported_node` instead of `node`**: would mean the node-exporter ServiceMonitor stopped honouring labels (`honorLabels: true` in chart 69.3.1); data-service's queries rely on `node`.
+- **Unit tests** (stdlib only, run before changing the script): `python3 -m unittest discover -s infra/roles/netmon_node/tests -v`.
+- **`nf_conntrack_acct`** stays at the kernel default; `netmon_node_conntrack_acct: true` is reserved for the NM-2 fallback (docs/060 §5.5/§6.6).
+
+---
+
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 
 All 8 platform images (the 5 in this runbook, plus postgres-exporter, mosquitto, and
@@ -1595,7 +1649,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Playbook | Purpose | Runtime | Idempotent |
 |----------|---------|---------|------------|
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
-| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog | 3-5 min | Yes |
+| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |

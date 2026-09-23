@@ -1,0 +1,32 @@
+# HELP homelab_lan_connections Current conntrack TCP entries to a watched local port, by original source.
+# TYPE homelab_lan_connections gauge
+homelab_lan_connections{node="raspi5",dport="22",src_ip="192.168.1.10",state="ESTABLISHED"} 1
+homelab_lan_connections{node="raspi5",dport="1883",src_ip="10.42.0.0/16",state="ESTABLISHED"} 1
+homelab_lan_connections{node="raspi5",dport="1883",src_ip="192.168.1.50",state="ESTABLISHED"} 2
+homelab_lan_connections{node="raspi5",dport="1883",src_ip="192.168.1.51",state="TIME_WAIT"} 1
+homelab_lan_connections{node="raspi5",dport="1883",src_ip="other",state="SYN_RECV"} 1
+# HELP homelab_ufw_blocks_bucket UFW BLOCK log lines in the last completed 15-minute bucket (see homelab_netmon_bucket_end_timestamp_seconds).
+# TYPE homelab_ufw_blocks_bucket gauge
+homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.77",dport="0",proto="ICMP"} 1
+homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.77",dport="23",proto="TCP"} 3
+homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.79",dport="0",proto="OTHER"} 1
+homelab_ufw_blocks_bucket{node="raspi5",src_ip="45.155.205.3",dport="3389",proto="TCP"} 1
+homelab_ufw_blocks_bucket{node="raspi5",src_ip="other",dport="5353",proto="UDP"} 1
+# HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket.
+# TYPE homelab_sshd_auth_bucket gauge
+homelab_sshd_auth_bucket{node="raspi5",src_ip="10.42.0.0/16",outcome="failed"} 2
+homelab_sshd_auth_bucket{node="raspi5",src_ip="192.168.1.10",outcome="accepted"} 1
+homelab_sshd_auth_bucket{node="raspi5",src_ip="45.155.205.3",outcome="failed"} 1
+homelab_sshd_auth_bucket{node="raspi5",src_ip="45.155.205.3",outcome="invalid_user"} 1
+homelab_sshd_auth_bucket{node="raspi5",src_ip="other",outcome="invalid_user"} 1
+# HELP homelab_netmon_bucket_end_timestamp_seconds End (exclusive, unix seconds) of the bucket the *_bucket gauges describe.
+# TYPE homelab_netmon_bucket_end_timestamp_seconds gauge
+homelab_netmon_bucket_end_timestamp_seconds{node="raspi5"} 1758620700
+# HELP homelab_netmon_last_success_timestamp_seconds Unix time of the last successful script run.
+# TYPE homelab_netmon_last_success_timestamp_seconds gauge
+homelab_netmon_last_success_timestamp_seconds{node="raspi5"} 1758620765
+# HELP homelab_netmon_truncated_series Series dropped into src_ip="other" because netmon_node_max_series was exceeded, per metric.
+# TYPE homelab_netmon_truncated_series gauge
+homelab_netmon_truncated_series{node="raspi5",metric="homelab_lan_connections"} 0
+homelab_netmon_truncated_series{node="raspi5",metric="homelab_ufw_blocks_bucket"} 0
+homelab_netmon_truncated_series{node="raspi5",metric="homelab_sshd_auth_bucket"} 0

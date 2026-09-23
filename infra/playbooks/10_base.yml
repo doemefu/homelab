@@ -15,6 +15,17 @@
   roles:
     - role: hardening
 
+# NM-3 (homelab#117, docs/060 §5): LAN connection, UFW block and sshd auth textfile metrics.
+# Tag netmon_node rolls it out alone: --tags netmon_node. Needs the node-exporter
+# textfile directory from the storage role (homelab PR #109); until that exists the
+# oneshot service fails each minute with a clear error and recovers on its own.
+- name: Netmon — LAN connection, UFW block and sshd auth textfile metrics
+  hosts: all
+  become: true
+  tags: [netmon_node]
+  roles:
+    - role: netmon_node
+
 - name: Storage — Restic, Backup-Verzeichnisse, externer Mount (pi5)
   hosts: all
   become: true

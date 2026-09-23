@@ -1,0 +1,13 @@
+# Managed by Ansible (role netmon_node) — do not edit manually
+[Unit]
+Description=Run homelab-netmon.service every minute (homelab#117)
+Documentation=https://github.com/doemefu/homelab/issues/117
+
+[Timer]
+OnCalendar={{ netmon_node_on_calendar }}
+AccuracySec=1s
+# No catch-up: every run recomputes the last completed bucket from the journal.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
