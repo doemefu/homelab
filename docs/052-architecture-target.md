@@ -323,7 +323,7 @@ CREATE TABLE devices (
 |--------|------|------|-------------|
 | GET | `/data/measurements` | JWT | Historical sensor data (params: device, period) |
 | GET | `/data/devices/{id}/status` | JWT | Device online/offline history |
-| GET | `/api/netmon/*` | JWT (`netmon:read` or ROLE_ADMIN) | Network telemetry read API — amended 2026-09-23 (ADR 0002); endpoint list in [`060-network-monitoring.md`](060-network-monitoring.md) §7.2 |
+| GET | `/api/netmon/*` | JWT with `SCOPE_netmon:read` **and** `sub` in `netmon.api.allowed-clients` (default `furchert-ch`); `ROLE_ADMIN` is not accepted in v1 (060 §7.5) | Network telemetry read API — amended 2026-09-23 (ADR 0002); endpoint list in [`060-network-monitoring.md`](060-network-monitoring.md) §7.2 |
 
 ---
 

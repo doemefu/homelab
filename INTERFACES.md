@@ -118,7 +118,7 @@ All services are discoverable via Kubernetes internal DNS.
 | auth-service | `auth-service.apps.svc.cluster.local` | 8080 | JWT auth, OIDC provider |
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | IoT device management |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Public site (Next.js) + OIDC-gated /dashboard |
-| data-service | `data-service.apps.svc.cluster.local` | 8082 | Analytical data plane (ADR 0002): network-telemetry read API `/api/netmon/*` (JWT, `netmon:read` or ROLE_ADMIN), cluster-internal only — no tunnel route; contract `docs/060-network-monitoring.md` |
+| data-service | `data-service.apps.svc.cluster.local` | 8082 | Analytical data plane (ADR 0002): network-telemetry read API `/api/netmon/*` (JWT with `SCOPE_netmon:read` **and** `sub` in `netmon.api.allowed-clients`, default `furchert-ch`; `ROLE_ADMIN` not accepted in v1 — 060 §7.5), cluster-internal only — no tunnel route; contract `docs/060-network-monitoring.md` |
 
 **data-service outbound destinations** (`docs/060-network-monitoring.md` §10): `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`, plus cluster-internal auth-service (:8080), Prometheus (`kube-prometheus-stack-prometheus.monitoring`:9090) and PostgreSQL (:5432). Blocklists are fetched only by data-service.
 

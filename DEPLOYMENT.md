@@ -811,8 +811,13 @@ rm /tmp/flux-data-service.pub
 #     ImageRepository has no secretRef — make this one public after the first push:
 #     https://github.com/users/doemefu/packages/container/homelab-data-service/settings
 #     → Danger Zone → Change visibility → Public.
-#     Alternative: keep it private, create ghcr-auth (see the comment in
-#     cluster/apps/data-service/imagerepo.yaml) and uncomment its secretRef.
+#     Alternative: keep it private. That needs TWO credentials, because ghcr-auth in
+#     flux-system only lets Flux scan tags — it gives the Pod in apps nothing to pull with:
+#       1. ghcr-auth in flux-system (see the comment in cluster/apps/data-service/imagerepo.yaml)
+#          and uncomment its secretRef;
+#       2. a docker-registry Secret in apps (same command with -n apps, e.g. name ghcr-pull)
+#          plus `imagePullSecrets: [{name: ghcr-pull}]` in homelab-data-service's
+#          k8s/deployment.yaml (app repo change). Without 2 the rollout ends in ImagePullBackOff.
 
 # (d) Branch ruleset: the Flux push to main must not be blocked. Mirror the
 #     device-service ruleset (rules deletion, non_fast_forward, copilot_code_review,
