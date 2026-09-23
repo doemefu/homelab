@@ -330,7 +330,7 @@ This repository provides the **platform infrastructure**. Application services t
 | [homelab-auth-service](https://github.com/doemefu/homelab-auth-service) | JWT authentication service — user CRUD, token issuance, JWKS endpoint | Deployed | Flux-managed |
 | [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | Deployed | Flux-managed |
 | [furchert-ch](https://github.com/doemefu/furchert-ch) | Public site (Next.js, DE/EN) + OIDC-gated `/dashboard` | Deployed | Flux-managed |
-| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Historical sensor data (InfluxDB) — README-only skeleton; schedules live in device-service (ADR 0001) | Planned, not deployed | - |
+| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Analytical data plane (ADR 0002): network telemetry in Postgres DB `data_service` (schema `netmon`) + historical sensor data (InfluxDB); schedules live in device-service (ADR 0001) — contract `docs/060-network-monitoring.md` | Active (NM-0 bootstrap) | Flux-managed |
 
 Architecture and migration planning documents are in `docs/`.
 

@@ -86,7 +86,8 @@ ansible-playbook infra/playbooks/40_platform.yml
 ### Post-Deployment Setup
 
 ```bash
-# Enable Flux GitOps for auth-service, device-service and furchert-ch
+# Enable Flux GitOps for auth-service, device-service, furchert-ch and data-service
+# (data-service first needs its deploy key + DB/Secret — see "data-service (Flux, NM-0 onboarding)")
 kubectl apply -f cluster/flux-system/apps-sync.yaml
 
 # Verify cluster health
@@ -777,6 +778,71 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 
 ---
 
+### data-service (Flux, NM-0 onboarding)
+
+data-service is Flux-managed like auth-service/device-service (`cluster/apps/data-service/`), and uses its own Postgres DB `data_service` (role `data_service`, schema `netmon` created by its Flyway) plus the Secret `data-service-secrets`, both from `59_app_services.yml`. Contract: `docs/060-network-monitoring.md` §9; ownership: ADR 0002 (parent `docs/adr/0002-network-telemetry-ownership.md`). No public tunnel route — do not add it to `cf_ingress_body`.
+
+#### Order (first rollout)
+
+1. `homelab-data-service` NM-0 PR merged: `k8s/` exists on `main` and CI has pushed a first image `ghcr.io/doemefu/homelab-data-service:main-<YYYYMMDDTHHMMSS>`.
+2. Owner prerequisites below (deploy key, GHCR visibility, ruleset check, SOPS variable).
+3. The infra PR with `cluster/apps/data-service/` + the playbook-59 tasks is merged.
+4. Run playbook 59 right after the merge (creates DB, role and Secret).
+5. Flux reconciles (`apps` Kustomization, interval 10 min) or force it. A pod that starts before step 4 sits in `CreateContainerConfigError` and recovers by itself once the Secret exists.
+
+#### Owner prerequisites
+
+```bash
+# (a) SOPS variable (NM-0) — value e.g. from: openssl rand -hex 24
+sops infra/inventory/group_vars/all.sops.yml     # add: data_service_db_password: "<value>"
+
+# (b) Flux deploy key with WRITE access (image-automation pushes tag bumps to main).
+#     flux generates the key pair in-cluster; only the PUBLIC key leaves the cluster.
+flux create secret git data-service-flux-auth -n flux-system \
+  --url=ssh://git@github.com/doemefu/homelab-data-service \
+  --ssh-key-algorithm=ed25519
+kubectl -n flux-system get secret data-service-flux-auth \
+  -o jsonpath='{.data.identity\.pub}' | base64 -d > /tmp/flux-data-service.pub
+gh repo deploy-key add /tmp/flux-data-service.pub -R doemefu/homelab-data-service \
+  --title flux-data-service --allow-write
+rm /tmp/flux-data-service.pub
+
+# (c) GHCR visibility: new packages default to private. Siblings are public and their
+#     ImageRepository has no secretRef — make this one public after the first push:
+#     https://github.com/users/doemefu/packages/container/homelab-data-service/settings
+#     → Danger Zone → Change visibility → Public.
+#     Alternative: keep it private, create ghcr-auth (see the comment in
+#     cluster/apps/data-service/imagerepo.yaml) and uncomment its secretRef.
+
+# (d) Branch ruleset: the Flux push to main must not be blocked. Mirror the
+#     device-service ruleset (rules deletion, non_fast_forward, copilot_code_review,
+#     code_scanning, code_quality; bypass = Admin role; NO pull_request rule).
+gh api repos/doemefu/homelab-data-service/rulesets --jq '.[] | "\(.id) \(.name) \(.enforcement)"'
+#     If a ruleset requires pull requests, add the deploy key as a bypass actor
+#     (actor_type "DeployKey") or drop that rule.
+```
+
+#### Apply and verify
+
+```bash
+# Playbook 59 (after the infra PR merge); a second run must report changed=0
+ansible-playbook infra/playbooks/59_app_services.yml
+
+kubectl -n apps get secret data-service-secrets
+kubectl -n apps exec postgresql-0 -- psql -U postgres -tc \
+  "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='data_service'"
+
+flux reconcile kustomization apps -n flux-system --with-source
+flux get sources git data-service -n flux-system
+flux get image repository data-service -n flux-system
+flux get kustomizations data-service -n flux-system
+kubectl -n apps get pods -l app=data-service
+```
+
+Backups need no change: `scripts/backup-app-data.sh` reads the database list at runtime, so `data_service` is dumped automatically.
+
+---
+
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 
 All 8 platform images (the 5 in this runbook, plus postgres-exporter, mosquitto, and
@@ -1237,6 +1303,7 @@ flux get image update -n flux-system
 ```bash
 flux reconcile kustomization device-service -n flux-system --with-source
 flux reconcile kustomization auth-service -n flux-system --with-source
+flux reconcile kustomization data-service -n flux-system --with-source
 ```
 
 #### Emergency Pin/Unpin

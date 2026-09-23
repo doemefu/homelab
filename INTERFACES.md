@@ -104,7 +104,7 @@ All services are discoverable via Kubernetes internal DNS.
 
 | Service | FQDN | Port | Metrics Port | Authentication | Notes |
 |---------|------|------|---------------|----------------|-------|
-| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar |
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`) |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |
@@ -118,6 +118,9 @@ All services are discoverable via Kubernetes internal DNS.
 | auth-service | `auth-service.apps.svc.cluster.local` | 8080 | JWT auth, OIDC provider |
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | IoT device management |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Public site (Next.js) + OIDC-gated /dashboard |
+| data-service | `data-service.apps.svc.cluster.local` | 8082 | Analytical data plane (ADR 0002): network-telemetry read API `/api/netmon/*` (JWT, `netmon:read` or ROLE_ADMIN), cluster-internal only — no tunnel route; contract `docs/060-network-monitoring.md` |
+
+**data-service outbound destinations** (`docs/060-network-monitoring.md` §10): `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`, plus cluster-internal auth-service (:8080), Prometheus (`kube-prometheus-stack-prometheus.monitoring`:9090) and PostgreSQL (:5432). Blocklists are fetched only by data-service.
 
 ### Platform Services
 
@@ -195,7 +198,7 @@ Real-time IoT device management service.
 
 ### Flux-Managed Applications
 
-**Applications**: `auth-service`, `device-service`, `furchert-ch`
+**Applications**: `auth-service`, `device-service`, `furchert-ch`, `data-service`
 
 **Reconciliation Flow**:
 1. App repository contains `k8s/` directory with Kubernetes manifests
@@ -287,6 +290,7 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 | `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention) |
 | `n8n-secrets` | `apps` | n8n encryption key | n8n | Rotate via `59_app_services.yml`, restart n8n deployment |
 | `litellm-secrets` | `apps` | LiteLLM master key, salt key, DB password, Mistral API keys | LiteLLM | **`litellm_salt_key` MUST NEVER rotate** — invalidates all virtual keys in DB |
+| `data-service-secrets` | `apps` | Postgres credentials for DB `data_service` (`db-username` = literal `data_service`, `db-password`); NM-1/NM-4 add `cloudflare-api-token`, `cloudflare-zone-id`, `abuseipdb-api-key`, `auth-client-secret` (`docs/060-network-monitoring.md` §9) | data-service | Rotate via `59_app_services.yml` (re-sets the role password), then restart data-service |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), SMTP password (`smtp-password`, contact-form delivery, furchert-ch#46) | furchert-ch | Rotate via `59_app_services.yml`; `smtp-password` is an Infomaniak application password, independently revocable from the mailbox login password |
@@ -312,6 +316,7 @@ From `59_app_services.yml` (app secrets):
 - `litellm_db_password`
 - `mistral_api_key`, `mistral_codestral_api_key`
 - `litellm_client_secret`
+- `data_service_db_password` (Postgres password for role `data_service`, e.g. `openssl rand -hex 24`)
 
 From `50_apps_infra.yml` (shared infrastructure):
 - `postgresql_password`

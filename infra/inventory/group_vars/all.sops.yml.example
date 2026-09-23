@@ -137,3 +137,8 @@ auth_service_furchert_ch_client_secret: "CHANGE_ME_openssl_rand_hex_32"
 
 # Infomaniak application password for info@furchert.ch (contact-form SMTP, furchert-ch#46)
 furchert_ch_smtp_password: "CHANGE_ME_infomaniak_smtp_app_password"
+
+# data-service Postgres password for the data_service role/DB (docs/060-network-monitoring.md §9)
+# Created idempotently by 59_app_services.yml; materialised as data-service-secrets/db-password.
+# Generate: openssl rand -hex 24
+data_service_db_password: "CHANGE_ME_openssl_rand_hex_24"
