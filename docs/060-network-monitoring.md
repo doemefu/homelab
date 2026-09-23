@@ -1,10 +1,10 @@
 # 060 — Network Monitoring: Cross-Repo Contract
 
-> Canonical copy; parent docs/060 forwards here. Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
+> Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here once homelab PR #126 is merged. Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
 
 **Status:** Draft for implementation — 2026-09-23
 **Epic:** `doemefu/homelab#114` · **ADR:** [`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)
-**Canonical location:** this parent file for now. The first NM-0 infrastructure PR commits it as `infrastructure/docs/060-network-monitoring.md`, and this file then becomes a forwarder, following the `052` precedent.
+**Canonical location:** this file (`infrastructure/docs/060-network-monitoring.md`). The parent workspace file `docs/060-network-monitoring.md` becomes a forwarder once `homelab#126` is merged, following the `052` precedent.
 **Conventions:** "(assumption)" = a design choice made here that the implementer may revisit in its plan. "(unverified)" = a fact not confirmed against a live system or upstream docs, which the implementing sub-project must confirm in its Phase 1.
 
 ---
@@ -127,7 +127,8 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | cursor | text | yes | Opaque, e.g. the last login-event id |
 | last_attempt_at / last_success_at | timestamptz | yes | |
 | consecutive_failures | int | no | default 0 |
-| last_error | text | yes | Exception class and short message. **Never** a URL with a query string, a header or a token. |
+| last_error | text | yes | Exception class and short message. **Never** a URL with a query string, a header or a token. `last_error` carries a message only for collector-authored `CollectorException`s; for any other exception only the class name is stored (no payload, no IPs) (amended 2026-09-23, NM-0: data-service PR #18). |
+| last_error_code | text | yes | CHECK constraint restricts values to `credentials`, `rate_limited`, `upstream`, `truncated`, `internal` (the §7.2 status error-code enum) (amended 2026-09-23, NM-0: data-service PR #18) |
 
 **`netmon.inbound_request_groups`** (NM-1). Source: `httpRequestsAdaptiveGroups`. Granularity is 1 h. Write mode: replace per window. Retention: 90 d.
 
@@ -329,7 +330,7 @@ The scheduler is Spring `@Scheduled` on the Boot-managed `ThreadPoolTaskSchedule
 
 **Failure rule.** A failure leaves `last_window_end` unchanged, increments `consecutive_failures` and stores `last_error`. The next run retries. HTTP 429 and 5xx get exponential backoff between runs, capped at 30 min.
 
-**Alerting.** A silent stall (for example, a Cloudflare token that has expired) shows up only in `/status` (§7.2) today, since there is no Prometheus rule watching collector freshness — unlike the node script and the coroot agent, which do have one (§5.6, §6.4). A `NetmonCollectorStale` rule on `netmon_collector_last_success_timestamp_seconds` is possible only if the owner approves Q9 in the §12 dependency table, which adds `micrometer-registry-prometheus`. If declined, the risk is that collector stalls stay visible only in the UI.
+**Alerting.** A silent stall (for example, a Cloudflare token that has expired) shows up only in `/status` (§7.2) today, since there is no Prometheus rule watching collector freshness — unlike the node script and the coroot agent, which do have one (§5.6, §6.4). A `NetmonCollectorStale` rule on `netmon_collector_last_success_timestamp_seconds` is possible only if the owner approves Q9 in the §12 dependency table, which adds `micrometer-registry-prometheus`. If declined, the risk is that collector stalls stay visible only in the UI. `netmon_collector_last_success_timestamp_seconds{collector}` is NaN until the collector's first success; the `NetmonCollectorStale` rule must treat a NaN sample as "never succeeded" (e.g. `time() - g > <threshold> or g != g` — the exact expression is NM-1's job, noted in §5.6/§6.4 style where the rule is specified) (amended 2026-09-23, NM-0: data-service PR #18).
 
 ### 4.2 Cloudflare GraphQL (NM-1)
 
@@ -672,13 +673,15 @@ homelab_egress_bytes_bucket{node,src_ip,dst_ip,dport,proto,direction="sent|recei
 | Item | Contract |
 |---|---|
 | Base URL | `http://data-service.apps.svc.cluster.local:8082/api/netmon` (cluster-internal only) |
-| Auth | `Authorization: Bearer <JWT>` (§7.5). Only `/actuator/health` and `/actuator/info` are public. |
+| Auth | `Authorization: Bearer <JWT>` (§7.5). Only `/actuator/health`, `/actuator/info` and `/actuator/prometheus` are public (amended 2026-09-23, NM-0: data-service PR #18). |
 | Time window | `from` and `to` are ISO-8601 instants, e.g. `2026-09-23T10:00:00Z`. `to` defaults to now and `from` defaults to `to − 24h`, unless an endpoint says otherwise. `to − from` must be > 0 and ≤ **30 d**, or the response is 400. Windowed tables are filtered by overlap: `window_start < to AND window_end > from`. |
 | Paging | Lists take `limit`, with a default of 50 and a maximum of 500. They also take `cursor`, an opaque string from the previous response. Responses carry `nextCursor`, which is a string or `null`. |
 | JSON | camelCase. Timestamps are ISO-8601 UTC with `Z`. IPs are strings. Counts and bytes are integers. Absent optional values are `null`, never omitted. |
 | Errors | RFC 9457 `application/problem+json` with the fields `type`, `title`, `status`, `detail` and `instance`, plus `code`. `code` is one of `invalid_window`, `invalid_parameter`, `not_found`, `unauthorized`, `forbidden` or `internal`. `detail` never echoes a token or a stack trace. |
 | Caching | Every response has `Cache-Control: no-store` and `Pragma: no-cache`, because the data is personal. |
 | Status codes | 200, 400, 401, 403, 404 (IP detail only), and 500 |
+
+`/actuator/prometheus` is served **without** authentication, the same as `/actuator/health` — it is a cluster-internal scrape target for the approved Q9 metrics, and those metrics carry no IP labels. The Service port serving it is named `http` (amended 2026-09-23, NM-0: data-service PR #18). The ServiceMonitor for data-service and the `NetmonCollectorStale` PrometheusRule ship with NM-1's infrastructure child (`homelab#116`), because NM-0 has no collectors yet (amended 2026-09-23, NM-0: data-service PR #18).
 
 Top-N lists take `limit` with a default of 10 and a maximum of 50.
 
@@ -693,6 +696,7 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 
 - `stale` = `lastSuccessAt` is older than 3 × the cadence.
 - `lastErrorCode` is `null`, `credentials`, `rate_limited`, `upstream`, `truncated` or `internal`. It is never a message.
+- Before a collector's first success, staleness is measured from the service start time (amended 2026-09-23, NM-0: data-service PR #18).
 
 **`GET /inbound/summary?from&to&host&limit`** (NM-1)
 
@@ -799,6 +803,7 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 - Requests to unknown query parameters are ignored.
 - Every endpoint is read-only, so the API has no POST, PUT or DELETE.
 - The API has no admin actions in v1. An AbuseIPDB re-check button is a follow-up.
+- If the JWKS endpoint is unreachable, data-service answers 500 `problem+json` with code `internal` (no default Boot error body) (amended 2026-09-23, NM-0: data-service PR #18).
 
 ### 7.4 Error example
 
@@ -991,7 +996,7 @@ The rest of the deployment follows the `052` baseline:
 
 - port 8082;
 - requests `100m`/`256Mi`, limits `1000m`/`512Mi`;
-- JVM `-Xmx128m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m`, which the spike may raise to `-Xmx192m`;
+- JVM `-Xmx128m -XX:+UseSerialGC -XX:MaxMetaspaceSize=96m` (raised from 64m: NM-0 measured ~56 MB metaspace for data-service alone) (amended 2026-09-23, NM-0: data-service PR #18), which the spike may raise to `-Xmx192m`;
 - probes on `/actuator/health` with a 300 s startup budget;
 - `replicas: 1`, `automountServiceAccountToken: false`, and a multi-arch image `ghcr.io/doemefu/homelab-data-service` with the Flux image-automation marker.
 
@@ -1024,7 +1029,7 @@ auth-service is Flux-auto-deployed on every merge to `main`, and its Spring conf
 
 ## 10. Security and privacy
 
-- **IP addresses are personal data.** They are admin-only in the UI. The data-service API is cluster-internal only and needs `netmon:read` from an allowed client, or ROLE_ADMIN. Retention is bounded (§3.3), and nothing leaves the cluster except AbuseIPDB lookups of public IPs that crossed the §4.5 threshold.
+- **IP addresses are personal data.** They are admin-only in the UI. The data-service API is cluster-internal only and requires `netmon:read` from an allowed client (§7.5; v1 does not accept ROLE_ADMIN) (amended 2026-09-23, NM-0: data-service PR #18). Retention is bounded (§3.3), and nothing leaves the cluster except AbuseIPDB lookups of public IPs that crossed the §4.5 threshold.
 - **No secrets in logs:**
   - data-service never logs tokens, `Authorization` headers, GraphQL variables or AbuseIPDB keys, and `last_error` holds a class and short message only;
   - furchert-ch never logs tokens or IPs;
@@ -1127,6 +1132,18 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | `StaticClientSeeder` accepting a client with no redirect URIs | NM-4 |
 | ServiceMonitor selector label `release: kube-prometheus-stack` | NM-2 |
 
+**Decided during NM-0 implementation** (`homelab-data-service` PR #18, 2026-09-23)
+
+| # | Decision |
+|---|---|
+| 1 | `/actuator/prometheus` served unauthenticated like `/actuator/health` (§7.1); ServiceMonitor + `NetmonCollectorStale` rule ship with NM-1's infrastructure child (`homelab#116`) |
+| 2 | `collector_state.last_error_code` column added, CHECK-constrained to the §7.2 error-code enum (§3.3) |
+| 3 | `/status` staleness is measured from the service start time before a collector's first success (§7.2) |
+| 4 | `netmon_collector_last_success_timestamp_seconds` is NaN before first success; `NetmonCollectorStale` must treat NaN as "never succeeded" (§4.1) |
+| 5 | JVM `-XX:MaxMetaspaceSize` raised from 64m to 96m (measured ~56 MB metaspace for NM-0 alone) (§9) |
+| 6 | §10 corrected: v1 does not accept ROLE_ADMIN, only `netmon:read` per §7.5 |
+| 7 | JWKS-unreachable failure mode specified: 500 `problem+json`, code `internal` (§7.3) |
+
 ---
 
-Reviewed 2026-09-23 (plan-reviewer, PASS WITH CHANGES, 32 findings applied).
+Reviewed 2026-09-23 (plan-reviewer, PASS WITH CHANGES, 32 findings applied); amended 2026-09-23 after data-service PR #18.
