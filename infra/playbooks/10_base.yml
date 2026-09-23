@@ -21,8 +21,11 @@
   roles:
     - role: storage
 
+# Tag mac_tweaks allows a staged rollout on one node without re-running base,
+# hardening and storage: -l mba2 --tags mac_tweaks (homelab#102).
 - name: Mac-Tweaks — Lid-close, T2-Kernel-Module (nur x86_64)
   hosts: mac
   become: true
+  tags: [mac_tweaks]
   roles:
     - role: mac_tweaks

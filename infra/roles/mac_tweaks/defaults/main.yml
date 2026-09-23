@@ -13,3 +13,27 @@ mac_tweaks_watchdog_timeout: 60
 mac_tweaks_watchdog_max_load_1: 24
 mac_tweaks_watchdog_min_memory: 51200
 mac_tweaks_watchdog_log_dir: /var/log/watchdog
+
+# Scheduled preventive reboot (homelab#102): the T2 chip power-cycles these MacBooks
+# ~432000 s (5 d) after every host boot, with no kernel panic and no pstore record.
+# A daily timer plus an uptime threshold keeps every boot shorter than that: worst case
+# 3.5 d threshold + 1 d check interval = 4.5 d, i.e. 12 h before the deadline.
+mac_tweaks_reboot_enabled: true
+mac_tweaks_reboot_min_uptime_seconds: 302400
+mac_tweaks_reboot_script: /usr/local/bin/homelab-scheduled-reboot.sh
+# Per-node slots, 90 min apart so a Longhorn rebuild on the first node finishes before
+# the second goes down, and clear of the Longhorn/restic windows (02:00 daily-snapshot,
+# 03:00 restic, 04:00 metrics-snapshot-cleanup, 05:00 metrics-filesystem-trim).
+# Defaults live here so the role works without inventory edits; override a single host
+# from the (untracked) inventory with host_vars or -e mac_tweaks_reboot_on_calendar=...
+mac_tweaks_reboot_slots:
+  mba1: "*-*-* 07:40:00"
+  mba2: "*-*-* 06:10:00"
+mac_tweaks_reboot_on_calendar: >-
+  {{ mac_tweaks_reboot_slots[inventory_hostname] | default('*-*-* 06:10:00') }}
+
+# logind inhibitor delay for the kubelet's graceful node shutdown (homelab#102).
+# Must be >= k3s_graceful_shutdown_period, otherwise the kubelet silently disables the
+# feature. See templates/logind-kubelet.conf.j2 for the full reasoning.
+mac_tweaks_kubelet_inhibit_delay_enabled: true
+mac_tweaks_kubelet_inhibit_delay_seconds: 60

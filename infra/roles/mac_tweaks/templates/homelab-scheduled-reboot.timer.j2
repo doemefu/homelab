@@ -1,0 +1,12 @@
+# Managed by Ansible — do not edit manually
+[Unit]
+Description=Daily uptime check that reboots the node before the T2 5-day reset (homelab#102)
+Documentation=https://github.com/doemefu/homelab/issues/102
+
+[Timer]
+OnCalendar={{ mac_tweaks_reboot_on_calendar }}
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

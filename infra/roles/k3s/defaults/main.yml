@@ -6,3 +6,13 @@ k3s_binary_name: "{{ 'k3s-arm64' if ansible_facts['architecture'] == 'aarch64' e
 k3s_kubeconfig_dir: /etc/rancher/k3s
 k3s_data_dir: /var/lib/rancher/k3s
 # k3s_token: muss in infra/inventory/group_vars/secrets.yml gesetzt sein
+
+# Kubelet graceful node shutdown (homelab#102) — enabled for the mac group only, so the
+# Raspberry Pis and the server are untouched. The kubelet reads every *.conf in
+# k3s_kubelet_config_dir at start (k3s passes --config-dir for it) and merges them in
+# lexical order; k3s owns the 00-/10-/20- prefixes and rewrites 00-k3s-defaults.conf on
+# every start, so our drop-in uses 50-.
+k3s_graceful_shutdown_enabled: false
+k3s_graceful_shutdown_period: "60s"
+k3s_graceful_shutdown_period_critical_pods: "20s"
+k3s_kubelet_config_dir: "{{ k3s_data_dir }}/agent/etc/kubelet.conf.d"
