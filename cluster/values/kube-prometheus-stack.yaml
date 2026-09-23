@@ -132,3 +132,78 @@ prometheusOperator:
     limits:
       cpu: 100m
       memory: 128Mi
+
+# --- Network monitoring: coroot-node-agent egress rules (NM-2, #118) ---
+# Contract: docs/060-network-monitoring.md §6.4. Own map key so the NM-1 (`homelab-netmon`),
+# NM-3 (`homelab-netmon-node`) and #109 (`homelab-backups`) rule groups never collide; when two
+# of these PRs both add the top-level `additionalPrometheusRulesMap:` key, merge them into ONE
+# map (a second top-level key would silently replace the first on YAML load).
+additionalPrometheusRulesMap:
+  homelab-netmon-egress:
+    groups:
+      - name: homelab-netmon-egress
+        rules:
+          # Series presence, not increase() > 0: a brand-new destination's counter has a single
+          # sample in a short window, so increase() would miss exactly the case this alert is for.
+          # `workload` = container_id with the Deployment/DaemonSet/Job pod-name suffix removed
+          # (/k8s/<ns>/<pod>/<container> -> <ns>/<owner>/<container>). Without it every Flux
+          # rollout (new pod name -> new container_id) would re-report all of a workload's known
+          # destinations. Pods that do not match (StatefulSets, systemd units) keep the raw
+          # container_id. The destination filter drops pod/service CIDRs, LAN and loopback.
+          # severity info: the chart's InfoInhibitor suppresses info alerts in Alertmanager unless
+          # a warning/critical fires in the same namespace, so this shows in the Alertmanager and
+          # Prometheus UIs but does not page Discord (docs/060 §6.4).
+          - alert: NetmonNewExternalDestination
+            expr: |
+              count by (workload) (
+                group by (workload, actual_destination) (
+                  label_replace(
+                    label_replace(
+                      container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"},
+                      "workload", "$1", "container_id", "(.*)"),
+                    "workload", "$1/$2/$3", "container_id",
+                    "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)")
+                )
+                unless on (workload, actual_destination)
+                group by (workload, actual_destination) (
+                  label_replace(
+                    label_replace(
+                      last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m),
+                      "workload", "$1", "container_id", "(.*)"),
+                    "workload", "$1/$2/$3", "container_id",
+                    "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)")
+                )
+              )
+            for: 0m
+            labels:
+              severity: info
+            annotations:
+              summary: "{{ $labels.workload }} connected to {{ $value }} new external destination(s)"
+              description: >-
+                {{ $labels.workload }} opened TCP connections to {{ $value }} external ip:port
+                destination(s) not seen in the previous 24 h. Details:
+                container_net_tcp_successful_connects_total in Prometheus or the egress section of
+                /dashboard/network. Expected to be noisy for CDN-rotating destinations.
+          # Up/scrape health that the chart does not already cover. Pod crash loops, rollout
+          # stalls and unscheduled pods are the chart's KubePodCrashLooping /
+          # KubeDaemonSetRolloutStuck / KubeDaemonSetNotScheduled; a failing scrape of a
+          # running pod (e.g. sampleLimit exceeded) is also the chart's TargetDown.
+          # Branch 1: the DaemonSet is gone. Branch 2: more agents are available than are
+          # scraped successfully (Service/ServiceMonitor missing, selector drift, sampleLimit).
+          # With the spike gate closed (no labelled node) both sides are 0 and nothing fires.
+          - alert: CorootNodeAgentDown
+            expr: |
+              absent(kube_daemonset_status_desired_number_scheduled{namespace="monitoring", daemonset="coroot-node-agent"})
+              or
+              max(kube_daemonset_status_number_available{namespace="monitoring", daemonset="coroot-node-agent"})
+                > (count(up{job="coroot-node-agent"} == 1) or vector(0))
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "coroot-node-agent is missing or not scraped"
+              description: >-
+                Either DaemonSet monitoring/coroot-node-agent does not exist, or fewer agent pods
+                are scraped successfully than are available (check the ServiceMonitor, the headless
+                Service and scrape_samples_post_metric_relabeling against sampleLimit 10000). Runbook:
+                DEPLOYMENT.md "coroot-node-agent (NM-2)".

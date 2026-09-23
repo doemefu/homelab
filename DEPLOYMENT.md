@@ -125,7 +125,7 @@ kubectl get ns
 | `kube-system` | traefik, coredns, metrics-server, svclb-* | Running |
 | `platform` | cert-manager (3x), cloudflared | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
-| `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* | Running |
+| `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-*, coroot-node-agent-* (only on gated nodes — see "coroot-node-agent (NM-2)") | Running |
 | `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, n8n-*, litellm-*, open-webui-* | Running |
 | `homeassistant` | home-assistant-0 | Running |
 | `flux-system` | source-controller, kustomize-controller, helm-controller, notification-controller, image-reflector-controller, image-automation-controller | Running |
@@ -601,6 +601,7 @@ Expected UP targets:
 - `serviceMonitor/monitoring/postgresql` → apps
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
+- `serviceMonitor/monitoring/coroot-node-agent` → monitoring (one target per gated node; none while the gate is closed)
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
 > absent from this list and from `/targets` entirely (disabled in
@@ -659,6 +660,95 @@ Decision: raised `postgres-exporter`'s `limits.cpu` to `250m` in `infra/playbook
 (`requests` unchanged); kept the alert itself (severity `info`, already excluded from paging by
 `InfoInhibitor`) rather than tuning its expression — it was correctly identifying a genuinely
 undersized CPU quota, not a false positive.
+
+### coroot-node-agent (NM-2)
+
+eBPF egress/east-west visibility for the network-monitoring Epic (#114). Contract:
+`docs/060-network-monitoring.md` §6; issue #118. The agent is an **approved privileged workload**
+in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgroup` read-only,
+`/sys/kernel/tracing`, `/sys/kernel/debug`), metrics-only: it pushes nothing out of the cluster.
+
+| Piece | Where |
+|-------|-------|
+| DaemonSet, headless Service, ServiceMonitor | `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml` (no Helm chart; the chart is stale) |
+| Alert rules `NetmonNewExternalDestination`, `CorootNodeAgentDown` | `cluster/values/kube-prometheus-stack.yaml` → `additionalPrometheusRulesMap.homelab-netmon-egress` |
+| Image | `ghcr.io/coroot/coroot-node-agent:1.35.10@sha256:…` (index digest in the manifest comment; bumped by hand) |
+| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default `[]`) |
+
+**The gate.** The DaemonSet only schedules on labelled nodes. `41_monitoring.yml` labels exactly
+the nodes in `coroot_node_agent_nodes` and **removes** the label from every other node, so the
+play variable is the source of truth: a run without the override closes the gate again. With the
+default empty list, merging the PR and running the playbook creates the DaemonSet with 0 pods,
+and neither rule fires.
+
+**Kernel prerequisites** (read-only checks 2026-09-23, docs/060 §6.3): all four nodes have
+`CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`, tracefs and debugfs mounted, and lockdown `none`.
+The Pis (6.8.0-raspi) have BTF; mba1 (6.12.79-1-t2-noble) and mba2 (6.19.10-2-t2-noble) do not
+(`CONFIG_DEBUG_INFO_NONE=y`). coroot-node-agent ships precompiled programs, so BTF is not
+required; the spike on mba1 is what proves that.
+
+#### Spike runbook (needs the owner's go — docs/060 §12 Q4)
+
+1. **Baseline** (Prometheus port-forward, see "Access" above): record `prometheus_tsdb_head_series`
+   (108 985 on 2026-09-23) and note which nodes host furchert-ch, a flux controller and litellm
+   (`kubectl get pods -A -o wide`). Criterion 3 needs those flows on the spiked nodes.
+2. **Open the gate on raspi5 only:**
+   ```bash
+   ansible-playbook infra/playbooks/41_monitoring.yml -e '{"coroot_node_agent_nodes": ["raspi5"]}'
+   ```
+   Lightweight alternative without the Helm upgrade (the rules then arrive with the next 41 run):
+   ```bash
+   kubectl apply -k cluster/monitoring/coroot-node-agent
+   kubectl label node raspi5 homelab.furchert.ch/coroot-node-agent=enabled
+   ```
+3. **Smoke check** (first 10 min):
+   ```bash
+   kubectl -n monitoring get pods -l app.kubernetes.io/name=coroot-node-agent -o wide
+   kubectl -n monitoring logs ds/coroot-node-agent | head -50   # expect "using /run/k3s/containerd/containerd.sock", no BPF load errors
+   # on the spiked node itself:
+   sudo journalctl -k --since "-15 min" | grep -iE "bpf|verifier" || echo none
+   ```
+   Prometheus → Targets must show `serviceMonitor/monitoring/coroot-node-agent/0` UP. raspi5 is
+   the only control-plane node (kine incident #129): abort (step 7) if `kubectl get --raw /readyz`
+   turns slow or the node's load climbs noticeably.
+4. **Measure for ≥ 24 h** and record the numbers in the NM-2 worklog (criteria from docs/060 §6.3):
+
+   | # | PromQL | Pass |
+   |---|--------|------|
+   | 2 | `kube_pod_container_status_restarts_total{namespace="monitoring", container="coroot-node-agent"}` and `kube_pod_container_status_last_terminated_reason{container="coroot-node-agent", reason="OOMKilled"}` | 0 restarts, no OOMKilled |
+   | 3 | `group by (container_id, actual_destination) (container_net_tcp_successful_connects_total)` and `ip_to_fqdn` | ≥ 3 known flows with a non-empty `actual_destination`; external IPs have an FQDN |
+   | 4 | `scrape_samples_post_metric_relabeling{job="coroot-node-agent"}` | < 5 000 per agent |
+   | 5 | `avg_over_time(rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `max_over_time(container_memory_working_set_bytes{namespace="monitoring", container="coroot-node-agent"}[24h])` | avg < 100m, p95 < 250m, max < 200 Mi |
+   | 6 | `prometheus_tsdb_head_series` | < +10 % over the baseline |
+   | 7 | `count by (container_id) (container_net_tcp_active_connections)` | record the `container_id` format (expected `/k8s/<ns>/<pod>/<container>`) |
+
+   `scrape_samples_scraped{job="coroot-node-agent"}` shows the pre-relabel size, for information only;
+   `sampleLimit` (10 000) is counted after the keep-list.
+5. **Add mba1** (no BTF): repeat steps 2–4 with `-e '{"coroot_node_agent_nodes": ["raspi5", "mba1"]}'`
+   (or `kubectl label node mba1 …`). Every criterion must hold on both nodes.
+6. **Record and roll out.** Update docs/060 §3.3/§4.6 with the observed `container_id` format and
+   metric labels. After the owner's go for all nodes, a PR sets `coroot_node_agent_nodes` in
+   `41_monitoring.yml` to all four nodes, then run `41_monitoring.yml`.
+7. **Rollback.**
+   - *Stop the agent, keep everything else:* run `41_monitoring.yml` without the override (the
+     gate closes and the pods terminate), or `kubectl label node --all homelab.furchert.ch/coroot-node-agent-`.
+     No alert fires in this state.
+   - *Remove it entirely:* revert the NM-2 PR and run `41_monitoring.yml` (removes the rule group),
+     then `kubectl delete -k cluster/monitoring/coroot-node-agent` from a checkout that still has the
+     directory, and remove the node labels as above. Deleting the DaemonSet while the rules are still
+     loaded fires `CorootNodeAgentDown` after 10 min.
+   - *If criteria 1–3 fail on the Macs:* keep the agent on the Pis only and use the conntrack
+     fallback (docs/060 §6.6) for mba1/mba2; if they fail on the Pis too, use the full fallback.
+
+**Alerts.** `NetmonNewExternalDestination` (`info`) fires for 15 min when a workload opens a TCP
+connection to an external `ip:port` not seen in the previous 24 h. It groups by `workload`
+(the pod-name hash stripped from `container_id`) so Flux rollouts do not re-report known
+destinations. Because of the chart's `InfoInhibitor` it is visible in Alertmanager/Prometheus but
+does not reach Discord; raising it to `warning` is a tuning decision after the spike (expect noise
+from CDN-rotating destinations). `CorootNodeAgentDown` (`warning`, 10 min) fires when the DaemonSet
+is missing or fewer agents are scraped successfully than are available; crash loops, stuck rollouts
+and failed scrapes are also covered by the chart's `KubePodCrashLooping`, `KubeDaemonSetRolloutStuck`
+and `TargetDown`.
 
 ---
 

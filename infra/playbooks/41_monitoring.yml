@@ -18,6 +18,15 @@
   run_once: true
   vars:
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    # coroot-node-agent spike gate (NM-2, #118): nodes listed here get the label
+    # homelab.furchert.ch/coroot-node-agent=enabled, every other node loses it, and the
+    # DaemonSet schedules only on labelled nodes. Empty = the DaemonSet exists but runs no pod.
+    # This list is the source of truth: a run without it removes the label again. Override for
+    # the spike with -e '{"coroot_node_agent_nodes": ["raspi5"]}'; persist the rollout by PR.
+    # Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
+    coroot_node_agent_nodes: []
+    coroot_node_agent_label: homelab.furchert.ch/coroot-node-agent
+    coroot_node_agent_dir: "{{ playbook_dir }}/../../cluster/monitoring/coroot-node-agent"
 
   tasks:
     - name: Prüfen dass alertmanager_discord_webhook_url gesetzt ist
@@ -220,4 +229,78 @@
             selector:
               matchLabels:
                 app.kubernetes.io/name: traefik
+      delegate_to: localhost
+
+    # --- coroot-node-agent (NM-2, #118; docs/060-network-monitoring.md §6) ---
+    # Plain manifests in cluster/monitoring/coroot-node-agent/, applied file by file like the
+    # Ansible-managed apps (52/53/54). Its alert rules live in
+    # cluster/values/kube-prometheus-stack.yaml (additionalPrometheusRulesMap.homelab-netmon-egress)
+    # and ship with the Helm release above. Runs after the Helm release because the
+    # ServiceMonitor CRD comes with kube-prometheus-stack.
+    - name: Coroot-node-agent — read cluster nodes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Node
+      register: coroot_node_agent_node_info
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — assert the gate list names existing nodes
+      ansible.builtin.assert:
+        that:
+          - coroot_node_agent_nodes | difference(coroot_node_agent_node_info.resources | map(attribute='metadata.name') | list) | length == 0
+        fail_msg: >-
+          coroot_node_agent_nodes contains unknown node(s):
+          {{ coroot_node_agent_nodes | difference(coroot_node_agent_node_info.resources | map(attribute='metadata.name') | list) }}
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — label gated nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: v1
+        kind: Node
+        name: "{{ item.metadata.name }}"
+        definition:
+          metadata:
+            labels:
+              # literal key (must equal coroot_node_agent_label and the DaemonSet nodeSelector)
+              homelab.furchert.ch/coroot-node-agent: "enabled"
+      loop: "{{ coroot_node_agent_node_info.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - item.metadata.name in coroot_node_agent_nodes
+        - (item.metadata.labels | default({}))[coroot_node_agent_label] | default('') != 'enabled'
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — remove the label from nodes outside the gate list
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: v1
+        kind: Node
+        name: "{{ item.metadata.name }}"
+        definition:
+          metadata:
+            labels:
+              # null = strategic-merge delete of the label
+              homelab.furchert.ch/coroot-node-agent: null
+      loop: "{{ coroot_node_agent_node_info.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - item.metadata.name not in coroot_node_agent_nodes
+        - coroot_node_agent_label in (item.metadata.labels | default({}))
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — apply manifests
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        src: "{{ coroot_node_agent_dir }}/{{ item }}"
+      loop:
+        - service.yaml
+        - servicemonitor.yaml
+        - daemonset.yaml
       delegate_to: localhost

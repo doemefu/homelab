@@ -97,7 +97,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **Provisioning** | Idempotent node bootstrap, base hardening, storage setup | `infra/playbooks/00_bootstrap.yml`, `10_base.yml`, `infra/roles/{base,hardening,storage,mac_tweaks}` |
 | **Kubernetes** | k3s install/upgrade, Traefik config, cert-manager, Cloudflare tunnel | `infra/playbooks/20_k3s.yml`, `40_platform.yml` |
 | **Storage** | Longhorn as default StorageClass (RF=2), local-path as non-default fallback | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` |
-| **Observability** | kube-prometheus-stack, ServiceMonitors, Alertmanager→Discord | `infra/playbooks/41_monitoring.yml`, `cluster/values/kube-prometheus-stack.yaml` |
+| **Observability** | kube-prometheus-stack, ServiceMonitors, Alertmanager→Discord, coroot-node-agent egress metrics (NM-2, spike-gated) | `infra/playbooks/41_monitoring.yml`, `cluster/values/kube-prometheus-stack.yaml`, `cluster/monitoring/coroot-node-agent/` |
 | **Shared Infrastructure** | PostgreSQL 17, InfluxDB 2, Mosquitto 2 (+ exporters) | `infra/playbooks/50_apps_infra.yml`, `cluster/values/{postgresql,influxdb2}.yaml` |
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
@@ -287,6 +287,8 @@ cluster/
       deployment.yaml
       service.yaml
       kustomization.yaml
+  monitoring/                 # Plain monitoring manifests
+    coroot-node-agent/         # Ansible-managed (41_monitoring.yml): DaemonSet, Service, ServiceMonitor
   platform/                   # Helm chart references (remote charts)
   values/                     # Pinned Helm values
     kube-prometheus-stack.yaml # Prometheus/Grafana/Alertmanager config
