@@ -290,7 +290,7 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 | `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention) |
 | `n8n-secrets` | `apps` | n8n encryption key | n8n | Rotate via `59_app_services.yml`, restart n8n deployment |
 | `litellm-secrets` | `apps` | LiteLLM master key, salt key, DB password, Mistral API keys | LiteLLM | **`litellm_salt_key` MUST NEVER rotate** — invalidates all virtual keys in DB |
-| `data-service-secrets` | `apps` | Postgres credentials for DB `data_service` (`db-username` = literal `data_service`, `db-password`); NM-1/NM-4 add `cloudflare-api-token`, `cloudflare-zone-id`, `abuseipdb-api-key`, `auth-client-secret` (`docs/060-network-monitoring.md` §9) | data-service | Rotate via `59_app_services.yml` (re-sets the role password), then restart data-service |
+| `data-service-secrets` | `apps` | Postgres credentials for DB `data_service` (`db-username` = literal `data_service`, `db-password`); Cloudflare GraphQL Analytics access `cloudflare-api-token`, `cloudflare-zone-id` (NM-1, #116; env `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`); still to come: `abuseipdb-api-key` (NM-1, once approved), `auth-client-secret` (NM-4) (`docs/060-network-monitoring.md` §9) | data-service | Rotate via `59_app_services.yml` (re-sets the role password and the Secret), then `kubectl -n apps rollout restart deploy/data-service` — env vars are read at pod start |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), SMTP password (`smtp-password`, contact-form delivery, furchert-ch#46) | furchert-ch | Rotate via `59_app_services.yml`; `smtp-password` is an Infomaniak application password, independently revocable from the mailbox login password |
@@ -317,6 +317,7 @@ From `59_app_services.yml` (app secrets):
 - `mistral_api_key`, `mistral_codestral_api_key`
 - `litellm_client_secret`
 - `data_service_db_password` (Postgres password for role `data_service`, e.g. `openssl rand -hex 24`)
+- `data_service_cloudflare_analytics_token` (Cloudflare API token, zone `furchert.ch`, Analytics:Read — NM-1), `data_service_cloudflare_zone_id` (zone ID, not a credential — NM-1)
 
 From `50_apps_infra.yml` (shared infrastructure):
 - `postgresql_password`
@@ -456,6 +457,12 @@ To integrate your app with Prometheus monitoring:
 | node-exporter | Node metrics | 9100 | `monitoring` | kube-prometheus-stack subchart |
 | postgres-exporter | PostgreSQL metrics | 9187 | `apps` | Sidecar in `50_apps_infra.yml` |
 | mosquitto-exporter | MQTT broker metrics | 9234 | `apps` | Separate Deployment in `50_apps_infra.yml` |
+
+**App ServiceMonitors and alert rules**
+
+| Target | ServiceMonitor | Port / path | Alert rules | Source |
+|--------|----------------|-------------|-------------|--------|
+| data-service (`apps`) | `monitoring/data-service` (job `data-service`) | `http` (8082) `/actuator/prometheus`, 30 s, no auth | `homelab-netmon` group: `NetmonCollectorStale` (per collector on `netmon_collector_last_success_timestamp_seconds{collector}`; thresholds 26h daily / 3h hourly / 90m lan+reputation / 15m all others; NaN = never succeeded once the pod is older than the threshold), `NetmonDataServiceDown` (`up == 0` or absent, 10 min) | ServiceMonitor in `41_monitoring.yml`; rules in `cluster/values/kube-prometheus-stack.yaml` `additionalPrometheusRulesMap.homelab-netmon` (NM-3/NM-2 append to it) — `docs/060-network-monitoring.md` §4.1, §7.1 |
 
 ---
 

@@ -601,6 +601,7 @@ Expected UP targets:
 - `serviceMonitor/monitoring/postgresql` → apps
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
+- `serviceMonitor/monitoring/data-service` → apps (job `data-service`, `/actuator/prometheus` — see "data-service NM-1: Cloudflare keys, scrape and alerts")
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
 > absent from this list and from `/targets` entirely (disabled in
@@ -845,6 +846,66 @@ kubectl -n apps get pods -l app=data-service
 ```
 
 Backups need no change: `scripts/backup-app-data.sh` reads the database list at runtime, so `data_service` is dumped automatically.
+
+### data-service NM-1: Cloudflare keys, scrape and alerts
+
+NM-1 (#116) adds the Cloudflare GraphQL Analytics credentials to `data-service-secrets`, a ServiceMonitor for data-service and the `homelab-netmon` alert rules. Contract: `docs/060-network-monitoring.md` §4.1, §4.2, §7.1, §9.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variables (owner) | `infra/inventory/group_vars/all.sops.yml` | `data_service_cloudflare_analytics_token` (zone `furchert.ch`, Analytics:Read), `data_service_cloudflare_zone_id` |
+| Secret keys | `59_app_services.yml` → `apps/data-service-secrets` | `cloudflare-api-token`, `cloudflare-zone-id` (read by data-service as `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`) |
+| Scrape | `41_monitoring.yml` → `monitoring/data-service` ServiceMonitor | port `http`, `/actuator/prometheus`, 30 s, job `data-service` |
+| Alerts | `cluster/values/kube-prometheus-stack.yaml` → PrometheusRule `monitoring/kube-prometheus-stack-homelab-netmon` | `NetmonCollectorStale`, `NetmonDataServiceDown` |
+
+#### Rollout order (NM-1)
+
+The PRs merge in this order: **homelab#116 → homelab-data-service#14 → furchert-ch#61**.
+
+1. Merge this infra PR, then run playbook 59 **twice**. The first run adds the two keys to the Secret. The second run must report no change for the Secret task (the other data-service tasks keep their NM-0 behaviour).
+2. Restart data-service so the running pod picks up the new env vars (`optional: true` secretKeyRefs are resolved only at pod start). Skip this when data-service#14's image rollout follows right away — that rollout restarts the pod anyway.
+3. Run playbook 41. It applies the ServiceMonitor and loads the rules in one run, so the `absent()` branch of `NetmonDataServiceDown` never sees a scrape gap. data-service is already running since NM-0, so this step can happen before data-service#14.
+4. Merge data-service#14 (collectors), then furchert-ch#61 (UI).
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret task
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect: cloudflare-api-token, cloudflare-zone-id, db-password, db-username
+kubectl -n apps rollout restart deploy/data-service     # only if no data-service image rollout follows
+ansible-playbook infra/playbooks/41_monitoring.yml
+```
+
+#### Verify the scrape and the rules
+
+```bash
+kubectl -n monitoring get servicemonitor data-service
+kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-netmon
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+curl -s 'http://localhost:9090/api/v1/query' --data-urlencode 'query=up{job="data-service"}' | jq '.data.result'
+# expect value "1"
+curl -s 'http://localhost:9090/api/v1/query' \
+  --data-urlencode 'query=netmon_collector_last_success_timestamp_seconds' | jq '.data.result[] | {c: .metric.collector, v: .value[1]}'
+curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name=="homelab-netmon") | .rules[].name'
+```
+
+#### Alert runbook
+
+**`NetmonCollectorStale`** (warning, `for: 10m`) fires per `collector` label. It fires when the collector's last success is older than its threshold. It also fires when the gauge is NaN, meaning the collector never succeeded, and the pod is older than the threshold. The `threshold` label shows the class:
+
+| Threshold | Collectors | Cadence (§4.1) |
+|-----------|------------|----------------|
+| `26h` | `blocklists`, `retention` | daily |
+| `3h` | `egress` | hourly |
+| `90m` | `lan`, `reputation` | 15 min / 30 min |
+| `15m` | every other collector: `cloudflare-requests`, `cloudflare-firewall`, `login-events`, and any collector not listed | 5 min / 1 min |
+
+1. Check `GET /api/netmon/status` through furchert-ch `/dashboard/network`, or the data-service logs (`kubectl -n apps logs deploy/data-service`). `lastError` and `consecutiveFailures` name the cause. data-service never logs tokens.
+2. `credentials` on a Cloudflare collector means the token has expired or was revoked. Create a new token (zone `furchert.ch`, Analytics:Read), update `data_service_cloudflare_analytics_token` in SOPS, run playbook 59 and restart data-service.
+3. A collector added in data-service without its own class falls into the `15m` class. If its cadence is slower, add a class to the rules in `cluster/values/kube-prometheus-stack.yaml`.
+4. A collector that is disabled (`netmon.collectors.<name>.enabled=false`) must not export the gauge. If one stays NaN forever, that is a data-service bug, not an outage.
+
+**`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system` and `kubectl -n monitoring get servicemonitor data-service`. The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
 
 ---
 

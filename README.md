@@ -72,6 +72,9 @@ directly to the backing Service per the rules in 40_platform.yml.
   their chart scrape configs and alert rule groups are disabled in
   `cluster/values/kube-prometheus-stack.yaml` (see
   [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions))
+- **Network-monitoring alerting**: data-service is scraped via a ServiceMonitor; `NetmonCollectorStale`
+  and `NetmonDataServiceDown` (rule group `homelab-netmon`) alert to Discord — see
+  [DEPLOYMENT.md § data-service NM-1](DEPLOYMENT.md#data-service-nm-1-cloudflare-keys-scrape-and-alerts)
 
 ### External Access
 - **Tunnel Provider**: Cloudflare Tunnel (cloudflared v0.1.2 helm chart)

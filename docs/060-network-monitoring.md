@@ -332,6 +332,19 @@ The scheduler is Spring `@Scheduled` on the Boot-managed `ThreadPoolTaskSchedule
 
 **Alerting.** A silent stall (for example, a Cloudflare token that has expired) shows up only in `/status` (§7.2) today, since there is no Prometheus rule watching collector freshness — unlike the node script and the coroot agent, which do have one (§5.6, §6.4). A `NetmonCollectorStale` rule on `netmon_collector_last_success_timestamp_seconds` is possible only if the owner approves Q9 in the §12 dependency table, which adds `micrometer-registry-prometheus`. If declined, the risk is that collector stalls stay visible only in the UI. `netmon_collector_last_success_timestamp_seconds{collector}` is NaN until the collector's first success; the `NetmonCollectorStale` rule must treat a NaN sample as "never succeeded" (e.g. `time() - g > <threshold> or g != g` — the exact expression is NM-1's job, noted in §5.6/§6.4 style where the rule is specified) (amended 2026-09-23, NM-0: data-service PR #18).
 
+**Freshness rules (NM-1, homelab#116).** These live in `additionalPrometheusRulesMap.homelab-netmon`, which NM-1 creates. The scrape job is `data-service`, from the ServiceMonitor `monitoring/data-service` in `41_monitoring.yml`.
+
+| Alert | Expr (per class, `T` = threshold) | For | Severity |
+|---|---|---|---|
+| `NetmonCollectorStale` | `(time() - g{sel} > T) or (g{sel} != g{sel} and on(namespace, pod) (time() - process_start_time_seconds{job="data-service"} > T))` | 10m | warning |
+| `NetmonDataServiceDown` | `up{job="data-service"} == 0 or absent(up{job="data-service"})` | 10m | warning |
+
+- `g` is `netmon_collector_last_success_timestamp_seconds`.
+- The classes, each with a static label `threshold`, are: `26h` for `blocklists` and `retention`; `3h` for `egress`; `90m` for `lan` and `reputation`; `15m` for every other collector, as a catch-all.
+- The NaN branch waits until the pod is older than `T`, so a fresh pod does not alert on a daily collector that has not reached its slot yet.
+- **Contract for data-service:** a disabled collector (`netmon.collectors.<name>.enabled=false`) must not export the gauge. A NaN that never changes would otherwise fire permanently.
+- (amended 2026-09-23, NM-1: homelab#116)
+
 ### 4.2 Cloudflare GraphQL (NM-1)
 
 - **Request:** `POST https://api.cloudflare.com/client/v4/graphql` with headers `Authorization: Bearer ${CLOUDFLARE_API_TOKEN}` and `Content-Type: application/json`. The body is `{"query": "...", "variables": {...}}`.
@@ -556,7 +569,7 @@ NM-3 leaves `net.netfilter.nf_conntrack_acct` **unchanged** (default 0), because
 
 ### 5.6 PrometheusRules (NM-3)
 
-NM-3 creates `additionalPrometheusRulesMap.homelab-netmon` — NM-2 **appends** to this same map in §6.4, it does not create it, since the node script ships before coroot in the owner-approved order (NM-0 → NM-1 → NM-3 → NM-2 → NM-4).
+NM-3 **appends** to `additionalPrometheusRulesMap.homelab-netmon`, which NM-1 creates (§4.1, homelab#116). NM-2 appends to the same map in §6.4 (amended 2026-09-23, NM-1: homelab#116).
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -623,7 +636,7 @@ Every criterion must hold on **both** raspi5 and mba1:
 
 ### 6.4 PrometheusRules
 
-These go in `additionalPrometheusRulesMap.homelab-netmon`, **created by NM-3 (§5.6)**; NM-2 appends to that same map, following the `homelab-backups` precedent from PR #109.
+These go in `additionalPrometheusRulesMap.homelab-netmon`, **created by NM-1 (§4.1)**. NM-2 appends to that same map, following the `homelab-backups` precedent from PR #109 (amended 2026-09-23, NM-1: homelab#116).
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
