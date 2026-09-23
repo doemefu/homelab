@@ -180,6 +180,153 @@ After major k3s upgrades, verify service templates against current k3s documenta
 - `infra/roles/k3s/templates/k3s-server.service.j2` (control-plane)
 - `infra/roles/k3s/templates/k3s-agent.service.j2` (workers)
 
+#### k3s datastore (kine/SQLite) maintenance
+
+k3s's embedded datastore is [kine](https://github.com/k3s-io/kine) on SQLite
+(`/var/lib/rancher/k3s/server/db/state.db`, control-plane node only — raspi5). kine's online
+compactor runs every 5 minutes, with a 5 second per-batch `DELETE` timeout and a 1,000-row batch
+size (`compactInterval`, `compactTimeout`, `compactBatchSize` in
+`pkg/logstructured/sqllog/sql.go`, kine v0.13.9 — none of these are tunable via k3s flags). On a
+large enough backlog, a batch can exceed the 5 second timeout; Go's `database/sql` rolls that
+transaction back, and the compactor stalls permanently instead of retrying — the datastore keeps
+growing and query latency keeps degrading until someone intervenes by hand. This happened on
+raspi5 on 2026-09-23 (homelab#129): compaction had silently stalled for ~5 days, `state.db` grew
+to 5.02 GB / 1.49M rows, and the cluster degraded. Details, full timeline and root-cause analysis
+are in the issue; this section is the reusable runbook that came out of it.
+
+##### Symptoms
+
+- `journalctl -u k3s` full of `Slow SQL` lines (kine, queries >1s) — hundreds per hour instead of
+  the normal 30-90/hour baseline.
+- `kubectl get --raw /readyz` (or `/readyz?verbose`) reports `[-]etcd failed` /
+  `etcd-readiness failed` — the storage health check is exceeding the apiserver's default 2s
+  `--etcd-healthcheck-timeout`/`--etcd-readycheck-timeout`.
+- `raspi5` load average climbing into the double digits with `k3s-server` pinned near 300% CPU
+  and 0% iowait — SQLite lock contention, not disk-bound.
+- `flux-system` controllers and Longhorn CSI sidecars in `CrashLoopBackOff` from failed
+  leader-election lease renewals (HTTP 504 on lease `PUT`s).
+- If the apiserver etcd health-check timeout has already been raised (drop-in below) and the
+  embedded cloud-controller-manager still restarts every few minutes with `error building
+  controller context: failed to wait for apiserver being healthy` / `cloud-controller-manager
+  panic` in the journal, `/healthz` itself (not just `/readyz`) is now failing too — the backlog
+  is far enough behind that the raised timeout isn't enough on its own; go straight to offline
+  compaction below.
+
+##### Read-only diagnostics (safe any time — k3s keeps running)
+
+```bash
+ssh raspi5
+```
+
+```bash
+# state.db row count and compaction lag — mode=ro, does not lock the live datastore
+python3 -c "
+import sqlite3
+c = sqlite3.connect('file:/var/lib/rancher/k3s/server/db/state.db?mode=ro', uri=True, timeout=30)
+print('rows', c.execute('SELECT COUNT(*) FROM kine').fetchone()[0])
+print('max_id', c.execute('SELECT MAX(id) FROM kine').fetchone()[0])
+print('compact_rev', c.execute(\"SELECT prev_revision FROM kine WHERE name='compact_rev_key'\").fetchone()[0])
+"
+
+# datastore + WAL file sizes on disk
+sudo ls -la /var/lib/rancher/k3s/server/db/
+
+# Slow SQL rate in the last hour — compare against the ~30-90/hour baseline
+journalctl -u k3s --since '1 hour ago' --no-pager | grep -c 'Slow SQL'
+
+# has the online compactor made progress recently? silence across several 5-min windows
+# means it has stalled
+journalctl -u k3s --since '30 min ago' --no-pager | grep -E 'COMPACT compacted|Compact failed'
+
+# k3s restart count and current state
+systemctl show k3s -p ActiveState,NRestarts
+
+# apiserver health directly
+sudo k3s kubectl get --raw /healthz --request-timeout=10s
+sudo k3s kubectl get --raw /readyz?verbose --request-timeout=10s
+```
+
+##### Temporary mitigation: apiserver etcd health-check timeout
+
+If `/readyz`'s etcd check is failing purely because kine queries are momentarily slower than the
+apiserver's default 2s health-check timeouts, a drop-in raising both to 20s buys time for the
+online compactor to catch up (or for offline compaction to be scheduled) without the embedded
+cloud-controller-manager panicking and restart-looping on a failed `/healthz`:
+
+`/etc/rancher/k3s/config.yaml.d/90-incident-129-etcd-healthcheck.yaml`:
+```yaml
+kube-apiserver-arg:
+  - "etcd-healthcheck-timeout=20s"
+  - "etcd-readycheck-timeout=20s"
+```
+
+```bash
+ssh raspi5 "sudo systemctl restart k3s --no-block"
+```
+
+**This drop-in is not in this repo and is not applied by any playbook.** It was created by hand
+on raspi5 during the 2026-09-23 incident (mitigation 2, 17:09 CEST) and is still in place as of
+this writing. Whether to codify it into `infra/roles/k3s` (as a template shipped to every server
+node) or remove it now that compaction has caught up is an open decision tracked in
+homelab#129 — do not add it to the k3s role from this section alone.
+
+##### Offline compaction
+
+When the online compactor cannot catch up on its own — stalled for days, or the backlog is large
+enough that every 5-minute window's worth of batches still can't clear the 5s-timeout budget —
+compact offline with k3s stopped, using `scripts/kine-offline-compact.sh` and
+`scripts/kine-offline-compact.py`:
+
+```bash
+scp scripts/kine-offline-compact.py scripts/kine-offline-compact.sh raspi5:/tmp/
+ssh raspi5
+sudo /tmp/kine-offline-compact.sh --dry-run   # read-only preview first — k3s stays up
+sudo /tmp/kine-offline-compact.sh             # full run: stop / backup / compact / start,
+                                               # confirms before each stage
+```
+
+`kine-offline-compact.sh` stops k3s, checkpoints the WAL, takes a `cp -a` backup of `state.db`,
+runs `kine-offline-compact.py` — the same `DELETE`/`UPDATE` kine's own compactor runs
+(`pkg/drivers/sqlite/sqlite.go` `CompactSQL` + `pkg/drivers/generic/generic.go`
+`UpdateCompactSQL`/`SetCompactRevision`), just in 50,000-row batches instead of kine's
+1,000-row/5s-timeout online batches — followed by `VACUUM`, then starts k3s back up and waits for
+`/healthz`. This is deliberately a from-scratch reimplementation of kine's compaction SQL
+(verified against the kine v0.13.9 source, see the script's own header comment for the exact
+file/field references and the verification-query semantics), not a call into kine itself —
+kine only compacts through its own running process, which is exactly what's stopped here.
+
+**API downtime:** the Kubernetes API is unavailable for the whole stop-to-start window.
+Containers keep running throughout (`k3s.service` ships with `KillMode=process`) and public
+endpoints (Traefik, Cloudflare Tunnel) stay up — only `kubectl`, controllers, and Flux
+reconciliation are affected.
+
+**Measured on 2026-09-23** (raspi5, 21:54-22:16 CEST): `state.db` 5.02 GB / 1,488,774 rows →
+29.5 MB / 2,334 rows. The compaction step itself took 11 minutes (661s, 30 batches); total API
+downtime was 22 minutes including the WAL checkpoint, backup copy, `VACUUM`, and the
+restart/healthz wait. Post-run `PRAGMA integrity_check` was clean and all 4 nodes came back
+`Ready`.
+
+##### Rollback
+
+The backup taken in the "backup" stage (`state.db.bak-<timestamp>`, written next to the live
+`state.db`) is the only way back — the compaction step's `DELETE`s are not otherwise reversible.
+If post-compaction verification looks wrong, or the cluster doesn't come back healthy, restore it
+with k3s stopped:
+
+```bash
+ssh raspi5
+sudo systemctl stop k3s
+sudo cp -a /var/lib/rancher/k3s/server/db/state.db.bak-<timestamp> \
+           /var/lib/rancher/k3s/server/db/state.db
+sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal \
+           /var/lib/rancher/k3s/server/db/state.db-shm
+sudo systemctl start k3s --no-block
+```
+
+Keep the backup for at least 24 hours of stable operation after a successful run, then remove it
+(`sudo rm /var/lib/rancher/k3s/server/db/state.db.bak-<timestamp>`) — like every kine/etcd
+datastore copy, it contains every cluster Secret in plaintext.
+
 ---
 
 ### Longhorn Storage
