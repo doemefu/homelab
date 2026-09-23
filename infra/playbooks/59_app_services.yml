@@ -1,5 +1,5 @@
 ---
-# App Services — K8s Secrets for device-service, auth-service, and LiteLLM
+# App Services — K8s Secrets for device-service, auth-service, LiteLLM, and data-service
 # Namespace: apps
 #
 # Prerequisites:
@@ -39,6 +39,9 @@
 #   mistral_api_key:        <from console.mistral.ai>
 #   mistral_codestral_api_key: <from console.mistral.ai> # dedicated key for codestral route
 #   litellm_client_secret:  <openssl rand -hex 32>       # OIDC client secret for SSO UI login
+#
+# data-service variables (docs/060-network-monitoring.md §9):
+#   data_service_db_password: <openssl rand -hex 24>     # Postgres password for the data_service role
 #
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
@@ -383,5 +386,107 @@
             ANTHROPIC_API_KEY: "{{ litellm_anthropic_api_key }}"
             MISTRAL_VIBE_API_KEY: "{{ mistral_vibe_api_key }}"
             LITELLM_OIDC_CLIENT_SECRET: "{{ litellm_client_secret }}"
+      no_log: true
+      delegate_to: localhost
+
+    # --- data-service: PostgreSQL database + secrets (docs/060-network-monitoring.md §3.1, §9) ---
+    # DB name = role name = data_service, like litellm. Flyway (data-service) creates the schema netmon.
+
+    - name: Data-service — assert that the required SOPS variables are set
+      ansible.builtin.assert:
+        that:
+          - data_service_db_password is defined and data_service_db_password | length > 0
+        fail_msg: >-
+          The data-service SOPS variable data_service_db_password is missing.
+          Add it to infra/inventory/group_vars/all.sops.yml — see all.sops.yml.example for the command.
+      delegate_to: localhost
+
+    - name: Data-service — create PostgreSQL role (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='data_service'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE data_service WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_data_service_create_user
+      changed_when: "'CREATE ROLE' in pg_data_service_create_user.stdout"
+
+    - name: Data-service — set/update PostgreSQL role password
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - psql
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ 'data_service' | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ data_service_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      # Password rotation is intentionally always enforced; SQL output is not a reliable change signal here.
+      changed_when: false
+
+    - name: Data-service — create PostgreSQL database (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='data_service'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE data_service OWNER data_service"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_data_service_create_db
+      changed_when: "'CREATE DATABASE' in pg_data_service_create_db.stdout"
+
+    - name: Data-service — create data-service-secrets (DB credentials)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: data-service-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # NM-0 keys only; NM-1 (Cloudflare, AbuseIPDB) and NM-4 (auth client secret)
+            # add their keys here per docs/060-network-monitoring.md §9.
+            db-username: data_service
+            db-password: "{{ data_service_db_password }}"
       no_log: true
       delegate_to: localhost

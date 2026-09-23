@@ -1,6 +1,7 @@
 # Target Architecture — Microservices
 
 > Amended 2026-09-01 per ADR 0001 (parent `docs/adr/0001-schedules-ownership-and-data-plane.md`): schedules ownership -> device-service.
+> Amended 2026-09-23 per ADR 0002 (parent `docs/adr/0002-network-telemetry-ownership.md`): data-service = analytical data plane (sensor history + network telemetry), owns Postgres DB `data_service` (schema `netmon`); contract in [`060-network-monitoring.md`](060-network-monitoring.md).
 
 This document describes the target architecture for the Terrarium IoT application after the migration from the legacy monolith.
 
@@ -116,10 +117,11 @@ Internet
 
 ### data-service
 
-**Domain:** Historical sensor data retrieval (near-term).
+**Domain:** Analytical data plane (amended 2026-09-23, ADR 0002): historical sensor data retrieval and network telemetry (Epic `homelab#114`, contract [`060-network-monitoring.md`](060-network-monitoring.md)).
 
 **Responsibilities:**
 - InfluxDB queries (historical temperature, humidity, device status)
+- Network telemetry: scheduled, idempotent collectors (Cloudflare GraphQL, blocklists, Prometheus snapshots, auth-service login events), retention, and the read API `/api/netmon/*` (ADR 0002)
 - JWT validation for all endpoints
 
 **Does NOT:**
@@ -127,10 +129,11 @@ Internet
 - Write to InfluxDB (current; see target picture)
 - Manage users or issue tokens
 
-**Database:** PostgreSQL — none (no owned tables; stateless historical-query service)
+**Database:** PostgreSQL — `data_service` (schema `netmon`, role `data_service`; created by `infra/playbooks/59_app_services.yml`, migrated by data-service's Flyway). Amended 2026-09-23 (ADR 0002); previously "none". It does not join `homelabdb`.
 **InfluxDB:** Read-only (queries)
+**Egress:** `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`; cluster-internal auth-service, Prometheus and PostgreSQL (060 §10). No public tunnel route.
 
-**Key design decision (superseded 2026-09-01, ADR 0001):** Schedule CRUD does not live here. Schedules are a device-management concern, tightly coupled to the in-process scheduling engine that executes them, so the `schedules` table, its CRUD REST API, and execution all live in device-service. This supersedes the original design (schedule CRUD in data-service) described in earlier drafts of this document. data-service's near-term scope is limited to read-only historical InfluxDB queries.
+**Key design decision (superseded 2026-09-01, ADR 0001):** Schedule CRUD does not live here. Schedules are a device-management concern, tightly coupled to the in-process scheduling engine that executes them, so the `schedules` table, its CRUD REST API, and execution all live in device-service. This supersedes the original design (schedule CRUD in data-service) described in earlier drafts of this document. data-service's near-term scope is limited to read-only historical InfluxDB queries. (Amended 2026-09-23, ADR 0002: the scope now also covers network telemetry in its own Postgres DB `data_service`.)
 
 **Target picture (later step, ADR 0001):** data-service is intended to eventually own sensor-data ingestion and processing (MQTT -> InfluxDB writes), moving that responsibility out of device-service. That is an explicit, separate decision not yet made — until then, ingestion stays in device-service and the "Does NOT" items above hold.
 
@@ -320,6 +323,7 @@ CREATE TABLE devices (
 |--------|------|------|-------------|
 | GET | `/data/measurements` | JWT | Historical sensor data (params: device, period) |
 | GET | `/data/devices/{id}/status` | JWT | Device online/offline history |
+| GET | `/api/netmon/*` | JWT with `SCOPE_netmon:read` **and** `sub` in `netmon.api.allowed-clients` (default `furchert-ch`); `ROLE_ADMIN` is not accepted in v1 (060 §7.5) | Network telemetry read API — amended 2026-09-23 (ADR 0002); endpoint list in [`060-network-monitoring.md`](060-network-monitoring.md) §7.2 |
 
 ---
 
