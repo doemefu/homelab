@@ -63,9 +63,15 @@ defaultRules:
 # promtool rejects rules with the same alertname and identical static labels.
 # Two branches per rule, disjoint because branch 1 is false for a NaN sample:
 #   1. age: time() - gauge > threshold (NaN > x is false);
-#   2. never succeeded: gauge != gauge (true only for NaN), but only once the pod has
-#      been up longer than the threshold — otherwise a fresh pod would alert on a daily
+#   2. never succeeded: gauge != gauge (true only for NaN), but only once the Pod is
+#      older than the threshold — otherwise a fresh Pod would alert on a daily
 #      collector that simply has not reached its 05:00/03:30 UTC slot yet.
+#      Pod age comes from kube-state-metrics' kube_pod_start_time (honorLabels, so it
+#      carries the Pod's namespace/pod labels for the on(namespace, pod) join), NOT from
+#      process_start_time_seconds: the JVM start time resets on every in-Pod container
+#      restart, which would restart the grace period and could hide a crash-looping
+#      collector indefinitely (PR #131 review). If kube-state-metrics is down, branch 2
+#      is silent; the chart's own TargetDown alert covers that case.
 # The 15m class is a catch-all (`!~`): a collector added later gets the strictest
 # threshold (noisy, never silent) until it is given its own class here.
 # Contract with data-service: a disabled collector (e.g. reputation without an AbuseIPDB
@@ -94,7 +100,7 @@ additionalPrometheusRulesMap:
                 netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention"}
                   != netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention"}
                 and on(namespace, pod)
-                (time() - process_start_time_seconds{job="data-service"} > 26 * 3600)
+                (time() - kube_pod_start_time{namespace="apps"} > 26 * 3600)
               )
             for: 10m
             labels:
@@ -117,7 +123,7 @@ additionalPrometheusRulesMap:
                 netmon_collector_last_success_timestamp_seconds{collector="egress"}
                   != netmon_collector_last_success_timestamp_seconds{collector="egress"}
                 and on(namespace, pod)
-                (time() - process_start_time_seconds{job="data-service"} > 3 * 3600)
+                (time() - kube_pod_start_time{namespace="apps"} > 3 * 3600)
               )
             for: 10m
             labels:
@@ -140,7 +146,7 @@ additionalPrometheusRulesMap:
                 netmon_collector_last_success_timestamp_seconds{collector=~"lan|reputation"}
                   != netmon_collector_last_success_timestamp_seconds{collector=~"lan|reputation"}
                 and on(namespace, pod)
-                (time() - process_start_time_seconds{job="data-service"} > 90 * 60)
+                (time() - kube_pod_start_time{namespace="apps"} > 90 * 60)
               )
             for: 10m
             labels:
@@ -163,7 +169,7 @@ additionalPrometheusRulesMap:
                 netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|egress|lan|reputation"}
                   != netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|egress|lan|reputation"}
                 and on(namespace, pod)
-                (time() - process_start_time_seconds{job="data-service"} > 15 * 60)
+                (time() - kube_pod_start_time{namespace="apps"} > 15 * 60)
               )
             for: 10m
             labels:

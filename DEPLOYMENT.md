@@ -895,7 +895,7 @@ curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name
 
 #### Alert runbook
 
-**`NetmonCollectorStale`** (warning, `for: 10m`) fires per `collector` label. It fires when the collector's last success is older than its threshold. It also fires when the gauge is NaN, meaning the collector never succeeded, and the pod is older than the threshold. The `threshold` label shows the class:
+**`NetmonCollectorStale`** (warning, `for: 10m`) fires per `collector` label. It fires when the collector's last success is older than its threshold. It also fires when the gauge is NaN, meaning the collector never succeeded, and the Pod is older than the threshold. Pod age comes from kube-state-metrics (`kube_pod_start_time`), so a container restart inside the same Pod does not reset the grace period. The `threshold` label shows the class:
 
 | Threshold | Collectors | Cadence (§4.1) |
 |-----------|------------|----------------|
