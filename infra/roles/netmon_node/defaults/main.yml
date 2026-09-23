@@ -9,7 +9,7 @@ netmon_node_lan_cidr: "{{ lan_subnet | default('192.168.1.0/24') }}"
 # k3s pod CIDR — same value as hardening_k3s_pod_cidr (roles cannot read each other's defaults).
 netmon_node_pod_cidr: "10.42.0.0/16"
 
-# Watched local TCP ports: mosquitto, SSH, Home Assistant, k3s API, kubelet.
+# Watched local TCP ports: mosquitto, SSH, Home Assistant, k3s API, kubelet (IPv4 conntrack only).
 netmon_node_ports: [1883, 22, 8123, 6443, 10250]
 
 # Hard cap per metric per node; the overflow is summed into src_ip="other" and counted in
@@ -26,8 +26,8 @@ netmon_node_on_calendar: "*-*-* *:*:05"
 # sshd's systemd unit on Ubuntu 24.04 (the hardening role's handler reloads the same unit).
 netmon_node_sshd_unit: ssh
 
-# Owned by the storage role / node-exporter hostPath (homelab PR #109); this role only
-# writes into it. Must match storage_textfile_collector_dir.
+# node-exporter textfile directory (hostPath in PR #109). Created here and by the storage
+# role with identical attributes. Must match storage_textfile_collector_dir.
 netmon_node_textfile_dir: /var/lib/node_exporter/textfile_collector
 netmon_node_script: /usr/local/sbin/homelab-netmon-collect
 

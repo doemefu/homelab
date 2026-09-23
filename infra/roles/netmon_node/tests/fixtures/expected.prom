@@ -12,12 +12,12 @@ homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.77",dport="23",proto="
 homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.79",dport="0",proto="OTHER"} 1
 homelab_ufw_blocks_bucket{node="raspi5",src_ip="45.155.205.3",dport="3389",proto="TCP"} 1
 homelab_ufw_blocks_bucket{node="raspi5",src_ip="other",dport="5353",proto="UDP"} 1
-# HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket.
+# HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket (failed is a lower bound).
 # TYPE homelab_sshd_auth_bucket gauge
 homelab_sshd_auth_bucket{node="raspi5",src_ip="10.42.0.0/16",outcome="failed"} 2
 homelab_sshd_auth_bucket{node="raspi5",src_ip="192.168.1.10",outcome="accepted"} 1
-homelab_sshd_auth_bucket{node="raspi5",src_ip="45.155.205.3",outcome="failed"} 1
 homelab_sshd_auth_bucket{node="raspi5",src_ip="45.155.205.3",outcome="invalid_user"} 1
+homelab_sshd_auth_bucket{node="raspi5",src_ip="45.155.205.4",outcome="invalid_user"} 1
 homelab_sshd_auth_bucket{node="raspi5",src_ip="other",outcome="invalid_user"} 1
 # HELP homelab_netmon_bucket_end_timestamp_seconds End (exclusive, unix seconds) of the bucket the *_bucket gauges describe.
 # TYPE homelab_netmon_bucket_end_timestamp_seconds gauge

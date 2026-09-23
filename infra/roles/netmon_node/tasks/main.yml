@@ -1,8 +1,8 @@
 ---
 # netmon_node — docs/060-network-monitoring.md §5 (NM-3, homelab#117).
 # Writes homelab_netmon.prom into the node-exporter textfile directory once a minute.
-# That directory and the node-exporter flag come from homelab PR #109 (storage role +
-# kube-prometheus-stack values); this role does not create them.
+# The node-exporter flag + hostPath come from homelab PR #109 (kube-prometheus-stack values).
+# IPv4 only: `conntrack -L` lists the IPv4 table (the LAN is IPv4).
 
 - name: Netmon — install conntrack
   ansible.builtin.apt:
@@ -10,6 +10,16 @@
     state: present
     update_cache: true
     cache_valid_time: 3600
+
+# Same path and attributes as the storage role's task from PR #109 (0755: node-exporter
+# runs as UID 65534), so both roles converge on one directory without fighting.
+- name: Netmon — create the node-exporter textfile collector directory
+  ansible.builtin.file:
+    path: "{{ netmon_node_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
 
 - name: Netmon — install the collector script
   ansible.builtin.copy:

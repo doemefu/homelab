@@ -122,6 +122,44 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(c.classify("10.43.0.10", keep_public=True), "other")
         self.assertEqual(c.classify("not-an-ip", keep_public=True), "other")
 
+    def test_injected_username_cannot_spoof_source_ip(self):
+        # The username "x from 192.168.1.10 port 1" must not turn a public attacker into
+        # a trusted LAN source: the peer address sshd appends last wins.
+        start, end = 1758619800, 1758620700
+        lines = "\n".join(
+            "1758620000.0 raspi5 sshd[1]: " + msg
+            for msg in (
+                "Invalid user x from 192.168.1.10 port 1 from 45.155.205.4 port 41100",
+                "Failed publickey for x from 192.168.1.10 port 1 ssh2 from 45.155.205.4 "
+                "port 41101 ssh2: RSA SHA256:abc",
+                "Accepted publickey for x from 192.168.1.10 port 1 ssh2 from 45.155.205.4 "
+                "port 41102 ssh2: ED25519 SHA256:abc",
+            )
+        )
+        series = {}
+        collect_mod.parse_sshd(lines, start, end, self.classifier, series)
+        self.assertEqual(
+            series,
+            {
+                ("45.155.205.4", "invalid_user"): 1,
+                ("45.155.205.4", "failed"): 1,
+                ("45.155.205.4", "accepted"): 1,
+            },
+        )
+
+    def test_sshd_outcomes_are_disjoint(self):
+        # One connection for a non-existent user: "Invalid user", then "Failed ... for
+        # invalid user", then "Connection closed/Disconnected" -> exactly one invalid_user.
+        series = {}
+        collect_mod.parse_sshd(
+            fixture("journal_ssh.txt"), 1758619800, 1758620700, self.classifier, series
+        )
+        self.assertEqual(series[("45.155.205.3", "invalid_user")], 1)
+        self.assertNotIn(("45.155.205.3", "failed"), series)
+        self.assertEqual(series[("45.155.205.4", "invalid_user")], 1)
+        self.assertNotIn(("192.168.1.10", "invalid_user"), series)
+        self.assertEqual(series[("10.42.0.0/16", "failed")], 2)
+
     def test_bucket_bounds(self):
         self.assertEqual(collect_mod.bucket_bounds(1758620700.0, 900), (1758619800, 1758620700))
         self.assertEqual(collect_mod.bucket_bounds(1758621599.9, 900), (1758619800, 1758620700))

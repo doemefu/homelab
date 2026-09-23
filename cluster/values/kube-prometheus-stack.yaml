@@ -52,16 +52,19 @@ defaultRules:
     kubeSchedulerAlerting: false
     kubeProxy: false
 
-# NM-3 node-script alerts (docs/060-network-monitoring.md §5.6, homelab#117). The metrics
-# come from homelab-netmon-collect (role netmon_node) via the node-exporter textfile
+# NM-3 node-script alerts (docs/060-network-monitoring.md §5.6, homelab#117, PR #132). The
+# metrics come from homelab-netmon-collect (role netmon_node) via the node-exporter textfile
 # collector, which homelab PR #109 enables. The rules evaluate to nothing until then.
-# Own map key `homelab-netmon-node` (not NM-1's `homelab-netmon`), so the NM-1 and NM-3
-# rule groups stay independently mergeable and each renders its own PrometheusRule.
+# One map key per producer, each rendering its own PrometheusRule:
+#   homelab-backups       PR #109 (backup alerts)
+#   homelab-netmon        PR #131 (NM-1, issue #116 — data-service collectors)
+#   homelab-netmon-node   PR #132 (NM-3, this block)
+#   homelab-netmon-egress PR #133 (NM-2 — coroot-node-agent)
 #
-# ⚠️ PR #109 (`homelab-backups`) and the NM-1 PR (#116, `homelab-netmon`) create the same
-# top-level key `additionalPrometheusRulesMap` at this exact position. Whichever PR merges
-# later must resolve the git conflict by keeping ONE key with all entries — never two
-# keys (a duplicate YAML key silently drops one map; yamllint key-duplicates catches it).
+# ⚠️ All four PRs create the same top-level key `additionalPrometheusRulesMap` at this exact
+# position. Whichever PR merges later must resolve the git conflict by keeping ONE key with
+# all entries — never two keys (a duplicate YAML key silently drops one map; yamllint
+# key-duplicates catches it).
 additionalPrometheusRulesMap:
   homelab-netmon-node:
     groups:

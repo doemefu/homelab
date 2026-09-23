@@ -501,7 +501,7 @@ homelab_lan_connections{node="raspi5",dport="1883",src_ip="192.168.1.50",state="
 # HELP homelab_ufw_blocks_bucket UFW BLOCK log lines in the last completed 15-minute bucket (see homelab_netmon_bucket_end_timestamp_seconds).
 # TYPE homelab_ufw_blocks_bucket gauge
 homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.77",dport="23",proto="TCP"} 4
-# HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket.
+# HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket (failed is a lower bound).
 # TYPE homelab_sshd_auth_bucket gauge
 homelab_sshd_auth_bucket{node="raspi5",src_ip="10.42.0.0/16",outcome="failed"} 2
 # HELP homelab_netmon_bucket_end_timestamp_seconds End (exclusive, unix seconds) of the bucket the *_bucket gauges describe.
@@ -517,6 +517,7 @@ homelab_netmon_truncated_series{node="raspi5",metric="homelab_ufw_blocks_bucket"
 
 - **`node` label:** written by the script from the Ansible `inventory_hostname` (`raspi5`, `raspi4`, `mba1`, `mba2`). Verified: the node-exporter ServiceMonitor (chart 69.3.1) sets `honorLabels: true` and adds no `node` target label, so the file's label is kept as `node`, not `exported_node`, and the §4.6 queries stand (amended 2026-09-23, NM-3: homelab PR for #117).
 - **`src_ip` values:** an IP inside `lan_cidr` is kept verbatim. An IP inside `pod_cidr` becomes the literal `10.42.0.0/16` (for all three metrics; the sshd example above was corrected accordingly). Anything else becomes `other`. For `ufw` and `sshd`, public (globally routable) IPs are also kept verbatim, because these are the attack signals. Tunnelled SSH appears as a pod or node IP.
+- **sshd outcomes are disjoint:** one connection for a non-existent user counts once as `invalid_user` (the `Invalid user …` line); its follow-up `Failed … for invalid user …` line is **not** counted as `failed`, and `Connection closed by / Disconnected from invalid user …` lines are not counted at all. `failed` therefore means failed authentication for an existing user (amended 2026-09-23, NM-3: PR #132).
 - **Own outbound flows:** `homelab_lan_connections` skips conntrack entries whose original source is one of the node's own addresses (`ip -o addr show`) — the node is then the client (e.g. the API server calling another node's kubelet on :10250), and the receiving node already counts the flow as inbound (amended 2026-09-23, NM-3: homelab PR for #117).
 - **Cardinality bound:** the /24 LAN has 254 sources, times 5 ports and a few states. The hard cap is `netmon_node_max_series` per metric per node. The highest-valued series are kept verbatim; the overflow is summed into `src_ip="other"` (other labels kept) and counted in `homelab_netmon_truncated_series` (number of input series not emitted verbatim). For `homelab_ufw_blocks_bucket` the overflow also collapses `dport` to `0`, because one scanner sweeping ports would otherwise stay unbounded; an overflow row is therefore `{src_ip="other",dport="0",proto=<proto>}` (amended 2026-09-23, NM-3: homelab PR for #117).
 
@@ -547,7 +548,12 @@ journalctl -u ssh --since "@<S>" --until "@<E>" --no-pager -o cat
 #   "Failed <method> for (invalid user )?<user> from <ip>" -> failed
 #   "Invalid user <user> from <ip>"              -> invalid_user
 #   usernames are parsed only to classify and are NEVER emitted as labels
+#   the username is attacker-controlled and may contain " from <ip> port <n>": the patterns
+#   are greedy and anchored at the end of the line (… from (\S+) port \d+ ssh2(?:: .*)?$ and
+#   … from (\S+) port \d+$), so the peer address sshd appends last always wins
 ```
+
+`conntrack -L` lists the **IPv4** table only (its default family); v1 makes no `-f ipv6` call because the LAN is IPv4. `failed` in `homelab_sshd_auth_bucket` is a **lower bound**: at the default `LogLevel INFO`, sshd logs rejected public keys only once a connection gives up (after `MaxAuthTries`/2 attempts), not per offered key (amended 2026-09-23, NM-3: PR #132).
 
 UFW's logging rules are rate-limited (`-m limit`, which is 3/min burst 10 at the default level; unverified on these nodes). `homelab_ufw_blocks_bucket` is therefore a **lower bound**, and the UI must label it that way.
 
@@ -557,7 +563,7 @@ NM-3 leaves `net.netfilter.nf_conntrack_acct` **unchanged** (default 0), because
 
 ### 5.6 PrometheusRules (NM-3)
 
-NM-1 creates `additionalPrometheusRulesMap.homelab-netmon` (data-service rules). NM-3 puts its rules under its **own** key `additionalPrometheusRulesMap.homelab-netmon-node` (group `homelab-netmon-node`), so the NM-1 and NM-3 PRs stay independently mergeable and each key renders its own PrometheusRule; NM-2 appends to one of the two in §6.4 (amended 2026-09-23, NM-3: decision of the overnight run, main session). `NetmonSeriesTruncated` is `info`, which the chart's `InfoInhibitor` keeps out of Discord unless a warning fires in the same namespace; it stays visible in Prometheus/Alertmanager.
+NM-3's rules go under `additionalPrometheusRulesMap.homelab-netmon-node` (group `homelab-netmon-node`). Each producer has its own key, and each key renders its own PrometheusRule: `homelab-netmon` (NM-1, PR #131), `homelab-netmon-node` (NM-3, PR #132) and `homelab-netmon-egress` (NM-2, PR #133; see §6.4). This keeps the PRs independently mergeable (amended 2026-09-23, NM-3: PR #132). `NetmonSeriesTruncated` is `info`, which the chart's `InfoInhibitor` keeps out of Discord unless a warning fires in the same namespace; it stays visible in Prometheus/Alertmanager.
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -624,7 +630,7 @@ Every criterion must hold on **both** raspi5 and mba1:
 
 ### 6.4 PrometheusRules
 
-These go in `additionalPrometheusRulesMap.homelab-netmon`, **created by NM-1** (§5.6; NM-3's node-script rules live in the separate key `homelab-netmon-node`); NM-2 appends to that same map, following the `homelab-backups` precedent from PR #109 (amended 2026-09-23, NM-3).
+These go in `additionalPrometheusRulesMap.homelab-netmon`, **created by NM-3 (§5.6)**; NM-2 appends to that same map, following the `homelab-backups` precedent from PR #109.
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|

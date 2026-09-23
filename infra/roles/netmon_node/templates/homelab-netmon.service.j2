@@ -21,6 +21,6 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-# "-": a missing directory (PR #109 not rolled out yet) must not fail namespace setup;
-# the script then exits with a clear error instead.
+# "-": a missing directory (deleted by hand) must not fail namespace setup; the script
+# then exits with a clear error instead.
 ReadWritePaths=-{{ netmon_node_textfile_dir }}

@@ -41,7 +41,8 @@ HELP = {
     METRIC_LAN: "Current conntrack TCP entries to a watched local port, by original source.",
     METRIC_UFW: "UFW BLOCK log lines in the last completed 15-minute bucket "
     "(see homelab_netmon_bucket_end_timestamp_seconds).",
-    METRIC_SSHD: "sshd authentication results in the last completed 15-minute bucket.",
+    METRIC_SSHD: "sshd authentication results in the last completed 15-minute bucket "
+    "(failed is a lower bound).",
     METRIC_BUCKET_END: "End (exclusive, unix seconds) of the bucket the *_bucket gauges describe.",
     METRIC_LAST_SUCCESS: "Unix time of the last successful script run.",
     METRIC_TRUNCATED: 'Series dropped into src_ip="other" because netmon_node_max_series '
@@ -64,13 +65,22 @@ _CONNTRACK_SRC = re.compile(r"\bsrc=(\S+)")
 _IP_ADDR = re.compile(r"\binet6? (\S+?)/\d+")
 _CONNTRACK_STATE = re.compile(r"^[A-Z_]+$")
 _KV = re.compile(r"\b(SRC|DPT|PROTO)=(\S*)")
+# The username is attacker-controlled and may itself contain " from <ip> port <n>", so the
+# patterns are greedy and anchored at the END of the line: the peer address sshd appends
+# last always wins. Outcomes are disjoint: a connection for a non-existent user counts once
+# as invalid_user ("Invalid user ..."); its follow-up "Failed ... for invalid user ..." line
+# is not counted as failed. "Connection closed by / Disconnected from invalid user ..."
+# lines are not counted either (they repeat the same attempt).
 _SSHD_PATTERNS = (
-    # "Accepted <method> for <user> from <ip> port <n> ..."
-    ("accepted", re.compile(r"^Accepted \S+ for .*? from (\S+) port \d+")),
-    # "Failed <method> for (invalid user )?<user> from <ip> port <n> ..."
-    ("failed", re.compile(r"^Failed \S+ for (?:invalid user )?.*? from (\S+) port \d+")),
+    # "Accepted publickey for <user> from <ip> port <n> ssh2: ED25519 SHA256:..."
+    ("accepted", re.compile(r"^Accepted \S+ for .* from (\S+) port \d+ ssh2(?:: .*)?$")),
+    # "Failed <method> for <user> from <ip> port <n> ssh2[: <key>]" (existing users only)
+    (
+        "failed",
+        re.compile(r"^Failed \S+ for (?!invalid user ).* from (\S+) port \d+ ssh2(?:: .*)?$"),
+    ),
     # "Invalid user <user> from <ip> port <n>"
-    ("invalid_user", re.compile(r"^Invalid user .*? from (\S+) port \d+")),
+    ("invalid_user", re.compile(r"^Invalid user .* from (\S+) port \d+$")),
 )
 _KNOWN_PROTOS = {"TCP": "TCP", "UDP": "UDP", "ICMP": "ICMP", "ICMPV6": "ICMP"}
 
@@ -123,6 +133,8 @@ def parse_conntrack(
     text: str, port: int, classifier: Classifier, series: Series, local: Set[str]
 ) -> None:
     """Parse `conntrack -L -p tcp --orig-port-dst <port>` output into METRIC_LAN series.
+
+    IPv4 only: `conntrack -L` lists the IPv4 table by default and the LAN is IPv4.
 
     Entries whose original source is one of this node's own addresses are skipped: those
     are this node acting as a client (e.g. the API server calling a kubelet on :10250),
@@ -275,13 +287,13 @@ def write_atomic(path: str, content: str) -> None:
     """Write to .<name>.tmp in the same directory, then rename (a scrape never sees half a file).
 
     The temp name does not end in .prom, so node-exporter ignores a leftover. The directory
-    itself is created by the storage role / node-exporter hostPath (homelab PR #109), not here.
+    itself is created by Ansible (roles netmon_node and storage), not by this script.
     """
     directory, name = os.path.split(path)
     if not os.path.isdir(directory):
         raise FileNotFoundError(
-            "textfile collector directory {} is missing (created by the storage role, "
-            "homelab PR #109)".format(directory)
+            "textfile collector directory {} is missing (created by the netmon_node and "
+            "storage roles)".format(directory)
         )
     tmp = os.path.join(directory, "." + name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as handle:
