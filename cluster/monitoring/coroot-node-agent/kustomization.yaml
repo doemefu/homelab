@@ -7,3 +7,4 @@ resources:
   - daemonset.yaml
   - service.yaml
   - servicemonitor.yaml
+  - networkpolicy.yaml

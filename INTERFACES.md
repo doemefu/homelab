@@ -469,8 +469,8 @@ series and adds a `node` label (from the pod's node); everything else the agent 
 | `container_net_tcp_bytes_sent_total` / `_bytes_received_total` | `destination`, `actual_destination` | Bytes per peer |
 | `ip_to_fqdn` | `ip`, `fqdn` (no `container_id`) | IP-to-name mapping from DNS answers the containers received |
 
-`container_id` is `/k8s/<namespace>/<pod>/<container>` for pods. `destination` is the `ip:port` the container dialled
-(e.g. a ClusterIP); `actual_destination` is the peer after NAT. Scrape `sampleLimit` is 10 000 series per agent. Consumer:
+The agent also adds `machine_id` and `system_uuid` to every series; the ServiceMonitor drops both (`labeldrop`), since `node` identifies the host. `container_id` is `/k8s/<namespace>/<pod>/<container>` for pods. `destination` is the `ip:port` the container dialled
+(e.g. a ClusterIP); `actual_destination` is the peer after NAT. Scrape `sampleLimit` is 10 000 series per agent. A NetworkPolicy admits only the Prometheus pods to the agent's port 80. Consumer:
 data-service's egress collector (`docs/060` §4.6). Alerts: `NetmonNewExternalDestination` and `CorootNodeAgentDown` in
 `additionalPrometheusRulesMap.homelab-netmon-egress` — see `DEPLOYMENT.md` "coroot-node-agent (NM-2)".
 

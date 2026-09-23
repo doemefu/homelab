@@ -670,7 +670,7 @@ in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgrou
 
 | Piece | Where |
 |-------|-------|
-| DaemonSet, headless Service, ServiceMonitor | `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml` (no Helm chart; the chart is stale) |
+| DaemonSet, headless Service, ServiceMonitor, NetworkPolicy (ingress only from Prometheus on TCP 80) | `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml` (no Helm chart; the chart is stale) |
 | Alert rules `NetmonNewExternalDestination`, `CorootNodeAgentDown` | `cluster/values/kube-prometheus-stack.yaml` → `additionalPrometheusRulesMap.homelab-netmon-egress` |
 | Image | `ghcr.io/coroot/coroot-node-agent:1.35.10@sha256:…` (index digest in the manifest comment; bumped by hand) |
 | Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default `[]`) |
@@ -721,6 +721,7 @@ required; the spike on mba1 is what proves that.
    | 5 | `avg_over_time(rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `max_over_time(container_memory_working_set_bytes{namespace="monitoring", container="coroot-node-agent"}[24h])` | avg < 100m, p95 < 250m, max < 200 Mi |
    | 6 | `prometheus_tsdb_head_series` | < +10 % over the baseline |
    | 7 | `count by (container_id) (container_net_tcp_active_connections)` | record the `container_id` format (expected `/k8s/<ns>/<pod>/<container>`) |
+   | — | `prometheus_rule_group_last_duration_seconds{rule_group=~".*homelab-netmon-egress.*"}` | < 1 s (the group runs every 5 min) |
 
    `scrape_samples_scraped{job="coroot-node-agent"}` shows the pre-relabel size, for information only;
    `sampleLimit` (10 000) is counted after the keep-list.
@@ -743,10 +744,10 @@ required; the spike on mba1 is what proves that.
 **Alerts.** `NetmonNewExternalDestination` (`info`) fires for 15 min when a workload opens a TCP
 connection to an external `ip:port` not seen in the previous 24 h. It groups by `workload`
 (the pod-name hash stripped from `container_id`) so Flux rollouts do not re-report known
-destinations. Because of the chart's `InfoInhibitor` it is visible in Alertmanager/Prometheus but
-does not reach Discord; raising it to `warning` is a tuning decision after the spike (expect noise
+destinations. Because of the chart's `InfoInhibitor` it is normally visible in Alertmanager/Prometheus
+without reaching Discord; raising it to `warning` is a tuning decision after the spike (expect noise
 from CDN-rotating destinations). `CorootNodeAgentDown` (`warning`, 10 min) fires when the DaemonSet
-is missing or fewer agents are scraped successfully than are available; crash loops, stuck rollouts
+is missing (also while kube-state-metrics is down) or fewer agents are scraped successfully than are available; crash loops, stuck rollouts
 and failed scrapes are also covered by the chart's `KubePodCrashLooping`, `KubeDaemonSetRolloutStuck`
 and `TargetDown`.
 

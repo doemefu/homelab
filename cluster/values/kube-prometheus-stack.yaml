@@ -142,6 +142,9 @@ additionalPrometheusRulesMap:
   homelab-netmon-egress:
     groups:
       - name: homelab-netmon-egress
+        # 5m instead of the global 30s: the 1d last_over_time over every connect series is the
+        # most expensive query here, and a 15-minute alert window does not need 30s resolution.
+        interval: 5m
         rules:
           # Series presence, not increase() > 0: a brand-new destination's counter has a single
           # sample in a short window, so increase() would miss exactly the case this alert is for.
@@ -150,9 +153,10 @@ additionalPrometheusRulesMap:
           # rollout (new pod name -> new container_id) would re-report all of a workload's known
           # destinations. Pods that do not match (StatefulSets, systemd units) keep the raw
           # container_id. The destination filter drops pod/service CIDRs, LAN and loopback.
-          # severity info: the chart's InfoInhibitor suppresses info alerts in Alertmanager unless
-          # a warning/critical fires in the same namespace, so this shows in the Alertmanager and
-          # Prometheus UIs but does not page Discord (docs/060 §6.4).
+          # severity info: the chart's InfoInhibitor normally suppresses info alerts in
+          # Alertmanager unless a warning/critical fires in the same namespace (here: monitoring),
+          # so this normally shows in the Alertmanager and Prometheus UIs without paging Discord
+          # (docs/060 §6.4).
           - alert: NetmonNewExternalDestination
             expr: |
               count by (workload) (
@@ -177,6 +181,7 @@ additionalPrometheusRulesMap:
             for: 0m
             labels:
               severity: info
+              namespace: monitoring
             annotations:
               summary: "{{ $labels.workload }} connected to {{ $value }} new external destination(s)"
               description: >-
@@ -191,6 +196,7 @@ additionalPrometheusRulesMap:
           # Branch 1: the DaemonSet is gone. Branch 2: more agents are available than are
           # scraped successfully (Service/ServiceMonitor missing, selector drift, sampleLimit).
           # With the spike gate closed (no labelled node) both sides are 0 and nothing fires.
+          # Also fires while kube-state-metrics is down (the absent() branch).
           - alert: CorootNodeAgentDown
             expr: |
               absent(kube_daemonset_status_desired_number_scheduled{namespace="monitoring", daemonset="coroot-node-agent"})
@@ -205,5 +211,6 @@ additionalPrometheusRulesMap:
               description: >-
                 Either DaemonSet monitoring/coroot-node-agent does not exist, or fewer agent pods
                 are scraped successfully than are available (check the ServiceMonitor, the headless
-                Service and scrape_samples_post_metric_relabeling against sampleLimit 10000). Runbook:
+                Service and scrape_samples_post_metric_relabeling against sampleLimit 10000). The
+                absent() branch also fires while kube-state-metrics itself is down. Runbook:
                 DEPLOYMENT.md "coroot-node-agent (NM-2)".

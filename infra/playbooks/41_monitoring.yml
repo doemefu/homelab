@@ -300,6 +300,7 @@
         state: present
         src: "{{ coroot_node_agent_dir }}/{{ item }}"
       loop:
+        - networkpolicy.yaml
         - service.yaml
         - servicemonitor.yaml
         - daemonset.yaml

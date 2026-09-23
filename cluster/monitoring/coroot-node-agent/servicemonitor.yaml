@@ -36,3 +36,7 @@ spec:
           regex: "container_net_tcp_(successful_connects|failed_connects|bytes_sent|bytes_received)_total|\
             container_net_tcp_active_connections|ip_to_fqdn"
           action: keep
+        # machine_id and system_uuid are added to every series by the agent's registry
+        # (main.go) and are constant per node; the `node` label above already identifies it.
+        - regex: machine_id|system_uuid
+          action: labeldrop
