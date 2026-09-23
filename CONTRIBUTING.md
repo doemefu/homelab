@@ -46,7 +46,7 @@ Follow this loop for **every change** to this repository:
 | LiteLLM runtime | `infra/playbooks/53_litellm.yml`, `cluster/apps/litellm/` | `53_litellm.yml` |
 | Open WebUI / Club Assistant runtime | `infra/playbooks/54_club_assistant.yml`, `cluster/apps/open-webui/` | `54_club_assistant.yml` |
 | App secrets / DB bootstrap | `infra/playbooks/59_app_services.yml` | `59_app_services.yml` |
-| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
+| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch,data-service}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
 | Node inventory / IPs | `infra/inventory/hosts.yml` | - |
 | Common variables (non-secret) | `infra/inventory/group_vars/all.yml` | - |
 | Secrets (SOPS) | `infra/inventory/group_vars/all.sops.yml` | - |
@@ -252,7 +252,7 @@ unimplemented), so these bumps are manual:
    real run.
 
 ### Helm Chart Version Tracking (Automated Freshness Check)
-- Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch) stay tag-pinned via `ImagePolicy`/Flux image automation instead
+- Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch, data-service) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
 - GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
 - CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction
@@ -361,7 +361,7 @@ rationale.
 
 ### Standard App Ownership
 
-- **Flux-managed**: `auth-service`, `device-service`, `furchert-ch`
+- **Flux-managed**: `auth-service`, `device-service`, `furchert-ch`, `data-service`
 - **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, `open-webui` (Club Assistant), PostgreSQL, InfluxDB, Mosquitto
 - **Platform-managed**: cert-manager, cloudflared, Traefik, Longhorn, kube-prometheus-stack
 
@@ -679,7 +679,7 @@ ansible-lint infra/
 
 # Kubernetes schema validation
 brew install kustomize kubeconform
-for d in cluster/apps/auth-service cluster/apps/device-service \
+for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
          cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
@@ -691,7 +691,7 @@ done
 # Cluster policies — CI evaluates each per-app overlay with --all-namespaces
 brew install conftest
 conftest verify --policy policy/kubernetes/
-for d in cluster/apps/auth-service cluster/apps/device-service \
+for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
          cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -

@@ -48,11 +48,11 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 
 - k3s v1.32.2+k3s1: control plane `raspi5` (arm64, 192.168.1.61), workers `raspi4` (arm64), `mba1`/`mba2` (amd64). Ubuntu 24.04.
 - Namespaces: `apps`, `platform` (cert-manager, cloudflared), `monitoring` (kube-prometheus-stack), `longhorn-system` (Longhorn, replication 2; `daily-snapshot` 02:00 local-only; Prometheus TSDB PVC excluded into the `metrics` group (#101); no BackupTarget — app data is dumped manually to the operator's Mac, restic 03:00 on raspi5 covers k3s config/token + a SQLite datastore copy — #64), `flux-system` (Flux CD image automation), `homeassistant`.
-- `apps` workloads: auth-service, device-service, furchert-ch, open-webui, litellm, n8n, postgresql (pgvector), influxdb2, mosquitto — see hostnames/ports in `DEPLOYMENT.md`.
+- `apps` workloads: auth-service, device-service, furchert-ch, data-service, open-webui, litellm, n8n, postgresql (pgvector), influxdb2, mosquitto — see hostnames/ports in `DEPLOYMENT.md`.
 - Home Assistant runs in k3s (namespace `homeassistant`, `51_homeassistant.yml`, pajikos Helm chart) — not in Docker.
 - Ingress: Traefik (bundled with k3s) + cert-manager (Let's Encrypt). External access only via Cloudflare Tunnel.
 - Playbooks (`infra/playbooks/`): `00_bootstrap 10_base 20_k3s 30_longhorn 40_platform 41_monitoring 50_apps_infra 51_homeassistant 52_n8n 53_litellm 54_club_assistant 59_app_services`.
-- `cluster/apps/` manifests: Flux-managed `auth-service device-service furchert-ch` (Kustomization `apps` + image automation); Ansible-applied `n8n` (`52_n8n.yml`), `litellm` (`53_litellm.yml`), `open-webui` (`54_club_assistant.yml`) — a merge alone does not deploy those three, run the playbook.
+- `cluster/apps/` manifests: Flux-managed `auth-service device-service furchert-ch data-service` (Kustomization `apps` + image automation); Ansible-applied `n8n` (`52_n8n.yml`), `litellm` (`53_litellm.yml`), `open-webui` (`54_club_assistant.yml`) — a merge alone does not deploy those three, run the playbook.
 - Secrets: SOPS + age, age key outside repo.
 
 ## Agent Team

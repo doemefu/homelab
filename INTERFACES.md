@@ -13,7 +13,7 @@ This document defines all **integration interfaces** this infrastructure platfor
 |-----------|----------|----------|-----------------|
 | **Public URL Interface** | External clients, end users | Public hostnames routed via Cloudflare Tunnel | `infra/playbooks/40_platform.yml` |
 | **Internal Service Discovery** | In-cluster workloads | Kubernetes DNS: `<service>.<namespace>.svc.cluster.local` | Kubernetes Service objects |
-| **GitOps Interface (Flux)** | App repositories (auth-service, device-service, furchert-ch) | Flux reconciliation from `cluster/apps/<app>/` | `cluster/apps/`, `cluster/flux-system/apps-sync.yaml` |
+| **GitOps Interface (Flux)** | App repositories (auth-service, device-service, furchert-ch, data-service) | Flux reconciliation from `cluster/apps/<app>/` | `cluster/apps/`, `cluster/flux-system/apps-sync.yaml` |
 | **Ansible App Interface** | Ansible-managed apps (n8n, LiteLLM, Open WebUI, Home Assistant) | Playbook-applied manifests from `cluster/apps/<app>/` (n8n, LiteLLM, Open WebUI) or Helm values from `cluster/values/` (Home Assistant) | `infra/playbooks/52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml`, `51_homeassistant.yml`, `59_app_services.yml` |
 | **Storage Interface** | Stateful workloads | Longhorn default StorageClass (RF=2), local-path for ephemeral | `infra/playbooks/30_longhorn.yml` |
 | **Secrets Interface** | Workloads needing credentials | SOPS-encrypted vars → Kubernetes Secrets | `infra/inventory/group_vars/all.sops.yml`, `infra/playbooks/59_app_services.yml` |
@@ -179,6 +179,7 @@ All services are discoverable via Kubernetes internal DNS.
 - `grafana` — for Grafana SSO
 - `homeassistant` — for Home Assistant SSO
 - `device-service` — for device-service authentication
+- `furchert-ch` — for the furchert-ch `/dashboard` SSO; also `client_credentials` with scope `netmon:read` for server-side calls to data-service (auth-service migration V6)
 
 > **Full API contract**: See [homelab-auth-service repository](https://github.com/doemefu/homelab-auth-service)
 

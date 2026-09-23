@@ -1,10 +1,10 @@
 # 060 — Network Monitoring: Cross-Repo Contract
 
-> Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here once homelab PR #126 is merged. Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
+> Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here (since homelab PR #126). Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
 
-**Status:** Draft for implementation — 2026-09-23
+**Status:** NM-0 implemented 2026-09-23; NM-1 in implementation
 **Epic:** `doemefu/homelab#114` · **ADR:** [`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)
-**Canonical location:** this file (`infrastructure/docs/060-network-monitoring.md`). The parent workspace file `docs/060-network-monitoring.md` becomes a forwarder once `homelab#126` is merged, following the `052` precedent.
+**Canonical location:** this file (`infrastructure/docs/060-network-monitoring.md`). The parent workspace file `docs/060-network-monitoring.md` is a forwarder (since `homelab#126`), following the `052` precedent.
 **Conventions:** "(assumption)" = a design choice made here that the implementer may revisit in its plan. "(unverified)" = a fact not confirmed against a live system or upstream docs, which the implementing sub-project must confirm in its Phase 1.
 
 ---
@@ -1079,11 +1079,11 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | Sub-project | homelab | homelab-data-service | homelab-auth-service | furchert-ch |
 |---|---|---|---|---|
 | Epic | #114 | — | — | — |
-| NM-0 | #TBD | #TBD | #TBD | — |
-| NM-1 | #TBD (secret) | #TBD | — | #TBD |
-| NM-3 | #TBD | #TBD | — | #TBD |
-| NM-2 | #TBD | #TBD | — | #TBD |
-| NM-4 | #TBD (secrets) | #TBD | #TBD | #TBD |
+| NM-0 | #115 | #13 | #93 | — |
+| NM-1 | #116 (secret, scrape, alerts) | #14 | — | #61 |
+| NM-3 | #117 | #15 | — | #62 |
+| NM-2 | #118 | #16 | — | #63 |
+| NM-4 | none yet (secrets) | #17 | #94 | #64 |
 
 ---
 
