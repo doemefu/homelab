@@ -1378,6 +1378,13 @@ kubectl -n apps delete pod -l app=data-service
 
 auth-service then logs the "disabled" WARN and answers 503. The seeded `data-service` row in `oauth2_registered_client` stays until it is deleted there.
 
+**After an auth-service DB restore.** Outbox ids can restart below data-service's cursor, so new login events would be skipped. With the owner's go, reset the cursor. The replay is absorbed by `event_id`:
+
+```bash
+kubectl -n apps exec postgresql-0 -- psql -U postgres -d data_service \
+  -c "UPDATE netmon.collector_state SET cursor = NULL WHERE collector = 'login-events'"
+```
+
 **Rotation.** `auth_service_login_event_hmac_key`: rotating it breaks HMAC continuity for login events already stored in data-service, so avoid it. `auth_service_data_service_client_secret`: auth-service seeds a client only once and never updates it, so a new SOPS value plus playbook 59 is not enough. Also update the `data-service` row in `oauth2_registered_client` (see homelab-auth-service `INTERFACES.md` §6), then restart auth-service and data-service.
 
 ### NM-1 follow-up: AbuseIPDB key (optional)
