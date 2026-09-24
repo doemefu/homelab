@@ -126,7 +126,7 @@ kubectl get ns
 | `platform` | cert-manager (3x), cloudflared | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
 | `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* | Running |
-| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, n8n-*, litellm-*, open-webui-* | Running |
+| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, data-service-*, n8n-*, litellm-*, open-webui-* | Running |
 | `homeassistant` | home-assistant-0 | Running |
 | `flux-system` | source-controller, kustomize-controller, helm-controller, notification-controller, image-reflector-controller, image-automation-controller | Running |
 
@@ -601,6 +601,7 @@ Expected UP targets:
 - `serviceMonitor/monitoring/postgresql` → apps
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
+- `serviceMonitor/monitoring/data-service` → apps (job `data-service`, `/actuator/prometheus` — see "data-service NM-1: Cloudflare keys, scrape and alerts")
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
 > absent from this list and from `/targets` entirely (disabled in
@@ -859,6 +860,8 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 
 ### data-service (Flux, NM-0 onboarding)
 
+NM-0 onboarding completed 2026-09-23 (homelab#126, homelab-data-service#18, homelab-auth-service#95).
+
 data-service is Flux-managed like auth-service/device-service (`cluster/apps/data-service/`), and uses its own Postgres DB `data_service` (role `data_service`, schema `netmon` created by its Flyway) plus the Secret `data-service-secrets`, both from `59_app_services.yml`. Contract: `docs/060-network-monitoring.md` §9; ownership: ADR 0002 (parent `docs/adr/0002-network-telemetry-ownership.md`). No public tunnel route — do not add it to `cf_ingress_body`.
 
 #### Order (first rollout)
@@ -923,7 +926,69 @@ flux get kustomizations data-service -n flux-system
 kubectl -n apps get pods -l app=data-service
 ```
 
+**Troubleshooting:** while the k3s datastore is slow (incident #129), playbook 59's Secret task can fail with HTTP 500 `resource quota evaluation timed out`. Nothing is half-applied in that case — rerun the playbook once the control plane is healthy again (`kubectl get --raw=/readyz` returns `ok` quickly).
+
 Backups need no change: `scripts/backup-app-data.sh` reads the database list at runtime, so `data_service` is dumped automatically.
+
+### data-service NM-1: Cloudflare keys, scrape and alerts
+
+NM-1 (#116) adds the Cloudflare GraphQL Analytics credentials to `data-service-secrets`, a ServiceMonitor for data-service and the `homelab-netmon` alert rules. Contract: `docs/060-network-monitoring.md` §4.1, §4.2, §7.1, §9.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variables (owner) | `infra/inventory/group_vars/all.sops.yml` | `data_service_cloudflare_analytics_token` (zone `furchert.ch`, Analytics:Read), `data_service_cloudflare_zone_id` |
+| Secret keys | `59_app_services.yml` → `apps/data-service-secrets` | `cloudflare-api-token`, `cloudflare-zone-id` (read by data-service as `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`) |
+| Scrape | `41_monitoring.yml` → `monitoring/data-service` ServiceMonitor | port `http`, `/actuator/prometheus`, 30 s, job `data-service` |
+| Alerts | `cluster/values/kube-prometheus-stack.yaml` → PrometheusRule `monitoring/kube-prometheus-stack-homelab-netmon` | `NetmonCollectorStale`, `NetmonDataServiceDown` |
+
+#### Rollout order (NM-1)
+
+The PRs merge in this order: **homelab#116 → homelab-data-service#14 → furchert-ch#61**.
+
+1. Merge this infra PR, then run playbook 59 **twice**. The first run adds the two keys to the Secret. The second run must report no change for the Secret task (the other data-service tasks keep their NM-0 behaviour).
+2. Restart data-service so the running pod picks up the new env vars (`optional: true` secretKeyRefs are resolved only at pod start). Skip this when data-service#14's image rollout follows right away — that rollout restarts the pod anyway.
+3. Run playbook 41. It applies the ServiceMonitor and loads the rules in one run, so the `absent()` branch of `NetmonDataServiceDown` never sees a scrape gap. data-service is already running since NM-0, so this step can happen before data-service#14.
+4. Merge data-service#14 (collectors), then furchert-ch#61 (UI).
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret task
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect: cloudflare-api-token, cloudflare-zone-id, db-password, db-username
+kubectl -n apps rollout restart deploy/data-service     # only if no data-service image rollout follows
+ansible-playbook infra/playbooks/41_monitoring.yml
+```
+
+#### Verify the scrape and the rules
+
+```bash
+kubectl -n monitoring get servicemonitor data-service
+kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-netmon
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+curl -s 'http://localhost:9090/api/v1/query' --data-urlencode 'query=up{job="data-service"}' | jq '.data.result'
+# expect value "1"
+curl -s 'http://localhost:9090/api/v1/query' \
+  --data-urlencode 'query=netmon_collector_last_success_timestamp_seconds' | jq '.data.result[] | {c: .metric.collector, v: .value[1]}'
+curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name=="homelab-netmon") | .rules[].name'
+```
+
+#### Alert runbook
+
+**`NetmonCollectorStale`** (warning, `for: 10m`) fires per `collector` label. It fires when the collector's last success is older than its threshold. It also fires when the gauge is NaN, meaning the collector never succeeded, and the Pod is older than the threshold. Pod age comes from kube-state-metrics (`kube_pod_start_time`), so a container restart inside the same Pod does not reset the grace period. The `threshold` label shows the class:
+
+| Threshold | Collectors | Cadence (§4.1) |
+|-----------|------------|----------------|
+| `26h` | `blocklists`, `retention` | daily |
+| `3h` | `egress` | hourly |
+| `90m` | `lan`, `reputation` | 15 min / 30 min |
+| `15m` | every other collector: `cloudflare-requests`, `cloudflare-firewall`, `login-events`, and any collector not listed | 5 min / 1 min |
+
+1. Check `GET /api/netmon/status` through furchert-ch `/dashboard/network`, or the data-service logs (`kubectl -n apps logs deploy/data-service`). `lastError` and `consecutiveFailures` name the cause. data-service never logs tokens.
+2. `credentials` on a Cloudflare collector means the token has expired or was revoked. Create a new token (zone `furchert.ch`, Analytics:Read), update `data_service_cloudflare_analytics_token` in SOPS, run playbook 59 and restart data-service.
+3. A collector added in data-service without its own class falls into the `15m` class. If its cadence is slower, add a class to the rules in `cluster/values/kube-prometheus-stack.yaml`.
+4. A collector that is disabled (`netmon.collectors.<name>.enabled=false`) must not export the gauge. If one stays NaN forever, that is a data-service bug, not an outage.
+
+**`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system` and `kubectl -n monitoring get servicemonitor data-service`. The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
 
 ---
 
@@ -1690,7 +1755,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `52_n8n.yml` | n8n deployment | 2-3 min | Yes |
 | `53_litellm.yml` | LiteLLM deployment | 3-5 min | Yes |
 | `54_club_assistant.yml` | Open WebUI (Club Assistant) deployment + DB provisioning | 3–5 min | Yes |
-| `59_app_services.yml` | App secrets and bootstrap | 2-3 min | Yes |
+| `59_app_services.yml` | App secrets, per-app DBs (litellm, data_service) and bootstrap | 2-3 min | Yes |
 
 ---
 

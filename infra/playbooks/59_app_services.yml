@@ -42,6 +42,8 @@
 #
 # data-service variables (docs/060-network-monitoring.md §9):
 #   data_service_db_password: <openssl rand -hex 24>     # Postgres password for the data_service role
+#   data_service_cloudflare_analytics_token: <Cloudflare API token, zone furchert.ch, Analytics:Read>  # NM-1
+#   data_service_cloudflare_zone_id: <zone ID of furchert.ch>                                          # NM-1
 #
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
@@ -396,8 +398,11 @@
       ansible.builtin.assert:
         that:
           - data_service_db_password is defined and data_service_db_password | length > 0
+          - data_service_cloudflare_analytics_token is defined and data_service_cloudflare_analytics_token | length > 0
+          - data_service_cloudflare_zone_id is defined and data_service_cloudflare_zone_id | length > 0
         fail_msg: >-
-          The data-service SOPS variable data_service_db_password is missing.
+          A data-service SOPS variable is missing (data_service_db_password,
+          data_service_cloudflare_analytics_token or data_service_cloudflare_zone_id).
           Add it to infra/inventory/group_vars/all.sops.yml — see all.sops.yml.example for the command.
       delegate_to: localhost
 
@@ -473,7 +478,7 @@
       register: pg_data_service_create_db
       changed_when: "'CREATE DATABASE' in pg_data_service_create_db.stdout"
 
-    - name: Data-service — create data-service-secrets (DB credentials)
+    - name: Data-service — create data-service-secrets (DB credentials, Cloudflare API)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -484,9 +489,15 @@
             namespace: "{{ apps_namespace }}"
           type: Opaque
           stringData:
-            # NM-0 keys only; NM-1 (Cloudflare, AbuseIPDB) and NM-4 (auth client secret)
-            # add their keys here per docs/060-network-monitoring.md §9.
+            # Keys per docs/060-network-monitoring.md §9. NM-0: DB credentials.
+            # NM-1 (#116): Cloudflare GraphQL Analytics token + zone ID, read by the
+            # inbound collector as CLOUDFLARE_API_TOKEN / CLOUDFLARE_ZONE_ID. Env vars are
+            # read at pod start: restart data-service after adding or rotating a key.
+            # Still to come: abuseipdb-api-key (NM-1, once the key is approved) and
+            # auth-client-secret (NM-4).
             db-username: data_service
             db-password: "{{ data_service_db_password }}"
+            cloudflare-api-token: "{{ data_service_cloudflare_analytics_token }}"
+            cloudflare-zone-id: "{{ data_service_cloudflare_zone_id }}"
       no_log: true
       delegate_to: localhost
