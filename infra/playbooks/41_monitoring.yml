@@ -259,6 +259,7 @@
             selector:
               matchLabels:
                 app: data-service
+      delegate_to: localhost
 
     # --- coroot-node-agent (NM-2, #118; docs/060-network-monitoring.md §6) ---
     # Plain manifests in cluster/monitoring/coroot-node-agent/, applied file by file like the
