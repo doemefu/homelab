@@ -1,0 +1,208 @@
+# promtool unit tests for additionalPrometheusRulesMap.homelab-netmon-egress in
+# cluster/values/kube-prometheus-stack.yaml (docs/060-network-monitoring.md §6.4).
+# Run: scripts/promtool-test-rules.sh — it extracts every rule group from the values file into
+# rules.yaml next to a copy of this file. Not run in CI yet (follow-up issue linked in PR #140).
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm",
+          destination="1.2.3.4:443", actual_destination="1.2.3.4:443"}
+        values: 1+1x1500
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="1.2.3.4:443", actual_destination="1.2.3.4:443"}
+        values: _x1450 1+1x50
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="5.6.7.8:443", actual_destination="5.6.7.8:443"}
+        values: _x1455 1+1x45
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="10.43.0.10:5432", actual_destination="10.42.1.7:5432"}
+        values: _x1455 1+1x45
+    alert_rule_test:
+      - eval_time: 1460m
+        alertname: NetmonNewExternalDestination
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              namespace: monitoring
+              workload: apps/litellm/litellm
+              dest: 5.6.7.8:443
+            exp_annotations:
+              summary: apps/litellm/litellm connected to new external destination 5.6.7.8:443
+              description: 'apps/litellm/litellm opened a TCP connection to 5.6.7.8:443, which it did not connect
+                to in the previous 24 h. Details: container_net_tcp_successful_connects_total in Prometheus or the
+                egress section of /dashboard/network. Expected to be noisy for CDN-rotating destinations.'
+      - eval_time: 1480m
+        alertname: NetmonNewExternalDestination
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm",
+          destination="api.openai.com:443", actual_destination=""}
+        values: 1+1x1500
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="api.anthropic.com:443", actual_destination=""}
+        values: _x1455 1+1x45
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="storage.googleapis.com:443", actual_destination=""}
+        values: _x1455 1+1x45
+    alert_rule_test:
+      - eval_time: 1460m
+        alertname: NetmonNewExternalDestination
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              namespace: monitoring
+              workload: apps/litellm/litellm
+              dest: api.anthropic.com:443
+            exp_annotations:
+              summary: apps/litellm/litellm connected to new external destination api.anthropic.com:443
+              description: 'apps/litellm/litellm opened a TCP connection to api.anthropic.com:443, which it did
+                not connect to in the previous 24 h. Details: container_net_tcp_successful_connects_total in Prometheus
+                or the egress section of /dashboard/network. Expected to be noisy for CDN-rotating destinations.'
+          - exp_labels:
+              severity: info
+              namespace: monitoring
+              workload: apps/litellm/litellm
+              dest: storage.googleapis.com:443
+            exp_annotations:
+              summary: apps/litellm/litellm connected to new external destination storage.googleapis.com:443
+              description: 'apps/litellm/litellm opened a TCP connection to storage.googleapis.com:443, which it
+                did not connect to in the previous 24 h. Details: container_net_tcp_successful_connects_total in
+                Prometheus or the egress section of /dashboard/network. Expected to be noisy for CDN-rotating destinations.'
+  - interval: 1m
+    input_series:
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm",
+          destination="9.9.9.9:443", actual_destination="9.9.9.9:443"}
+        values: 1+1x1500
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="203.0.113.10:443", actual_destination="198.51.100.7:443"}
+        values: _x1455 1+1x45
+    alert_rule_test:
+      - eval_time: 1460m
+        alertname: NetmonNewExternalDestination
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              namespace: monitoring
+              workload: apps/litellm/litellm
+              dest: 198.51.100.7:443
+            exp_annotations:
+              summary: apps/litellm/litellm connected to new external destination 198.51.100.7:443
+              description: 'apps/litellm/litellm opened a TCP connection to 198.51.100.7:443, which it did not connect
+                to in the previous 24 h. Details: container_net_tcp_successful_connects_total in Prometheus or the
+                egress section of /dashboard/network. Expected to be noisy for CDN-rotating destinations.'
+  - interval: 1m
+    input_series:
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="10.43.5.5:8080", actual_destination="10.42.3.3:8080"}
+        values: _x100 1+1x10
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="192.168.1.61:6443", actual_destination="192.168.1.61:6443"}
+        values: _x100 1+1x10
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/litellm-7b6c9d8f4-q7w2z/litellm",
+          destination="127.0.0.1:9000", actual_destination="127.0.0.1:9000"}
+        values: _x100 1+1x10
+    alert_rule_test:
+      - eval_time: 105m
+        alertname: NetmonNewExternalDestination
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/apps/postgresql-0/postgresql", destination="9.9.9.9:443",
+          actual_destination="9.9.9.9:443"}
+        values: _x100 1+1x10
+      - series: container_net_tcp_successful_connects_total{container_id="/k8s/monitoring/foo-agent-x2k9p/foo",
+          destination="8.8.8.8:53", actual_destination="8.8.8.8:53"}
+        values: _x100 1+1x10
+    alert_rule_test:
+      - eval_time: 105m
+        alertname: NetmonNewExternalDestination
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              namespace: monitoring
+              workload: /k8s/apps/postgresql-0/postgresql
+              dest: 9.9.9.9:443
+            exp_annotations:
+              summary: /k8s/apps/postgresql-0/postgresql connected to new external destination 9.9.9.9:443
+              description: '/k8s/apps/postgresql-0/postgresql opened a TCP connection to 9.9.9.9:443, which it did
+                not connect to in the previous 24 h. Details: container_net_tcp_successful_connects_total in Prometheus
+                or the egress section of /dashboard/network. Expected to be noisy for CDN-rotating destinations.'
+          - exp_labels:
+              severity: info
+              namespace: monitoring
+              workload: monitoring/foo-agent/foo
+              dest: 8.8.8.8:53
+            exp_annotations:
+              summary: monitoring/foo-agent/foo connected to new external destination 8.8.8.8:53
+              description: 'monitoring/foo-agent/foo opened a TCP connection to 8.8.8.8:53, which it did not connect
+                to in the previous 24 h. Details: container_net_tcp_successful_connects_total in Prometheus or the
+                egress section of /dashboard/network. Expected to be noisy for CDN-rotating destinations.'
+  - interval: 1m
+    input_series:
+      - series: kube_daemonset_status_desired_number_scheduled{namespace="monitoring", daemonset="coroot-node-agent"}
+        values: '0x30'
+      - series: kube_daemonset_status_number_available{namespace="monitoring", daemonset="coroot-node-agent"}
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CorootNodeAgentDown
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: kube_daemonset_status_desired_number_scheduled{namespace="monitoring", daemonset="coroot-node-agent"}
+        values: 2x30
+      - series: kube_daemonset_status_number_available{namespace="monitoring", daemonset="coroot-node-agent"}
+        values: 2x30
+      - series: up{job="coroot-node-agent", instance="10.42.0.5:80"}
+        values: 1x30
+      - series: up{job="coroot-node-agent", instance="10.42.2.9:80"}
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CorootNodeAgentDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CorootNodeAgentDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: coroot-node-agent is missing or not scraped
+              description: 'Either DaemonSet monitoring/coroot-node-agent does not exist, or fewer agent pods are
+                scraped successfully than are available (check the ServiceMonitor, the headless Service and scrape_samples_post_metric_relabeling
+                against sampleLimit 10000). The absent() branch also fires while kube-state-metrics itself is down.
+                Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".'
+  - interval: 1m
+    input_series:
+      - series: kube_daemonset_status_number_available{namespace="monitoring", daemonset="coroot-node-agent"}
+        values: 1x30
+      - series: kube_daemonset_status_desired_number_scheduled{namespace="monitoring", daemonset="coroot-node-agent"}
+        values: 1x30
+      - series: up{job="coroot-node-agent", instance="10.42.0.5:80"}
+        values: 1x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CorootNodeAgentDown
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: up{job="other"}
+        values: 1x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CorootNodeAgentDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              daemonset: coroot-node-agent
+            exp_annotations:
+              summary: coroot-node-agent is missing or not scraped
+              description: 'Either DaemonSet monitoring/coroot-node-agent does not exist, or fewer agent pods are
+                scraped successfully than are available (check the ServiceMonitor, the headless Service and scrape_samples_post_metric_relabeling
+                against sampleLimit 10000). The absent() branch also fires while kube-state-metrics itself is down.
+                Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".'
