@@ -748,6 +748,7 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 - `stale` = `lastSuccessAt` is older than 3 × the cadence.
 - `lastErrorCode` is `null`, `credentials`, `rate_limited`, `upstream`, `truncated` or `internal`. It is never a message.
 - Before a collector's first success, staleness is measured from the service start time (amended 2026-09-23, NM-0: data-service PR #18).
+- A collector run that completes with a warning (e.g. `upstream` when no node exposes the NM-3 metrics yet, or `truncated`) is recorded as a success: `lastSuccessAt` advances, `consecutiveFailures` stays 0 and `lastErrorCode` carries the warning code. Consumers must treat `lastErrorCode = upstream` with `consecutiveFailures = 0` as "no data yet", not as an outage (amended 2026-09-24, data-service `INTERFACES.md`).
 
 **`GET /inbound/summary?from&to&host&limit`** (NM-1)
 
