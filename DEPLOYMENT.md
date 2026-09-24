@@ -1266,7 +1266,7 @@ NM-1 (#116) adds the Cloudflare GraphQL Analytics credentials to `data-service-s
 The PRs merge in this order: **homelab#116 → homelab-data-service#14 → furchert-ch#61**.
 
 1. Merge this infra PR, then run playbook 59 **twice**. The first run adds the two keys to the Secret. The second run must report no change for the Secret task (the other data-service tasks keep their NM-0 behaviour).
-2. Restart data-service so the running pod picks up the new env vars (`optional: true` secretKeyRefs are resolved only at pod start). Skip this when data-service#14's image rollout follows right away — that rollout restarts the pod anyway.
+2. Restart data-service so the running pod picks up the new env vars (`optional: true` secretKeyRefs are resolved only at pod start). Delete the pod rather than using `rollout restart`, which Flux undoes (see the note under "Enable order (NM-4)"). Skip this when data-service#14's image rollout follows right away — that rollout restarts the pod anyway.
 3. Run playbook 41. It applies the ServiceMonitor and loads the rules in one run, so the `absent()` branch of `NetmonDataServiceDown` never sees a scrape gap. data-service is already running since NM-0, so this step can happen before data-service#14.
 4. Merge data-service#14 (collectors), then furchert-ch#61 (UI).
 
@@ -1275,7 +1275,7 @@ ansible-playbook infra/playbooks/59_app_services.yml
 ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret task
 kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
 # expect: cloudflare-api-token, cloudflare-zone-id, db-password, db-username
-kubectl -n apps rollout restart deploy/data-service     # only if no data-service image rollout follows
+kubectl -n apps delete pod -l app=data-service         # only if no data-service image rollout follows
 ansible-playbook infra/playbooks/41_monitoring.yml
 ```
 
@@ -1324,9 +1324,11 @@ Both variables are optional. With neither, playbook 59 skips the three keys and 
 
 #### Enable order (NM-4)
 
+> **Restart Flux-managed pods with `kubectl delete pod`, not `rollout restart`.** This applies to every Deployment that a Flux Kustomization reconciles: auth-service, data-service, device-service and furchert-ch. It does not apply to Helm- or playbook-managed workloads. Flux's next server-side apply (interval 10 min) strips the `restartedAt` annotation that `rollout restart` sets. The new ReplicaSet can then be scaled back to 0 before its pod is Ready, while `rollout status` still reports success. Deleting the pod makes the ReplicaSet recreate it from the current template. A single-replica service is down for about 30 to 60 s. Check the pod age and the startup log, not `rollout status` alone.
+
 1. Owner: add both SOPS variables (`sops infra/inventory/group_vars/all.sops.yml`).
 2. Run playbook 59 **twice**. The first run adds the keys. The second run must report no change for the Secret tasks.
-3. Restart auth-service so the pod reads the new env vars. On startup it seeds the `data-service` client and logs `Login-event outbox enabled`.
+3. Restart auth-service by deleting its pod (see the note above), so the new pod reads the new env vars. On startup it seeds the `data-service` client and logs `Login-event outbox enabled`.
 4. Merge the data-service PR (homelab-data-service#17), then restart data-service if its image rollout does not follow right away (`AUTH_CLIENT_SECRET` is read at pod start).
 5. Merge the furchert-ch PR (furchert-ch#64).
 
@@ -1337,8 +1339,9 @@ kubectl -n apps get secret homelab-auth-secrets -o json | jq '.data | keys'
 # expect data-service-client-secret and login-event-hmac-key next to the existing keys
 kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
 # expect auth-client-secret next to the existing keys
-kubectl -n apps rollout restart deploy/auth-service
+kubectl -n apps delete pod -l app=auth-service
 kubectl -n apps rollout status deploy/auth-service
+kubectl -n apps get pods -l app=auth-service          # the pod age must be new
 kubectl -n apps logs deploy/auth-service | grep -i 'login-event'
 # expect "Login-event outbox enabled (consumer client 'data-service')"; a WARN "disabled" names the missing variable
 ```
@@ -1350,7 +1353,8 @@ kubectl -n apps patch secret homelab-auth-secrets --type=json \
   -p='[{"op":"remove","path":"/data/data-service-client-secret"},{"op":"remove","path":"/data/login-event-hmac-key"}]'
 kubectl -n apps patch secret data-service-secrets --type=json \
   -p='[{"op":"remove","path":"/data/auth-client-secret"}]'
-kubectl -n apps rollout restart deploy/auth-service deploy/data-service
+kubectl -n apps delete pod -l app=auth-service
+kubectl -n apps delete pod -l app=data-service
 ```
 
 auth-service then logs the "disabled" WARN and answers 503. The seeded `data-service` row in `oauth2_registered_client` stays until it is deleted there.
@@ -1588,8 +1592,8 @@ A mosquitto restart briefly drops device-service's MQTT connection. After any mo
 kubectl -n apps logs deploy/device-service --since=5m | grep -i mqtt
 ```
 
-If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps rollout restart
-deploy/device-service`, then re-check the logs.
+If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps delete pod
+-l app=device-service` (Flux undoes `rollout restart`, see "Enable order (NM-4)"), then re-check the logs.
 
 #### Restore paths
 
