@@ -934,12 +934,13 @@ in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgrou
 | DaemonSet, headless Service, ServiceMonitor, NetworkPolicy (ingress only from Prometheus on TCP 80) | `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml` (no Helm chart; the chart is stale) |
 | Alert rules `NetmonNewExternalDestination`, `CorootNodeAgentDown` | `cluster/values/kube-prometheus-stack.yaml` → `additionalPrometheusRulesMap.homelab-netmon-egress` |
 | Image | `ghcr.io/coroot/coroot-node-agent:1.35.10@sha256:…` (index digest in the manifest comment; bumped by hand) |
-| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default `[raspi5, mba1]` since the 2026-09-24 spike) |
+| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default `[raspi5, mba1, mba2]` since 2026-09-24) |
 
 **The gate.** The DaemonSet only schedules on labelled nodes. `41_monitoring.yml` labels exactly
 the nodes in `coroot_node_agent_nodes` and **removes** the label from every other node, so the
 play variable is the source of truth: nodes missing from the list lose the label on the next run.
-Since the 2026-09-24 spike the default is `[raspi5, mba1]`. With an empty list
+The default is `[raspi5, mba1, mba2]` since 2026-09-24. raspi5 and mba1 ran the spike, and mba2 joined after their
+measurements. With an empty list
 (`-e '{"coroot_node_agent_nodes": []}'`) the DaemonSet runs 0 pods and neither rule fires.
 
 **Memory options (researched 2026-09-24 against the v1.35.10 source; none applied).** The startup
@@ -971,10 +972,11 @@ required; the spike on mba1 is what proves that.
 only Prometheus from the pod network, but Kubernetes always admits traffic from the pod's own node.
 Host processes and hostNetwork pods on an agent node can therefore still fetch profiles and heap
 dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Assistant, which has
-`hostNetwork: true` and no node pin. Before the all-node rollout the owner decides between:
-- accepting this for the homelab, since those sources already share the node;
+`hostNetwork: true` and no node pin. **The owner accepted this residual risk on 2026-09-24 (#118).**
+It is homelab-only, and the agent has no external exposure. Revisit it if either alternative
+becomes available:
 - a `/metrics`-only reverse-proxy sidecar with the agent bound to `127.0.0.1`, which adds a new pinned image and needs approval;
-- an upstream request for a disable flag.
+- an upstream flag that disables pprof.
 
 #### Spike runbook (needs the owner's go — docs/060 §12 Q4)
 
@@ -1037,6 +1039,18 @@ dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Ass
    node to `coroot_node_agent_nodes` in `41_monitoring.yml`, a `41_monitoring.yml` run, and steps 3–4:
    first **mba2**, whose t2 kernel (6.19) differs from mba1's (6.12), then **raspi4**, which has
    only 4 GB RAM and about 2 GB available.
+
+   **mba2 joined on 2026-09-24** (t2 kernel 6.19.10, no BTF), with the owner's go on #118. It
+   followed the raspi5 and mba1 measurements with requests 256Mi and limits 1Gi:
+
+   | Measure | raspi5 | mba1 |
+   |---|---|---|
+   | Working set, steady | 318 MiB | 350 MiB |
+   | Startup peak, under the 1Gi limit | 479 MiB | 544 MiB |
+   | Restarts | 0 | 0 |
+
+   Expect a startup peak of about 500–700 MiB on mba2's t2 kernel, and watch for OOMKilled during
+   the first 5 minutes. raspi4 follows after a further 24 h of observation, as a separate change.
 7. **Rollback.**
    - *Stop the agent, keep everything else:* run `41_monitoring.yml` with
      `-e '{"coroot_node_agent_nodes": []}'` (the gate closes and the pods terminate), or
