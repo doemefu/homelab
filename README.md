@@ -66,7 +66,10 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **Metrics**: kube-prometheus-stack v69.3.1 (Prometheus operator)
 - **Dashboards**: Grafana (public at `https://grafana.furchert.ch`)
 - **Alerting**: Alertmanager with Discord webhook receiver
-- **Exporters**: Node Exporter (DaemonSet), postgres-exporter, mosquitto-exporter
+- **Exporters**: Node Exporter (DaemonSet, incl. textfile collector), postgres-exporter, mosquitto-exporter
+- **Backup alerting**: restic and the Longhorn recurring jobs alert to Discord on failure or
+  staleness (#92) — see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions);
+  the Mac-side app-data dumps are a manual monthly check
 - **Not monitored**: kube-controller-manager, kube-scheduler, kube-proxy — k3s runs these
   embedded in the server/agent process bound to `127.0.0.1` with no exposed scrape endpoints;
   their chart scrape configs and alert rule groups are disabled in

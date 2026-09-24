@@ -457,6 +457,22 @@ To integrate your app with Prometheus monitoring:
 | postgres-exporter | PostgreSQL metrics | 9187 | `apps` | Sidecar in `50_apps_infra.yml` |
 | mosquitto-exporter | MQTT broker metrics | 9234 | `apps` | Separate Deployment in `50_apps_infra.yml` |
 
+**node-exporter textfile collector (#92)**
+
+node-exporter reads `*.prom` files from the host directory `/var/lib/node_exporter/textfile_collector`
+on every node (`--collector.textfile.directory`, configured in
+`cluster/values/kube-prometheus-stack.yaml`; the directory is created by the `storage` role and by
+the DaemonSet's `hostPath: DirectoryOrCreate`). Anything a node-local job writes there is scraped
+as a normal node-exporter series.
+
+| Producer | File | Metrics |
+|----------|------|---------|
+| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+| `homelab-netmon-collect` on every node (`infra/roles/netmon_node`) | `homelab_netmon.prom` | see "Node textfile metrics (NM-3)" below |
+
+Write the file atomically (temp file in the same directory, then `mv`); a partially written file
+makes node-exporter discard the whole directory and set `node_textfile_scrape_error=1`.
+
 ### Node textfile metrics (NM-3)
 
 `homelab-netmon-collect` (role `netmon_node`, every minute) writes `homelab_netmon.prom` into the node-exporter textfile directory `/var/lib/node_exporter/textfile_collector` (enabled by homelab PR #109). Consumer: data-service's LAN snapshot collector via Prometheus (`docs/060-network-monitoring.md` §4.6). The names and labels are a cross-repo contract — change `docs/060` §5.2 first.
