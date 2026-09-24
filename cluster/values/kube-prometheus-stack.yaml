@@ -82,10 +82,11 @@ defaultRules:
 #   homelab-netmon-node    NM-3 node-script rules (PR #132)
 #   homelab-netmon-egress  NM-2 coroot-node-agent rules (PR #133)
 #   homelab-backups        backup alerts (PR #109)
-# ⚠️ Each of those PRs adds the top-level key at this same position, so every merge after
-# the first hits a git conflict here on purpose. Resolve it by keeping ONE
-# additionalPrometheusRulesMap key with all entries side by side — never two top-level
-# keys (a duplicate YAML key would silently drop one map).
+# ⚠️ Each of those PRs adds its own top-level additionalPrometheusRulesMap key. Git can
+# merge two such blocks without any conflict (it did for #109 + #131), leaving a
+# duplicate YAML key that Helm resolves by silently dropping one map. CI's yamllint
+# (key-duplicates) catches it; fix by moving the new entry under this ONE key, side by
+# side with the others. The homelab-backups entry below lives under this same key.
 additionalPrometheusRulesMap:
   homelab-netmon:
     groups:
@@ -214,7 +215,6 @@ additionalPrometheusRulesMap:
 # All rules are warning severity: the single Alertmanager route (injected by
 # 41_monitoring.yml) sends everything to Discord regardless, and the chart's inhibit
 # rules only suppress across an equal alertname, so these never mask each other.
-additionalPrometheusRulesMap:
   homelab-backups:
     groups:
       - name: homelab-backups
