@@ -180,6 +180,7 @@ All services are discoverable via Kubernetes internal DNS.
 - `homeassistant` — for Home Assistant SSO
 - `device-service` — for device-service authentication
 - `furchert-ch` — for the furchert-ch `/dashboard` SSO; also `client_credentials` with scope `netmon:read` for server-side calls to data-service (auth-service migration V6)
+- `data-service` — `client_credentials` only, scope `login-events:read`, no redirect URIs; data-service pulls auth-service's login-event outbox (`GET /api/v1/login-events`, NM-4, `docs/060-network-monitoring.md` §7.6). Seeded only once `data-service-client-secret` exists (optional NM-4 keys below)
 
 > **Full API contract**: See [homelab-auth-service repository](https://github.com/doemefu/homelab-auth-service)
 
@@ -288,10 +289,10 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 
 | Secret | Namespace | Contains | Used By | Rotation Notes |
 |--------|-----------|---------|---------|-----------------|
-| `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention) |
+| `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service, furchert-ch); optional NM-4 keys `data-service-client-secret` (`{noop}`-prefixed, env `DATA_SERVICE_CLIENT_SECRET`) and `login-event-hmac-key` (≥ 32 chars, env `LOGIN_EVENT_HMAC_KEY`), created only when both NM-4 SOPS variables are set (`docs/060-network-monitoring.md` §9) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention). Restart auth-service after adding the NM-4 keys. Rotating `data-service-client-secret` also needs the `oauth2_registered_client` row updated (the seeder never updates an existing client); rotating `login-event-hmac-key` breaks HMAC continuity of stored login events |
 | `n8n-secrets` | `apps` | n8n encryption key | n8n | Rotate via `59_app_services.yml`, restart n8n deployment |
 | `litellm-secrets` | `apps` | LiteLLM master key, salt key, DB password, Mistral API keys | LiteLLM | **`litellm_salt_key` MUST NEVER rotate** — invalidates all virtual keys in DB |
-| `data-service-secrets` | `apps` | Postgres credentials for DB `data_service` (`db-username` = literal `data_service`, `db-password`); Cloudflare GraphQL Analytics access `cloudflare-api-token`, `cloudflare-zone-id` (NM-1, #116; env `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`); still to come: `abuseipdb-api-key` (NM-1, once approved), `auth-client-secret` (NM-4) (`docs/060-network-monitoring.md` §9) | data-service | Rotate via `59_app_services.yml` (re-sets the role password and the Secret), then `kubectl -n apps rollout restart deploy/data-service` — env vars are read at pod start |
+| `data-service-secrets` | `apps` | Postgres credentials for DB `data_service` (`db-username` = literal `data_service`, `db-password`); Cloudflare GraphQL Analytics access `cloudflare-api-token`, `cloudflare-zone-id` (NM-1, #116; env `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`); optional `auth-client-secret` (NM-4, plain value of `auth_service_data_service_client_secret`, env `AUTH_CLIENT_SECRET`, created only when both NM-4 SOPS variables are set); still to come: `abuseipdb-api-key` (NM-1, once approved) (`docs/060-network-monitoring.md` §9) | data-service | Rotate via `59_app_services.yml` (re-sets the role password and the Secret), then `kubectl -n apps rollout restart deploy/data-service` — env vars are read at pod start |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), SMTP password (`smtp-password`, contact-form delivery, furchert-ch#46) | furchert-ch | Rotate via `59_app_services.yml`; `smtp-password` is an Infomaniak application password, independently revocable from the mailbox login password |
@@ -319,6 +320,10 @@ From `59_app_services.yml` (app secrets):
 - `litellm_client_secret`
 - `data_service_db_password` (Postgres password for role `data_service`, e.g. `openssl rand -hex 24`)
 - `data_service_cloudflare_analytics_token` (Cloudflare API token, zone `furchert.ch`, Analytics:Read — NM-1), `data_service_cloudflare_zone_id` (zone ID, not a credential — NM-1)
+
+**Optional** in `59_app_services.yml` (set both or neither; one alone fails the play):
+- `auth_service_data_service_client_secret` (plain, no `{noop}`; e.g. `openssl rand -hex 32` — NM-4 login events)
+- `auth_service_login_event_hmac_key` (at least 32 characters, e.g. `openssl rand -base64 48` — NM-4 login events)
 
 From `50_apps_infra.yml` (shared infrastructure):
 - `postgresql_password`

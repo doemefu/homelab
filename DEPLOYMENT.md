@@ -24,6 +24,7 @@ Before starting any deployment or upgrade, verify:
 - [ ] `ansible-lint` installed
 - [ ] `kubectl` installed and configured (`export KUBECONFIG=~/.kube/homelab.yaml`)
 - [ ] `helm@3` installed (NOT Helm 4 — see [CONTRIBUTING.md](CONTRIBUTING.md))
+- [ ] helm-diff plugin installed, pinned: `helm plugin install https://github.com/databus23/helm-diff --version v3.15.13`. Without it, `kubernetes.core.helm` warns and falls back to a values comparison. That fallback compares the release only with the values file, so the InfluxDB task in `50_apps_infra.yml` (values file plus inline SOPS values) reports `changed` on every run (homelab#66).
 - [ ] `sops` installed
 - [ ] `age` installed
 - [ ] `flux` installed
@@ -678,6 +679,39 @@ then point kubectl at the local end.
 > Keep the `-N -L …` terminal running for the whole playbook run — if the forward drops, the
 > playbook fails the same way.
 
+**Node-level playbooks off-LAN (SSH jump config).** The forward above only serves playbooks whose
+tasks run on localhost. Node-level playbooks (`10_base`, `20_k3s`, `30_longhorn`) SSH to the
+nodes' LAN IPs and fail off-LAN with `UNREACHABLE`. Route them through the Cloudflare Access SSH
+host with an SSH config that lives only in the operator's `~/.ssh` (not in this repo), e.g.
+`~/.ssh/homelab-offlan.conf`:
+
+```
+Host 192.168.1.61
+  HostName ssh.furchert.ch
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  ProxyCommand cloudflared access ssh --hostname %h
+Host 192.168.1.*
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  StrictHostKeyChecking yes
+  ProxyCommand ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
+```
+
+```bash
+cloudflared access login https://ssh.furchert.ch   # prerequisite: a valid Access login
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/10_base.yml --tags netmon_node
+```
+
+- raspi5 (`192.168.1.61`) has a direct entry because a jump through raspi5 to its own LAN IP
+  timed out once. The other nodes jump through raspi5.
+- `ANSIBLE_SSH_ARGS` replaces Ansible's default SSH arguments, so the `ControlMaster`/`ControlPersist`
+  flags are passed again explicitly.
+- `StrictHostKeyChecking yes` accepts only host keys already in `~/.ssh/known_hosts`. On-LAN Ansible runs record the nodes' LAN IPs there, and earlier `cloudflared` SSH use records `ssh.furchert.ch`. Add a missing key on the LAN first (`ssh ansible@<LAN IP>` once, then compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node). Never accept a first key over the tunnel.
+- Keep the file private: `chmod 600 ~/.ssh/homelab-offlan.conf`.
+- Verified on all four nodes on 2026-09-24 (with `accept-new` and existing known_hosts entries).
+
 #### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
 
 For a single read or a single-manifest apply, run kubectl on the control-plane node through the
@@ -1238,6 +1272,53 @@ curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name
 
 **`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system` and `kubectl -n monitoring get servicemonitor data-service`. The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
 
+### NM-4: login-event secrets (auth-service → data-service)
+
+NM-4 (#134) adds the secrets for the login-event pipeline: auth-service records form logins in an outbox, and data-service pulls them with its own client (`data-service`, scope `login-events:read`). Contract: `docs/060-network-monitoring.md` §7.6, §9.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variables (owner, optional) | `infra/inventory/group_vars/all.sops.yml` | `auth_service_data_service_client_secret` (plain, e.g. `openssl rand -hex 32`), `auth_service_login_event_hmac_key` (at least 32 characters, e.g. `openssl rand -base64 48`) |
+| auth-service keys | `59_app_services.yml` → `apps/homelab-auth-secrets` | `data-service-client-secret` (`{noop}<value>`, env `DATA_SERVICE_CLIENT_SECRET`), `login-event-hmac-key` (env `LOGIN_EVENT_HMAC_KEY`) |
+| data-service key | `59_app_services.yml` → `apps/data-service-secrets` | `auth-client-secret` (plain `<value>`, env `AUTH_CLIENT_SECRET`) |
+
+Both variables are optional. With neither, playbook 59 skips the three keys and prints a note. With only one, a key shorter than 32 characters, or a client secret that already starts with `{` (such as `{noop}`), the playbook fails. auth-service wires both env vars with `optional: true`, so it starts without them, keeps login-event capture off, answers 503 on `/api/v1/login-events` and logs one WARN. The auth-service PR (homelab-auth-service#94) can therefore merge before the keys exist.
+
+#### Enable order (NM-4)
+
+1. Owner: add both SOPS variables (`sops infra/inventory/group_vars/all.sops.yml`).
+2. Run playbook 59 **twice**. The first run adds the keys. The second run must report no change for the Secret tasks.
+3. Restart auth-service so the pod reads the new env vars. On startup it seeds the `data-service` client and logs `Login-event outbox enabled`.
+4. Merge the data-service PR (homelab-data-service#17), then restart data-service if its image rollout does not follow right away (`AUTH_CLIENT_SECRET` is read at pod start).
+5. Merge the furchert-ch PR (furchert-ch#64).
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret tasks
+kubectl -n apps get secret homelab-auth-secrets -o json | jq '.data | keys'
+# expect data-service-client-secret and login-event-hmac-key next to the existing keys
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect auth-client-secret next to the existing keys
+kubectl -n apps rollout restart deploy/auth-service
+kubectl -n apps rollout status deploy/auth-service
+kubectl -n apps logs deploy/auth-service | grep -i 'login-event'
+# expect "Login-event outbox enabled (consumer client 'data-service')"; a WARN "disabled" names the missing variable
+```
+
+**Turning NM-4 off.** Removing the two SOPS variables does not remove the keys: playbook 59 then skips the NM-4 tasks, and its other Secret tasks patch the Secrets without deleting unknown keys. Remove the keys by hand, then restart both services:
+
+```bash
+kubectl -n apps patch secret homelab-auth-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/data-service-client-secret"},{"op":"remove","path":"/data/login-event-hmac-key"}]'
+kubectl -n apps patch secret data-service-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/auth-client-secret"}]'
+kubectl -n apps rollout restart deploy/auth-service deploy/data-service
+```
+
+auth-service then logs the "disabled" WARN and answers 503. The seeded `data-service` row in `oauth2_registered_client` stays until it is deleted there.
+
+**Rotation.** `auth_service_login_event_hmac_key`: rotating it breaks HMAC continuity for login events already stored in data-service, so avoid it. `auth_service_data_service_client_secret`: auth-service seeds a client only once and never updates it, so a new SOPS value plus playbook 59 is not enough. Also update the `data-service` row in `oauth2_registered_client` (see homelab-auth-service `INTERFACES.md` §6), then restart auth-service and data-service.
+
 ---
 
 ### Network monitoring: node LAN metrics (NM-3)
@@ -1260,6 +1341,7 @@ Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the ap
 ```bash
 # 1. After #109 (storage role + 41_monitoring.yml) and this PR are merged.
 #    One node first; --diff is safe (no secrets in these templates).
+#    Off-LAN: prefix each command with ANSIBLE_SSH_ARGS=… (see "Off-LAN kubectl / Ansible Access").
 ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node --check --diff
 ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node
 ansible-playbook infra/playbooks/10_base.yml --tags netmon_node          # all nodes

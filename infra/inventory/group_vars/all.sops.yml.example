@@ -151,3 +151,17 @@ data_service_db_password: "CHANGE_ME_openssl_rand_hex_24"
 data_service_cloudflare_analytics_token: "CHANGE_ME_cloudflare_analytics_read_token"
 # Zone ID (not a credential): Cloudflare Dashboard → furchert.ch → Overview → API → Zone ID
 data_service_cloudflare_zone_id: "CHANGE_ME_cloudflare_zone_id"
+
+# NM-4 login events (docs/060-network-monitoring.md §7.6, §9) — OPTIONAL, set both or neither.
+# Without them, 59_app_services.yml skips these keys and auth-service keeps login-event capture off;
+# with only one of them, the playbook fails. Restart auth-service and data-service after adding them.
+# auth_service_data_service_client_secret: plain value, NO "{noop}" prefix — the playbook writes
+#   "{noop}<value>" to homelab-auth-secrets/data-service-client-secret (auth-service) and
+#   "<value>" to data-service-secrets/auth-client-secret (data-service).
+#   Generate: openssl rand -hex 32
+# auth_service_login_event_hmac_key: at least 32 characters (shorter keys are rejected by the
+#   playbook and would keep the feature off in auth-service). auth-service only.
+#   Rotating it breaks HMAC continuity for login events already stored in data-service.
+#   Generate: openssl rand -base64 48
+# auth_service_data_service_client_secret: "CHANGE_ME_openssl_rand_hex_32"
+# auth_service_login_event_hmac_key: "CHANGE_ME_openssl_rand_base64_48_min_32_chars"

@@ -72,11 +72,12 @@ ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collec
 # Note: kubernetes.core.helm requires Helm <4.0.0
 brew install helm@3 kubectl
 
-# helm-diff plugin (eliminates idempotency warnings)
+# helm-diff plugin, pinned. Without it kubernetes.core.helm warns and falls back to a values comparison,
+# which reports the InfluxDB task in 50_apps_infra.yml as "changed" on every run (homelab#66)
 # Intel Mac:
-/usr/local/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff
+/usr/local/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff --version v3.15.13
 # Apple Silicon:
-/opt/homebrew/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff
+/opt/homebrew/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff --version v3.15.13
 
 # Secrets + GitOps CLI
 brew install sops age fluxcd/tap/flux
