@@ -46,7 +46,7 @@
 #   data_service_cloudflare_zone_id: <zone ID of furchert.ch>                                          # NM-1
 #   data_service_abuseipdb_key: <AbuseIPDB API key>  # NM-1 follow-up, optional; free plan key from abuseipdb.com
 #       data-service receives it as data-service-secrets/abuseipdb-api-key (env ABUSEIPDB_API_KEY) and
-#       enables the reputation collector. Unset = key skipped; set but empty = the play fails.
+#       enables the reputation collector. Unset = key skipped; set but empty or whitespace-only = the play fails.
 #       Removing it later does NOT delete the key — see DEPLOYMENT.md "NM-1 follow-up: AbuseIPDB key (optional)".
 #
 # NM-4 login-event variables (docs/060-network-monitoring.md §7.6, §9) — OPTIONAL:
@@ -131,10 +131,11 @@
     - name: NM-1 AbuseIPDB — assert that the optional SOPS variable is not empty
       ansible.builtin.assert:
         that:
-          - data_service_abuseipdb_key | length > 0
+          - data_service_abuseipdb_key is string
+          - data_service_abuseipdb_key | trim | length > 0
         fail_msg: >-
-          data_service_abuseipdb_key is set but empty. Set the AbuseIPDB API key or remove the
-          variable — see the header comment in this playbook.
+          data_service_abuseipdb_key is set but empty, whitespace-only or not a string (e.g. YAML null).
+          Set the AbuseIPDB API key or remove the variable — see the header comment in this playbook.
       when: data_service_abuseipdb_key is defined
       delegate_to: localhost
 
