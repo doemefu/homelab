@@ -651,6 +651,85 @@ restriction (firewall rule or NetworkPolicy scoped to the `monitoring` namespace
 before it's safe to enable. None of this is implemented; revisit as a separate, security-reviewed
 task if real coverage of these 3 components is ever wanted.
 
+**Backup alerting (#92):** three backup mechanisms exist and none of them alerted before this
+change. The rules live in `cluster/values/kube-prometheus-stack.yaml` under
+`additionalPrometheusRulesMap.homelab-backups` and reach Discord through the existing single
+Alertmanager route. All four are `severity: warning`.
+
+| Alert | Fires when | `for` |
+|-------|-----------|-------|
+| `ResticBackupFailed` | `homelab_backup_exit_code > 0` — the last run of `homelab-backup.sh` on raspi5 exited non-zero | 15m |
+| `ResticBackupStale` | no successful restic run for more than 26 h, **or** the metric is absent entirely | 2h |
+| `LonghornRecurringJobNotSucceeding` | a CronJob in `longhorn-system` that is older than 26 h has no successful run in the last 26 h (or never had one) | 1h |
+| `LonghornRecurringJobMissing` | the `daily-snapshot` or `metrics-snapshot-cleanup` CronJob has disappeared | 1h |
+
+**A failed Longhorn recurring-job run is deliberately *not* covered by a new rule** — the chart's
+own `KubeJobFailed` (`kube_job_failed{namespace=~".*"} > 0`, `for: 15m`, warning) already fires for
+`longhorn-system` and routes to the same receiver. A second rule would mean two Discord messages
+for every failed run. Do not switch `KubeJobFailed` off via `defaultRules.disabled` without
+replacing that coverage.
+
+**Why the Longhorn rule is anchored on `kube_cronjob_created`:** kube-state-metrics only emits
+`kube_cronjob_status_last_successful_time` once `.status.lastSuccessfulTime` is set, so a job that
+has *never* succeeded has no series at all and a plain staleness comparison could never fire for
+it. The rule therefore selects CronJobs created more than 26 h ago and subtracts those with a
+recent success (`unless`), which also gives a newly created job a 26 h grace period. It is
+namespace-wide, so a new Longhorn recurring job is covered without editing the rule.
+26 h = the 24 h schedule plus DST slack (both crons are node-local, so the spring/autumn gaps are
+23 h and 25 h) plus one evaluation cycle.
+
+**restic metrics path:** `homelab-backup.sh` (`infra/roles/storage/tasks/main.yml`) writes
+`homelab-backup.prom` into `/var/lib/node_exporter/textfile_collector` on every exit — success or
+failure — via a temp file plus `mv`, so a scrape never sees a partial file. node-exporter reads
+that directory read-only (`--collector.textfile.directory`, configured in
+`cluster/values/kube-prometheus-stack.yaml`). The path is a contract between those two files and
+`storage_textfile_collector_dir` in `infra/roles/storage/defaults/main.yml`; change them together
+or the metric disappears and `ResticBackupStale` fires. The directory is created on **every** node
+(by Ansible and by the DaemonSet's `hostPath: DirectoryOrCreate`), because node-exporter raises
+`node_textfile_scrape_error=1` — the chart's `NodeTextFileCollectorScrapeError` alert — wherever
+the configured directory is missing. A failed run carries the previous last-success timestamp
+forward instead of erasing it; `0` means "never succeeded".
+
+**Known blind spots:**
+- A Longhorn recurring job that *silently skips* a detached volume still exits 0 and counts as a
+  success (`filterVolumesForJob` logs a warning only). The weekly manual snapshot check in the
+  maintenance checklist stays for that reason.
+- The **Mac-side app-data dumps** (`scripts/backup-app-data.sh`) are not covered. The Mac is not a
+  cluster node, so an automatic signal would need a new component (Pushgateway or an n8n check).
+  It remains a manual monthly check — see the maintenance checklist.
+- A lock collision (a manual run while the 03:00 cron holds the lock) exits before any metric is
+  written, on purpose: the run holding the lock owns the metrics. A permanently stuck lock surfaces
+  as `ResticBackupStale` after about 26 h.
+
+**Rollout order (matters):** the `ResticBackupStale` rule has an `absent()` branch, and
+`homelab-backup.sh` only writes its metric file when it runs. Apply in this order:
+
+1. `ansible-playbook infra/playbooks/10_base.yml` — **all nodes**. Creates the textfile directory
+   fleet-wide and installs the metric-writing script. node-exporter is not reading the directory
+   yet at this point.
+2. `ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"` — one manual run, so the `.prom` file
+   exists before anything scrapes it.
+3. `ansible-playbook infra/playbooks/41_monitoring.yml` — loads the rules and rolls the
+   node-exporter DaemonSet on all 4 nodes.
+
+In that order `absent()` is never true and no alert fires during the rollout. Running step 3
+before step 2 leaves a gap that lasts until the next 03:00 cron — up to about 24 hours — during
+which `ResticBackupStale` fires (correctly, in the sense that there is genuinely no evidence of a
+successful backup). `for: 2h` softens that window but does not close it.
+
+**Verify after a rollout:**
+
+```bash
+# the metric file on raspi5
+ssh raspi5 "cat /var/lib/node_exporter/textfile_collector/homelab-backup.prom"
+
+# no node reports a textfile scrape error (expect 4x 0)
+# Prometheus: node_textfile_scrape_error
+
+# the rules are loaded
+kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-backups
+```
+
 **`CPUThrottlingHigh` review (#68, following the 2026-08-28 auth-service/device-service CPU-limit
 changes to 1000m):** 24h throttled-CFS-period ratios — `postgres-exporter` (in the `postgresql-0`
 pod) **0.67**, the only container above the 25% alert threshold, at a `limits.cpu: 100m` against
@@ -1412,6 +1491,11 @@ Common issues:
 # Last run (systemd journal on raspi5)
 ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"
 
+# Prometheus metrics written by the last run (#92) — exit code, duration, last success
+ssh raspi5 "cat /var/lib/node_exporter/textfile_collector/homelab-backup.prom"
+# In Prometheus: homelab_backup_exit_code / homelab_backup_last_success_timestamp_seconds
+# Alerts: ResticBackupFailed, ResticBackupStale — see "Backup alerting (#92)" above
+
 # List snapshots
 ssh raspi5 "sudo restic snapshots \
   --repo /var/lib/backup/restic-repo \
@@ -1641,13 +1725,14 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify all pods Running | Daily | `kubectl get pods -A` |
 | Check node resource usage | Daily | `kubectl top nodes` |
 | Verify Longhorn volume health | Daily | `kubectl get volumes -n longhorn-system` |
-| Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
+| Check backup status | Daily | Primarily automatic since #92 — `ResticBackupFailed` / `ResticBackupStale` / `LonghornRecurringJob*` alert to Discord. Manual cross-check: `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
 | Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
+| Check app-data dump freshness | Monthly | `ls -lt ~/informatik/homelab/backups/` on the Mac — **not alerted** (the Mac is not a cluster node, see "Backup alerting (#92)") |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
 | Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |

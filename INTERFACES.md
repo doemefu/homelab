@@ -465,6 +465,21 @@ To integrate your app with Prometheus monitoring:
 |--------|----------------|-------------|-------------|--------|
 | data-service (`apps`) | `monitoring/data-service` (job `data-service`) | `http` (8082) `/actuator/prometheus`, 30 s, no auth | `homelab-netmon` group: `NetmonCollectorStale` (per collector on `netmon_collector_last_success_timestamp_seconds{collector}`; thresholds 26h daily / 3h hourly / 90m lan+reputation / 15m all others; NaN = never succeeded once the pod is older than the threshold), `NetmonDataServiceDown` (`up == 0` or absent, 10 min) | ServiceMonitor in `41_monitoring.yml`; rules in `cluster/values/kube-prometheus-stack.yaml` `additionalPrometheusRulesMap.homelab-netmon` (NM-1 only; NM-3 uses `homelab-netmon-node` (PR #132), NM-2 uses `homelab-netmon-egress` (PR #133), backups use `homelab-backups` (PR #109)) — `docs/060-network-monitoring.md` §4.1, §7.1 |
 
+**node-exporter textfile collector (#92)**
+
+node-exporter reads `*.prom` files from the host directory `/var/lib/node_exporter/textfile_collector`
+on every node (`--collector.textfile.directory`, configured in
+`cluster/values/kube-prometheus-stack.yaml`; the directory is created by the `storage` role and by
+the DaemonSet's `hostPath: DirectoryOrCreate`). Anything a node-local job writes there is scraped
+as a normal node-exporter series.
+
+| Producer | File | Metrics |
+|----------|------|---------|
+| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+
+Write the file atomically (temp file in the same directory, then `mv`); a partially written file
+makes node-exporter discard the whole directory and set `node_textfile_scrape_error=1`.
+
 ---
 
 ## 10) Network Interface
