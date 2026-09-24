@@ -250,17 +250,18 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 |---|---|---|---|
 | window_start, window_end | timestamptz | no | Hour-aligned |
 | node | text | no | From the ServiceMonitor relabel (§6) |
-| container_id | text | no | Raw coroot label |
-| namespace, pod, container | text | yes | Parsed from `/k8s/<ns>/<pod>/<container>` (format unverified). Null for host processes. |
-| workload | text | yes | The pod name with its ReplicaSet/DaemonSet hash suffix removed (assumption: regex `-[a-z0-9]{8,10}-[a-z0-9]{5}$`, else `-[a-z0-9]{5}$`) |
-| destination | text | no | Pre-NAT `ip:port` |
-| actual_destination | text | no | Post-NAT `ip:port` |
-| destination_ip | inet | no | Parsed from `actual_destination` |
+| container_id | text | no | Raw coroot label: `/k8s/<ns>/<pod>/<container>`, `/k8s-cronjob/<ns>/<cronjob>/<container>` (coroot collapses CronJob pods scheduled within ±7 d to their CronJob), or a systemd cgroup path such as `/system.slice/k3s.service` for host processes (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| namespace, pod, container | text | yes | Parsed from the `/k8s…` forms; `pod` is null for CronJob rows. Host processes: `container` = the unit name, `namespace` and `pod` null (amended 2026-09-24, NM-2: data-service#22, homelab#118). |
+| workload | text | yes | The pod name with its ReplicaSet/DaemonSet hash suffix removed, regex `(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}$` (the §6.4 k8s alphabet). StatefulSet pods keep their full name; CronJob rows carry the CronJob name; null for host processes (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| destination | text | no | Pre-NAT `ip:port`, or `<fqdn>:<port>` for destinations coroot reports by name only (§4.6) |
+| actual_destination | text | no | Post-NAT `ip:port`; `''` for name-only destinations and for unjoined failed-connect rows (§4.6) |
+| destination_ip | inet | yes | From `actual_destination`, else `destination`; NULL for destinations coroot reports by name only (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| destination_host | text | no | Generated: `coalesce(host(destination_ip), fqdn)`. Keys aggregation and `is_new` |
 | destination_port | integer | no | |
 | destination_scope | text | no | `pod` (10.42.0.0/16), `service` (10.43.0.0/16), `lan` (192.168.1.0/24), `loopback`, or `external`. The CIDRs come from config. |
-| fqdn | text | yes | From `ip_to_fqdn` |
+| fqdn | text | yes | From `ip_to_fqdn`; for name-only destinations, the name from `destination` |
 | bytes_sent, bytes_received, connects, failed_connects | bigint | no | `increase()` over the window, rounded |
-| is_new | boolean | no | True if `(coalesce(workload,container_id), destination_ip, destination_port)` does not occur in the previous 30 d |
+| is_new | boolean | no | True if `(workload_key, destination_host, destination_port)` does not occur in the previous 30 d. `workload_key` = `<ns>/<workload>/<container>` (the §6.4 `<W>` format), else the raw `container_id`; a bare `coalesce(workload, container_id)` would merge equal owner names across namespaces (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
 
 - UNIQUE `(window_start, node, container_id, destination, actual_destination)`
 - Indexes: `(window_start)`, `(workload, window_start)`, `(destination_ip)`
@@ -499,9 +500,11 @@ max by (ip, fqdn) (last_over_time(ip_to_fqdn[1h]))
 group by (node, container_id, destination, actual_destination) (last_over_time(container_net_tcp_successful_connects_total[1h]))
 ```
 
-- **Row set:** the union of the keys from the first four queries **plus the sixth**, capped at 2 000 rows per window by bytes_sent then connects. Missing values are 0. The sixth query exists because a counter series that first appears inside the window has exactly one sample, so `increase()` returns nothing for it — without this query, a brand-new single-connect destination would be entirely missing from the row set for its first hour. **First-window counts for such a destination are a lower bound**, since `increase()` cannot see accumulation before the counter's first sample.
+- **Row set:** the union of the keys from the first four queries **plus the sixth**, capped at 2 000 rows per window by bytes_sent then connects. Hitting that cap, or the `topk(500)` bound of the bytes-sent query, completes the run with the `truncated` warning in `/status` (a success, §7.2) (amended 2026-09-24, NM-2: data-service#22, homelab#118). Missing values are 0. The sixth query exists because a counter series that first appears inside the window has exactly one sample, so `increase()` returns nothing for it — without this query, a brand-new single-connect destination would be entirely missing from the row set for its first hour. **First-window counts for such a destination are a lower bound**, since `increase()` cannot see accumulation before the counter's first sample.
 - **FQDN:** joined on `destination_ip = ip`. If an IP maps to several FQDNs, the lexicographically first one is used.
-- **Metric names:** verified against the v1.35.10 source (`metrics/metrics.go`). Every container metric also carries `container_id` and `app_id`; the agent's registry adds `machine_id` and `system_uuid` to **every** series (including `ip_to_fqdn`), and the ServiceMonitor drops both with `labeldrop` because they are constant per node and `node` (added by the ServiceMonitor) already identifies it (amended 2026-09-23, NM-2 prep review). `container_net_tcp_failed_connects_total` has **no** `actual_destination` label (only `destination`), so the fourth query's `actual_destination` group is always empty and failed connects join on `destination` only. `container_id` for pods is `/k8s/<namespace>/<pod>/<container>` (`containers/registry.go`). The spike confirms these against live data and records any difference here (amended 2026-09-23, NM-2 prep: homelab PR for #118).
+- **Name-only destinations:** coroot v1.35.10 (`common/net.go` `NewDestinationKey`) reports an external name that resolves to more than one external IP, or ends in `.amazonaws.com`, `.googleapis.com`, `.pkg.dev` or `.gcr.io`, as `destination="<fqdn>:<port>"` with an **empty** `actual_destination`. Such rows have `destination_ip` NULL and take `fqdn` from `destination` (amended 2026-09-24, NM-2: data-service#22, homelab#118).
+- **Idle destinations:** coroot drops a destination's series 10 min after its last connection attempt (`gcInterval`), so the `[1h]` presence query returns recently active destinations only (amended 2026-09-24, NM-2: data-service#22, homelab#118).
+- **Metric names:** verified against the v1.35.10 source (`metrics/metrics.go`). Every container metric also carries `container_id` and `app_id`; the agent's registry adds `machine_id` and `system_uuid` to **every** series (including `ip_to_fqdn`), and the ServiceMonitor drops both with `labeldrop` because they are constant per node and `node` (added by the ServiceMonitor) already identifies it (amended 2026-09-23, NM-2 prep review). `container_net_tcp_failed_connects_total` has **no** `actual_destination` label (only `destination`), so the fourth query's `actual_destination` group is always empty. Failed connects join a row on `(node, container_id, destination)` only when exactly one row matches; otherwise (e.g. a Service with several backends) they form their own row with `actual_destination = ''`, which avoids double counting (amended 2026-09-24, NM-2: data-service#22, homelab#118). `container_id` for pods is `/k8s/<namespace>/<pod>/<container>` (`containers/registry.go`). The spike confirms these against live data and records any difference here (amended 2026-09-23, NM-2 prep: homelab PR for #118).
 
 ---
 
@@ -691,23 +694,25 @@ These go in `additionalPrometheusRulesMap.homelab-netmon-egress` (NM-2's own key
 `NetmonNodeScriptStale` and `NetmonSeriesTruncated` cover the NM-3 node script, not coroot, and are defined in §5.6.
 
 ```promql
-count by (workload) (
-  group by (workload, actual_destination) (<W>(container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"}))
-  unless on (workload, actual_destination)
-  group by (workload, actual_destination) (<W>(last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m)))
-)
+group by (workload, dest) (<D>(<W>(container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"})))
+unless on (workload, dest)
+group by (workload, dest) (<D>(<W>(last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m))))
+# <D>(v) = label_replace(label_replace(v, "dest", "$1", "destination", "(.+)"),
+#            "dest", "$1", "actual_destination", "(.+)")
 # <W>(v) = label_replace(label_replace(v, "workload", "$1", "container_id", "(.*)"),
 #            "workload", "$1/$2/$3", "container_id",
 #            "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)")
 ```
 
-**Why `workload`, not `container_id`** (amended 2026-09-23, NM-2 prep): `container_id` contains the pod name, which changes on every Deployment rollout. Grouped by `container_id`, every Flux image update would re-report all of a workload's known destinations. `<W>` strips the ReplicaSet hash and pod suffix (`/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm` → `apps/litellm/litellm`), the same rollout-stable identity as the `coalesce(workload, container_id)` that `is_new` uses in §3.3, in a different string format (`<ns>/<owner>/<container>` here, the bare owner name in §3.3) (amended 2026-09-23, NM-2 prep review). Pods whose names do not match (StatefulSets, systemd units) keep the raw `container_id`. The exact expression, with promtool unit tests for the rollout case, is in `cluster/values/kube-prometheus-stack.yaml`.
+**Why `dest`** (amended 2026-09-24, NM-2: data-service#22, homelab#118): `dest` is `actual_destination` where coroot reports one, else `destination`. Name-only destinations (§4.6) have an empty `actual_destination`; keyed by it, all of a workload's name-only destinations collapsed into one `""` key and only the first ever alerted. An empty `actual_destination` passes the private-range filter, which is intended for these external names. The alert fires once per `(workload, dest)`.
+
+**Why `workload`, not `container_id`** (amended 2026-09-23, NM-2 prep): `container_id` contains the pod name, which changes on every Deployment rollout. Grouped by `container_id`, every Flux image update would re-report all of a workload's known destinations. `<W>` strips the ReplicaSet hash and pod suffix (`/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm` → `apps/litellm/litellm`), the same rollout-stable identity and string format as the `workload_key` that `is_new` uses in §3.3 (amended 2026-09-24, NM-2: data-service#22, homelab#118). Pods whose names do not match (StatefulSets, systemd units) keep the raw `container_id`. The exact expression, with promtool unit tests for the rollout case, is in `cluster/values/kube-prometheus-stack.yaml`.
 
 **Why this `CorootNodeAgentDown` form** (amended 2026-09-23, NM-2 prep): the original `absent(up{…})` fires permanently while the spike gate is closed (DaemonSet present, 0 pods, 0 targets). The new form fires when the DaemonSet is missing, or when fewer agents are scraped successfully than are available (Service/ServiceMonitor missing, selector drift, `sampleLimit` exceeded). Crash loops, stuck rollouts and plain scrape failures are already covered by the chart's `KubePodCrashLooping`, `KubeDaemonSetRolloutStuck` and `TargetDown`, following PR #109's no-duplicate-alert rule.
 
 The expression alerts on **series presence**, not on `increase() > 0`: a brand-new destination's counter has only one sample inside a 15 m window, so `increase()` over that window would return nothing and the alert would never fire for exactly the case it exists to catch. `group by (...) (metric)` turns the raw series into a 1-valued presence indicator regardless of its counter value, and the `unless` compares that against the same presence check over the prior day.
 
-- **Labels and routing:** the alert is labelled `workload`, with the value = the number of new destinations. It is `severity: info` and carries `namespace: monitoring`. The chart's `InfoInhibitor` normally suppresses `info` alerts unless a warning/critical alert fires in the same namespace, so it normally shows in Alertmanager and Prometheus without reaching Discord. The rule group is evaluated every `5m` instead of the global 30 s, because its 1-day `last_over_time` is the most expensive query of the group (amended 2026-09-23, NM-2 prep review). Raising it to `warning` is an owner decision after the spike and the noise tuning below (amended 2026-09-23, NM-2 prep).
+- **Labels and routing:** the alert is labelled `workload` and `dest`, one alert per new destination (amended 2026-09-24, NM-2: data-service#22, homelab#118). It is `severity: info` and carries `namespace: monitoring`. The chart's `InfoInhibitor` normally suppresses `info` alerts unless a warning/critical alert fires in the same namespace, so it normally shows in Alertmanager and Prometheus without reaching Discord. The rule group is evaluated every `5m` instead of the global 30 s, because its 1-day `last_over_time` is the most expensive query of the group (amended 2026-09-23, NM-2 prep review). Raising it to `warning` is an owner decision after the spike and the noise tuning below (amended 2026-09-23, NM-2 prep).
 - **Noise:** it is expected to be noisy for CDN-rotating destinations. Tuning, such as grouping by /24 or an FQDN suffix, is an NM-2 Phase-5 follow-up. It is not an allowlist.
 
 ### 6.5 Docs
@@ -811,7 +816,7 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 - `firewallEvents` holds the last 20 items, in the same shape as the firewall-events list.
 - `logins` is `null` before NM-4 and `lan` is `null` before NM-3.
 
-**`GET /egress/top?from&to&namespace&scope&limit`** (NM-2). `scope` is `external` (the default) or `all`.
+**`GET /egress/top?from&to&namespace&workload&scope&limit`** (NM-2). `scope` is `external` (the default) or `all`. `workload` is an optional filter (amended 2026-09-24, NM-2: data-service#22, homelab#118).
 
 ```json
 { "items": [ {"namespace": "apps", "workload": "litellm", "container": "litellm", "node": "mba1",
@@ -820,7 +825,8 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
               "firstSeenInWindow": "…Z", "isNew": true} ] }
 ```
 
-- Rows are aggregated by `(namespace, workload, container, destination_ip, destination_port)`.
+- Rows are aggregated by `(namespace, workload, container, destination_host, destination_port)`.
+- For name-only destinations `destinationIp` carries the name (as does `fqdn`). This is a documented deviation from the field name; furchert-ch renders non-IP text as is (amended 2026-09-24, NM-2: data-service#22, homelab#118).
 - `node` is the most frequent node for the row.
 - Items are ordered by `bytesSent + bytesReceived` descending.
 
@@ -1221,3 +1227,4 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 ---
 
 Reviewed 2026-09-23 (plan-reviewer, PASS WITH CHANGES, 32 findings applied); amended 2026-09-23 after data-service PR #18.
+NM-2 amendments (data-service#22, homelab#118): 2026-09-24.
