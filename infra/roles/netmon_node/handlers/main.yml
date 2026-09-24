@@ -1,0 +1,13 @@
+---
+# Carries the role marker so it never collides with the k3s/mac_tweaks "Reload systemd" handlers.
+- name: Reload systemd (netmon_node)
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# A changed OnCalendar only takes effect once the timer is restarted. Defined after the
+# daemon-reload handler, so it also runs after it.
+- name: Restart homelab-netmon.timer
+  ansible.builtin.systemd:
+    name: homelab-netmon.timer
+    state: restarted
+  ignore_errors: "{{ ansible_check_mode }}"

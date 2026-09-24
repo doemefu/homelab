@@ -21,6 +21,16 @@
   roles:
     - role: storage
 
+# NM-3 (homelab#117, docs/060 §5): LAN connection, UFW block and sshd auth textfile metrics.
+# Tag netmon_node rolls it out alone: --tags netmon_node. Runs after Storage, which (with
+# homelab PR #109) creates the node-exporter textfile directory; the role also creates it.
+- name: Netmon — LAN connection, UFW block and sshd auth textfile metrics
+  hosts: all
+  become: true
+  tags: [netmon_node]
+  roles:
+    - role: netmon_node
+
 - name: Mac-Tweaks — Lid-close, T2-Kernel-Module (nur x86_64)
   hosts: mac
   become: true
