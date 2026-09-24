@@ -681,7 +681,7 @@ Every criterion must hold on **both** raspi5 and mba1:
 
 eBPF loads on mba1's BTF-less t2 kernel. No alerts fired. Metrics flow (285 connect series, 12 `ip_to_fqdn` series). Criteria 1, 4 and 5 hold. Still to record: criterion 2's full 24 h window, and criteria 3, 6 and 7. Rollout order after the go: mba2 (different t2 kernel), then raspi4 (4 GB RAM).
 
-**mba2 joins the gate on 2026-09-24** (amended 2026-09-24, owner decision, homelab#118). It runs t2 kernel 6.19.10 without BTF. It joins after the raspi5 and mba1 measurements at requests 256Mi and limits 1Gi. Those showed a steady working set of 318 / 350 MiB, startup peaks of 479 / 544 MiB under the 1Gi limit, and 0 restarts. raspi4 follows after a further 24 h of observation, as a separate change.
+**mba2 joins the gate on 2026-09-24** (amended 2026-09-24, owner decision, homelab#118). It runs t2 kernel 6.19.10 without BTF. It joins after the raspi5 and mba1 measurements of the 1Gi run (requests 256Mi, limits 1Gi, 2026-09-24 15:09–17:15 CEST, 2 h): working set 318 / 350 MiB steady, RSS 68 / 98 MiB, startup peak 479 / 544 MiB, 0 restarts. That run is later than the 768Mi table above, not a contradiction of it. Criterion 2's 24 h restart window is still running. raspi4 follows after a further 24 h of observation, as a separate change.
 
 **If criteria 1–3 fail on mba1/mba2**, run the agent on arm64 only (`nodeSelector: kubernetes.io/arch: arm64`) and use the §6.6 fallback on the Macs. **If they fail on the Pis too**, use the full fallback.
 
@@ -1168,7 +1168,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | Q1 | Cloudflare token creation, plus whether Firewall Services:Read is needed | resolved 2026-09-24: token created, Analytics:Read is enough (§4.2) | — |
 | Q2 | Free-plan availability of `clientIP`, `clientASNDescription` and `userAgent` (§4.2 probe) | resolved 2026-09-24: all available except `clientAsn`/`clientASNDescription` on request groups, which were dropped (§4.2) | — |
 | Q3 | `homelab` PR #109 merged (textfile collector) | **NM-3 (blocker)** | NM-3's PR does not duplicate #109 and targets `main`; #109 merges first, then NM-3 resolves the `additionalPrometheusRulesMap` conflict (one key, all entries) (amended 2026-09-23, NM-3) |
-| Q4 | Go for the coroot spike, then for the all-node rollout | **NM-2 (blocker)** | — (owner action) |
+| Q4 | Go for the coroot spike, then for the all-node rollout. The spike and mba2 go were given on 2026-09-24; raspi4 is pending | **NM-2 (blocker)** | — (owner action) |
 | Q5 | data-service dependency set — see the table below. It must be approved before NM-0 implementation starts. | **NM-0 (blocker: approval)** | — |
 | Q6 | Reuse the `furchert-ch` client (chosen) or a dedicated client | non-blocker | Reuse |
 | Q7 | Retention defaults (90/180/30 d) | non-blocker | As in §3.3 |
@@ -1209,7 +1209,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 |---|---|
 | ~~Cloudflare `settings` node shape; `maxPageSize` values~~ — verified by the 2026-09-24 probe (§4.2). Still open: `count` being sample-adjusted; `clientCountryName` being ISO-2; analytics ingest delay ≤ 2 min | NM-1 |
 | Spamhaus `drop_v4.json` exact NDJSON shape; FireHOL level1 containing private ranges | NM-1 |
-| coroot-node-agent footprint measured on raspi5 + mba1 (§6.3 spike result: RSS 69 / 105 MiB, working set 320 / 399 MiB, startup peak 410 / 702 MiB); still open: mba2, raspi4, and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
+| coroot-node-agent footprint measured on raspi5 + mba1 (§6.3 spike result: RSS 69 / 105 MiB, working set 320 / 399 MiB, startup peak 410 / 702 MiB; for the 1Gi run figures see §6.3); still open: mba2, raspi4, and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
 | ~~Whether the node-exporter scrape already adds a `node` label (possible `exported_node`)~~ — verified: it does not (`honorLabels: true`, §5.2) | NM-3 |
 | apt package name `conntrack`; sshd unit name `ssh`; UFW log rate limits on these nodes | NM-3 |
 | ~~Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping~~ — verified in auth-service PR #96: one event per form-login attempt, `DisabledException` → `locked` (§7.6) | NM-4 |

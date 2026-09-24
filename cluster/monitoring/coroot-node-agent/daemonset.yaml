@@ -10,8 +10,8 @@
 #
 # SPIKE GATE: the pod only schedules on nodes labelled
 # `homelab.furchert.ch/coroot-node-agent=enabled`. 41_monitoring.yml manages that label from
-# `coroot_node_agent_nodes` (raspi5 + mba1 since the 2026-09-24 spike); applying this manifest
-# alone starts no pod on an unlabelled node.
+# `coroot_node_agent_nodes` (raspi5 + mba1 + mba2 since 2026-09-24; list: coroot_node_agent_nodes
+# in 41_monitoring.yml); applying this manifest alone starts no pod on an unlabelled node.
 # Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
 apiVersion: apps/v1
 kind: DaemonSet

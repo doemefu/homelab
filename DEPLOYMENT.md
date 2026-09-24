@@ -939,9 +939,9 @@ in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgrou
 **The gate.** The DaemonSet only schedules on labelled nodes. `41_monitoring.yml` labels exactly
 the nodes in `coroot_node_agent_nodes` and **removes** the label from every other node, so the
 play variable is the source of truth: nodes missing from the list lose the label on the next run.
-The default is `[raspi5, mba1, mba2]` since 2026-09-24. raspi5 and mba1 ran the spike, and mba2 joined after their
-measurements. With an empty list
-(`-e '{"coroot_node_agent_nodes": []}'`) the DaemonSet runs 0 pods and neither rule fires.
+The default is `[raspi5, mba1, mba2]` since 2026-09-24. raspi5 and mba1 ran the spike, and mba2
+joined after their measurements. With an empty list (`-e '{"coroot_node_agent_nodes": []}'`) the
+DaemonSet runs 0 pods and neither rule fires.
 
 **Memory options (researched 2026-09-24 against the v1.35.10 source; none applied).** The startup
 peak comes from TLS uprobe setup. For every new process the agent opens its executable, or its
@@ -1019,7 +1019,7 @@ becomes available:
 5. **Add mba1** (no BTF): repeat steps 2–4 with `-e '{"coroot_node_agent_nodes": ["raspi5", "mba1"]}'`
    (or `kubectl label node mba1 …`). Every criterion must hold on both nodes.
 
-   **Result (2026-09-24, from 11:52):** raspi5 and mba1 are now the playbook default.
+   **Result (2026-09-24, from 11:52):** raspi5 and mba1 were the playbook default after the spike; mba2 joined later (step 6).
 
    | Measure | raspi5 | mba1 |
    |---|---|---|
@@ -1041,13 +1041,18 @@ becomes available:
    only 4 GB RAM and about 2 GB available.
 
    **mba2 joined on 2026-09-24** (t2 kernel 6.19.10, no BTF), with the owner's go on #118. It
-   followed the raspi5 and mba1 measurements with requests 256Mi and limits 1Gi:
+   followed the raspi5 and mba1 measurements of the 1Gi run: requests 256Mi and limits 1Gi,
+   2026-09-24 15:09–17:15 CEST (2 h). These are a later run than the 768Mi spike table in step 5
+   (320 / 399 MiB, band up to 420, peak 702 MiB), not a contradiction of it:
 
-   | Measure | raspi5 | mba1 |
+   | Measure (1Gi run, 2 h) | raspi5 | mba1 |
    |---|---|---|
    | Working set, steady | 318 MiB | 350 MiB |
+   | RSS, steady | 68 MiB | 98 MiB |
    | Startup peak, under the 1Gi limit | 479 MiB | 544 MiB |
    | Restarts | 0 | 0 |
+
+   Criterion 2's 24 h restart window (docs/060 §6.3) is still running.
 
    Expect a startup peak of about 500–700 MiB on mba2's t2 kernel, and watch for OOMKilled during
    the first 5 minutes. raspi4 follows after a further 24 h of observation, as a separate change.
