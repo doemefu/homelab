@@ -208,6 +208,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | raspi4 SSH tunnel | Cloudflare Tunnel ingress not yet configured for raspi4 | ⚠️ Open (see below) |
 | Off-cluster app-data backups + restore tests | Manual app-data dumps to the operator's Mac + restic datastore fix implemented via #64 — see [DEPLOYMENT.md](DEPLOYMENT.md) "App-data backups to the operator's Mac (#64)" | ✅ Resolved (#64) — first run 2026-09-08, restore tests (a) PostgreSQL + (b) PVC archive PASS (DEPLOYMENT.md restore test log) |
 | `KubeControllerManagerDown` / `KubeSchedulerDown` / `KubeProxyDown` | Fired as permanent critical false positives since install (2026-05-16) — k3s embeds these 3 components with zero exposed scrape targets | ✅ Resolved (#68) — scrape configs + alert rule groups disabled, see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions) |
+| k3s kine/SQLite compaction stall | Datastore grew to 5 GB on raspi5 (2026-09-23) after kine's online compactor stalled for ~5 days, degrading the API server | ⚠️ Mitigated, follow-ups open (#129) — offline compaction runbook + script added, see [DEPLOYMENT.md § k3s datastore (kine/SQLite) maintenance](DEPLOYMENT.md#k3s-datastore-kinesqlite-maintenance) |
 
 > **Note on raspi4 SSH**: The SSH tunnel for raspi4 (`ssh-raspi4.furchert.ch → 192.168.1.163:22`) is not yet configured in `40_platform.yml`. To add: include `- hostname: ssh-raspi4.furchert.ch, service: ssh://192.168.1.163:22` in the ingress list, then re-run `ansible-playbook infra/playbooks/40_platform.yml`.
 
@@ -324,6 +325,8 @@ docs/                        # Architecture and planning documents
 scripts/                     # Utility scripts
   smoke-test-litellm.sh       # LiteLLM health and endpoint verification
   check-helm-chart-versions.py # Weekly Helm chart freshness check (invoked by .github/workflows/helm-chart-freshness.yml)
+  kine-offline-compact.sh     # k3s kine/SQLite offline compaction runbook (#129) — see DEPLOYMENT.md
+  kine-offline-compact.py     # Offline compaction SQL, invoked by kine-offline-compact.sh
 
 .claude/                      # Claude agent configuration (workflow rules, agents, worklogs, memory)
 .github/                      # GitHub workflows
