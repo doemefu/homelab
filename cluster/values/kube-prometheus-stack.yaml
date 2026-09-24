@@ -215,20 +215,6 @@ additionalPrometheusRulesMap:
 # All rules are warning severity: the single Alertmanager route (injected by
 # 41_monitoring.yml) sends everything to Discord regardless, and the chart's inhibit
 # rules only suppress across an equal alertname, so these never mask each other.
-#
-# NM-3 node-script alerts (docs/060-network-monitoring.md §5.6, homelab#117, PR #132). The
-# metrics come from homelab-netmon-collect (role netmon_node) via the node-exporter textfile
-# collector, which homelab PR #109 enables. The rules evaluate to nothing until then.
-# One map key per producer, each rendering its own PrometheusRule:
-#   homelab-backups       PR #109 (backup alerts)
-#   homelab-netmon        PR #131 (NM-1, issue #116 — data-service collectors)
-#   homelab-netmon-node   PR #132 (NM-3, second entry below)
-#   homelab-netmon-egress PR #133 (NM-2 — coroot-node-agent)
-#
-# ⚠️ ONE top-level `additionalPrometheusRulesMap` key with all entries — never two keys
-# (a duplicate YAML key silently drops one map; yamllint key-duplicates catches it). PRs that
-# add an entry here must merge it into this map when resolving conflicts.
-additionalPrometheusRulesMap:
   homelab-backups:
     groups:
       - name: homelab-backups
@@ -326,6 +312,9 @@ additionalPrometheusRulesMap:
                 the `default` snapshot group and can repeat the #101 disk-pressure incident.
                 Re-apply infra/playbooks/30_longhorn.yml; runbook in DEPLOYMENT.md
                 "Backup alerting (#92)".
+  # NM-3 node-script alerts (docs/060-network-monitoring.md §5.6, homelab#117, PR #132). The
+  # metrics come from homelab-netmon-collect (role netmon_node) via the node-exporter
+  # textfile collector (PR #109). Same top-level map as the entries above.
   homelab-netmon-node:
     groups:
       - name: homelab-netmon-node
