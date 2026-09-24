@@ -47,7 +47,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 ### Provisioning & Configuration
 - **Provisioning**: Ansible (idempotent, self-discovering playbooks)
 - **Secrets Management**: SOPS + age (no plaintext secrets in git)
-- **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch)
+- **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch, data-service)
 
 ### Kubernetes Platform
 - **Distribution**: k3s v1.32.2+k3s1 (lightweight, embedded SQLite datastore on the single control plane, ServiceLB)
@@ -75,6 +75,9 @@ directly to the backing Service per the rules in 40_platform.yml.
   their chart scrape configs and alert rule groups are disabled in
   `cluster/values/kube-prometheus-stack.yaml` (see
   [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions))
+- **Network-monitoring alerting**: data-service is scraped via a ServiceMonitor; `NetmonCollectorStale`
+  and `NetmonDataServiceDown` (rule group `homelab-netmon`) alert to Discord — see
+  [DEPLOYMENT.md § data-service NM-1](DEPLOYMENT.md#data-service-nm-1-cloudflare-keys-scrape-and-alerts)
 
 ### External Access
 - **Tunnel Provider**: Cloudflare Tunnel (cloudflared v0.1.2 helm chart)
@@ -104,7 +107,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **Shared Infrastructure** | PostgreSQL 17, InfluxDB 2, Mosquitto 2 (+ exporters) | `infra/playbooks/50_apps_infra.yml`, `cluster/values/{postgresql,influxdb2}.yaml` |
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
-| **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch}` |
+| **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch/data-service | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch,data-service}` |
 | **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`, Prometheus TSDB excluded — #101) + manual app-data dumps to the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `scripts/backup-app-data.sh` |
 
 ---
@@ -173,6 +176,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | auth-service | `auth-service.apps.svc.cluster.local` | 8080 | Deployed, Flux-managed |
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | Deployed, Flux-managed |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Deployed, Flux-managed |
+| data-service | `data-service.apps.svc.cluster.local` | 8082 | Deployed, Flux-managed (no tunnel route) |
 
 ### Home Assistant
 
@@ -275,6 +279,7 @@ cluster/
       imageupdate.yaml         # ImageUpdateAutomation for write-back
     device-service/            # Same structure as auth-service
     furchert-ch/               # Same structure as auth-service
+    data-service/              # Same structure as auth-service
     n8n/                       # Ansible-managed manifests
       deployment.yaml
       service.yaml
@@ -335,7 +340,7 @@ This repository provides the **platform infrastructure**. Application services t
 | [homelab-auth-service](https://github.com/doemefu/homelab-auth-service) | JWT authentication service — user CRUD, token issuance, JWKS endpoint | Deployed | Flux-managed |
 | [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | Deployed | Flux-managed |
 | [furchert-ch](https://github.com/doemefu/furchert-ch) | Public site (Next.js, DE/EN) + OIDC-gated `/dashboard` | Deployed | Flux-managed |
-| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Analytical data plane (ADR 0002): network telemetry in Postgres DB `data_service` (schema `netmon`) + historical sensor data (InfluxDB); schedules live in device-service (ADR 0001) — contract `docs/060-network-monitoring.md` | Active (NM-0 bootstrap) | Flux-managed |
+| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Analytical data plane (ADR 0002): network telemetry in Postgres DB `data_service` (schema `netmon`) + historical sensor data (InfluxDB); schedules live in device-service (ADR 0001) — contract `docs/060-network-monitoring.md` | Deployed | Flux-managed |
 
 Architecture and migration planning documents are in `docs/`.
 

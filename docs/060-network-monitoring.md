@@ -1,10 +1,10 @@
 # 060 — Network Monitoring: Cross-Repo Contract
 
-> Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here once homelab PR #126 is merged. Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
+> Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here (since homelab PR #126). Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
 
-**Status:** Draft for implementation — 2026-09-23
+**Status:** NM-0 implemented 2026-09-23; NM-1 in implementation
 **Epic:** `doemefu/homelab#114` · **ADR:** [`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)
-**Canonical location:** this file (`infrastructure/docs/060-network-monitoring.md`). The parent workspace file `docs/060-network-monitoring.md` becomes a forwarder once `homelab#126` is merged, following the `052` precedent.
+**Canonical location:** this file (`infrastructure/docs/060-network-monitoring.md`). The parent workspace file `docs/060-network-monitoring.md` is a forwarder (since `homelab#126`), following the `052` precedent.
 **Conventions:** "(assumption)" = a design choice made here that the implementer may revisit in its plan. "(unverified)" = a fact not confirmed against a live system or upstream docs, which the implementing sub-project must confirm in its Phase 1.
 
 ---
@@ -330,7 +330,20 @@ The scheduler is Spring `@Scheduled` on the Boot-managed `ThreadPoolTaskSchedule
 
 **Failure rule.** A failure leaves `last_window_end` unchanged, increments `consecutive_failures` and stores `last_error`. The next run retries. HTTP 429 and 5xx get exponential backoff between runs, capped at 30 min.
 
-**Alerting.** A silent stall (for example, a Cloudflare token that has expired) shows up only in `/status` (§7.2) today, since there is no Prometheus rule watching collector freshness — unlike the node script and the coroot agent, which do have one (§5.6, §6.4). A `NetmonCollectorStale` rule on `netmon_collector_last_success_timestamp_seconds` is possible only if the owner approves Q9 in the §12 dependency table, which adds `micrometer-registry-prometheus`. If declined, the risk is that collector stalls stay visible only in the UI. `netmon_collector_last_success_timestamp_seconds{collector}` is NaN until the collector's first success; the `NetmonCollectorStale` rule must treat a NaN sample as "never succeeded" (e.g. `time() - g > <threshold> or g != g` — the exact expression is NM-1's job, noted in §5.6/§6.4 style where the rule is specified) (amended 2026-09-23, NM-0: data-service PR #18).
+**Alerting.** A silent stall (for example, a Cloudflare token that has expired) shows up only in `/status` (§7.2) today, since there is no Prometheus rule watching collector freshness — unlike the node script and the coroot agent, which do have one (§5.6, §6.4). Until NM-1's infrastructure child is rolled out, that stays true: collector stalls are visible only in the UI. Q9 was approved on 2026-09-23. `micrometer-registry-prometheus` and `/actuator/prometheus` shipped with NM-0 (`homelab-data-service#13`, PR #18). The `ServiceMonitor` and the `NetmonCollectorStale` rule ship with NM-1's infrastructure child (`homelab#116`, PR #131) (amended 2026-09-24, NM-1: homelab#116). `netmon_collector_last_success_timestamp_seconds{collector}` is NaN until the collector's first success; the `NetmonCollectorStale` rule must treat a NaN sample as "never succeeded" (e.g. `time() - g > <threshold> or g != g` — the exact expression is NM-1's job, noted in §5.6/§6.4 style where the rule is specified) (amended 2026-09-23, NM-0: data-service PR #18).
+
+**Freshness rules (NM-1, homelab#116).** These live in `additionalPrometheusRulesMap.homelab-netmon`, NM-1's own key (NM-3 and NM-2 use separate keys, see §5.6/§6.4). The scrape job is `data-service`, from the ServiceMonitor `monitoring/data-service` in `41_monitoring.yml`.
+
+| Alert | Expr (per class, `T` = threshold) | For | Severity |
+|---|---|---|---|
+| `NetmonCollectorStale` | `(time() - g{sel} > T) or (g{sel} != g{sel} and on(namespace, pod) (time() - kube_pod_start_time{namespace="apps"} > T))` | 10m | warning |
+| `NetmonDataServiceDown` | `up{job="data-service"} == 0 or absent(up{job="data-service"})` | 10m | warning |
+
+- `g` is `netmon_collector_last_success_timestamp_seconds`.
+- The classes, each with a static label `threshold`, are: `26h` for `blocklists` and `retention`; `3h` for `egress`; `90m` for `lan` and `reputation`; `15m` for every other collector, as a catch-all.
+- The NaN branch waits until the Pod is older than `T`, so a fresh Pod does not alert on a daily collector that has not reached its slot yet. Pod age comes from kube-state-metrics' `kube_pod_start_time`. The JVM's `process_start_time_seconds` would reset on every in-Pod container restart and restart the grace period.
+- **Contract for data-service:** a disabled collector (`netmon.collectors.<name>.enabled=false`) must not export the gauge. A NaN that never changes would otherwise fire permanently.
+- (amended 2026-09-23, NM-1: homelab#116)
 
 ### 4.2 Cloudflare GraphQL (NM-1)
 
@@ -1085,11 +1098,11 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | Sub-project | homelab | homelab-data-service | homelab-auth-service | furchert-ch |
 |---|---|---|---|---|
 | Epic | #114 | — | — | — |
-| NM-0 | #TBD | #TBD | #TBD | — |
-| NM-1 | #TBD (secret) | #TBD | — | #TBD |
-| NM-3 | #TBD | #TBD | — | #TBD |
-| NM-2 | #TBD | #TBD | — | #TBD |
-| NM-4 | #TBD (secrets) | #TBD | #TBD | #TBD |
+| NM-0 | #115 | #13 | #93 | — |
+| NM-1 | #116 (secret, scrape, alerts) | #14 | — | #61 |
+| NM-3 | #117 | #15 | — | #62 |
+| NM-2 | #118 | #16 | — | #63 |
+| NM-4 | none yet (secrets) | #17 | #94 | #64 |
 
 ---
 
@@ -1107,7 +1120,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | Q6 | Reuse the `furchert-ch` client (chosen) or a dedicated client | non-blocker | Reuse |
 | Q7 | Retention defaults (90/180/30 d) | non-blocker | As in §3.3 |
 | Q8 | AbuseIPDB key approval | non-blocker (collector disabled) | Disabled |
-| Q9 | Micrometer/Prometheus metrics for data-service: `/actuator/prometheus` + a `ServiceMonitor` + a `NetmonCollectorStale` rule on `netmon_collector_last_success_timestamp_seconds` (§4.1). Needs the new `micrometer-registry-prometheus` dependency (below) and aligns with `auth-service#80`. **Recommended by the main session.** | **NM-0 (blocker: approval, same table below)** | `/status` endpoint only; collector stalls then stay visible only in the UI, not alerted |
+| Q9 | Micrometer/Prometheus metrics for data-service: `/actuator/prometheus` + a `ServiceMonitor` + a `NetmonCollectorStale` rule on `netmon_collector_last_success_timestamp_seconds` (§4.1). Needs the new `micrometer-registry-prometheus` dependency (below) and aligns with `auth-service#80`. **Approved 2026-09-23.** The dependency and the endpoint shipped with NM-0 (`homelab-data-service#13`, PR #18). The `ServiceMonitor` and the rules ship with NM-1 infra (`homelab#116`, PR #131). | resolved (NM-0 approval) | Until the NM-1 infra rollout: `/status` endpoint only, so collector stalls stay visible only in the UI, not alerted |
 | Q10 | NetworkPolicy follow-up (§10) | non-blocker | Separate issue |
 | Q11 | `nf_conntrack_acct=1` sysctl, needed only for the §6.6 fallback if the NM-2 coroot spike fails | non-blocker (blocks only the fallback path) | Not set; NM-2 stays on coroot-node-agent |
 
