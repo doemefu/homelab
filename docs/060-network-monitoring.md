@@ -86,7 +86,7 @@ Consequences, which bind every section below:
 | Prometheus | monitoring | `kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090` | data-service (instant queries) |
 | auth-service | apps | `auth-service.apps.svc.cluster.local:8080` | data-service (JWKS, token, login events), furchert-ch (token) |
 | Cloudflare GraphQL | external | `https://api.cloudflare.com/client/v4/graphql` | data-service |
-| coroot-node-agent | monitoring | pod `:80/metrics` (unverified default port) | Prometheus |
+| coroot-node-agent | monitoring | pod `:80/metrics` (v1.35.10 default `0.0.0.0:80`, verified in source) | Prometheus |
 | node-exporter | monitoring | host `:9100` | Prometheus |
 
 data-service has **no** public tunnel route. It is not added to `cf_ingress_body`.
@@ -489,7 +489,7 @@ group by (node, container_id, destination, actual_destination) (last_over_time(c
 
 - **Row set:** the union of the keys from the first four queries **plus the sixth**, capped at 2 000 rows per window by bytes_sent then connects. Missing values are 0. The sixth query exists because a counter series that first appears inside the window has exactly one sample, so `increase()` returns nothing for it — without this query, a brand-new single-connect destination would be entirely missing from the row set for its first hour. **First-window counts for such a destination are a lower bound**, since `increase()` cannot see accumulation before the counter's first sample.
 - **FQDN:** joined on `destination_ip = ip`. If an IP maps to several FQDNs, the lexicographically first one is used.
-- **Metric names:** all coroot names are unverified until the NM-2 spike. The spike records the real names and labels, and this section is updated in the same PR.
+- **Metric names:** verified against the v1.35.10 source (`metrics/metrics.go`). Every container metric also carries `container_id` and `app_id`; the agent's registry adds `machine_id` and `system_uuid` to **every** series (including `ip_to_fqdn`), and the ServiceMonitor drops both with `labeldrop` because they are constant per node and `node` (added by the ServiceMonitor) already identifies it (amended 2026-09-23, NM-2 prep review). `container_net_tcp_failed_connects_total` has **no** `actual_destination` label (only `destination`), so the fourth query's `actual_destination` group is always empty and failed connects join on `destination` only. `container_id` for pods is `/k8s/<namespace>/<pod>/<container>` (`containers/registry.go`). The spike confirms these against live data and records any difference here (amended 2026-09-23, NM-2 prep: homelab PR for #118).
 
 ---
 
@@ -594,17 +594,18 @@ NM-3's rules go under `additionalPrometheusRulesMap.homelab-netmon-node` (group 
 | Kind and namespace | `DaemonSet/coroot-node-agent` in `monitoring`. It is a hand-written manifest, applied by `41_monitoring.yml` (or the NM-2 plan's choice) from `cluster/monitoring/coroot-node-agent/`. It uses no Helm chart, because the chart is stale at 0.2.21. |
 | Image | `ghcr.io/coroot/coroot-node-agent:1.35.10@sha256:<multi-arch index digest>`. The digest is resolved at implementation. No helm-tracking entry is needed. The image version is tracked in the manifest comment, following the cloudflared precedent. |
 | Pod security | `hostPID: true`, container `securityContext.privileged: true`. No `hostNetwork` (unverified; confirm against upstream). |
-| Host mounts (unverified, from docs.coroot.com/metrics/node-agent) | `/sys/fs/cgroup` → `/host/sys/fs/cgroup` (ro), `/sys/kernel/tracing` → `/sys/kernel/tracing`, `/sys/kernel/debug` → `/sys/kernel/debug` |
-| Args (unverified flag names) | `--cgroupfs-root=/host/sys/fs/cgroup`, `--listen=0.0.0.0:80`, with no collector endpoint, so it exposes metrics only. Disable log parsing, pinger and L7 tracing if flags exist. |
-| Tolerations | `operator: Exists`, so it runs on all 4 nodes |
-| Resources (proposal; the spike confirms) | requests `cpu: 50m`, `memory: 128Mi`; limits `cpu: 300m`, `memory: 256Mi` |
+| Host mounts (verified against coroot-operator v1.10.2 `controller/node_agent.go`) | `/sys/fs/cgroup` → `/host/sys/fs/cgroup` (ro), `/sys/kernel/tracing` → `/sys/kernel/tracing`, `/sys/kernel/debug` → `/sys/kernel/debug`, plus an `emptyDir` at `/tmp` (default `--wal-dir`). The containerd socket is reached through `/proc/1/root` (hostPID); `/run/k3s/containerd/containerd.sock` is in the agent's built-in probe list. No `hostNetwork` (the operator does not set it either). |
+| Args (verified in `flags/flags.go`, `flags/flags_linux.go` at v1.35.10) | `--cgroupfs-root=/host/sys/fs/cgroup`, `--listen=0.0.0.0:80`, `--disable-log-parsing`, `--disable-pinger`, `--disable-gpu-monitoring`; no `--collector-endpoint`/`--metrics-endpoint` (either one moves the listener to `127.0.0.1:10300` and pushes data out). **L7 tracing stays on:** `ip_to_fqdn` is filled from DNS responses seen by the L7 tracer, so `--disable-l7-tracing` would empty the FQDN mapping. The agent never calls the Kubernetes API, so `automountServiceAccountToken: false`. |
+| Tolerations and gate | `operator: Exists`. Scheduling is gated by `nodeSelector` `homelab.furchert.ch/coroot-node-agent: "enabled"`; `41_monitoring.yml` sets that label on the nodes in `coroot_node_agent_nodes` (default `[]`) and removes it elsewhere, so the spike and the all-node rollout are playbook runs, not manifest edits |
+| Resources (proposal; the spike confirms) | requests `cpu: 50m`, `memory: 128Mi`; limits `cpu: 300m`, `memory: 384Mi` (raised from 256Mi so an OOMKill cannot mask the §6.3 criterion-5 measurement) |
 | Labels | `app.kubernetes.io/name: coroot-node-agent` |
+| NetworkPolicy | `networkpolicy.yaml`: ingress to the agent pods only from the kube-prometheus-stack Prometheus pods (`app.kubernetes.io/name: prometheus`, `operator.prometheus.io/name: kube-prometheus-stack-prometheus`, verified live) on TCP 80. The agent serves `/metrics` and Go's `/debug/pprof/*` unauthenticated from a privileged hostPID pod; pprof shares the default mux and has no disable flag at v1.35.10. Node-local traffic is always admitted by Kubernetes, so host processes and hostNetwork pods on an agent node (Home Assistant has no node pin) still reach pprof. Accepting that, or adding a `/metrics`-only proxy sidecar (a new pinned image, needs owner approval), is an owner decision before the all-node rollout (amended 2026-09-24, PR #133 review). Egress is not restricted (amended 2026-09-23, NM-2 prep review). |
 
 ### 6.2 Scrape
 
-- **Objects:** a headless `Service` (port `metrics` 80) plus a `ServiceMonitor` labelled `release: kube-prometheus-stack`, which matches the existing ServiceMonitors (verify against `50_apps_infra.yml`). The scrape interval is 30 s.
+- **Objects:** a headless `Service` (port `metrics` 80) plus a `ServiceMonitor` labelled `release: kube-prometheus-stack`, which matches the live Prometheus `serviceMonitorSelector` (verified 2026-09-23). The scrape interval is 30 s.
 - **`relabelings`:** `__meta_kubernetes_pod_node_name` → `node`.
-- **`sampleLimit`: 10000 per target.** A scrape that exceeds it fails, which fires the down alert and acts as a hard cardinality stop.
+- **`sampleLimit`: 10000 per target**, counted after `metricRelabelings`. A scrape that exceeds it fails, which fires the down alert and acts as a hard cardinality stop.
 - **`metricRelabelings` (keep-list):**
 
 ```yaml
@@ -627,6 +628,17 @@ grep -E 'CONFIG_BPF_SYSCALL=|CONFIG_BPF_JIT=|CONFIG_DEBUG_INFO_BTF=' /boot/confi
 mount | grep -E 'tracefs|debugfs'; sysctl net.netfilter.nf_conntrack_acct
 ```
 
+**Results** (2026-09-23, read-only over SSH) (amended 2026-09-23, NM-2 prep: homelab PR for #118):
+
+| Node | Arch | Kernel | `/sys/kernel/btf/vmlinux` | BPF_SYSCALL / BPF_JIT | DEBUG_INFO_BTF | NET_CLS_BPF / NET_SCH_INGRESS | tracefs / debugfs | lockdown | `nf_conntrack_acct` | CPUs | RAM total / avail (MiB) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| raspi5 | aarch64 | 6.8.0-1053-raspi | present | y / y | y (+ modules) | m / m | mounted / mounted | none | 0 | 4 | 7937 / 5007 |
+| raspi4 | aarch64 | 6.8.0-1047-raspi | present | y / y | y (+ modules) | m / m | mounted / mounted | none | 0 | 4 | 3784 / 2127 |
+| mba1 | x86_64 | 6.12.79-1-t2-noble | **absent** | y / y | no (`DEBUG_INFO_NONE=y`) | m / m | mounted / mounted | none | 0 | 8 | 7750 / 4277 |
+| mba2 | x86_64 | 6.19.10-2-t2-noble | **absent** | y / y | no (`DEBUG_INFO_NONE=y`) | m / m | mounted / mounted | none | 0 | 4 | 7808 / 5320 |
+
+Criterion 1 holds on all four nodes. mba1 and mba2 run different t2 kernels, so a pass on mba1 does not automatically cover mba2. Prometheus baseline for criterion 6: `prometheus_tsdb_head_series` = 108 985.
+
 Every criterion must hold on **both** raspi5 and mba1:
 
 | # | Criterion |
@@ -648,21 +660,28 @@ These go in `additionalPrometheusRulesMap.homelab-netmon-egress` (NM-2's own key
 | Alert | Expr | For | Severity |
 |---|---|---|---|
 | `NetmonNewExternalDestination` | see below | 0m | info |
-| `CorootNodeAgentDown` | `up{job=~".*coroot-node-agent.*"} == 0 or absent(up{job=~".*coroot-node-agent.*"})` | 10m | warning |
+| `CorootNodeAgentDown` | `absent(kube_daemonset_status_desired_number_scheduled{namespace="monitoring", daemonset="coroot-node-agent"}) or max(kube_daemonset_status_number_available{…}) > (count(up{job="coroot-node-agent"} == 1) or vector(0))` | 10m | warning |
 
 `NetmonNodeScriptStale` and `NetmonSeriesTruncated` cover the NM-3 node script, not coroot, and are defined in §5.6.
 
 ```promql
-count by (container_id) (
-  group by (container_id, actual_destination) (container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"})
-  unless on (container_id, actual_destination)
-  group by (container_id, actual_destination) (last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m))
+count by (workload) (
+  group by (workload, actual_destination) (<W>(container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"}))
+  unless on (workload, actual_destination)
+  group by (workload, actual_destination) (<W>(last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m)))
 )
+# <W>(v) = label_replace(label_replace(v, "workload", "$1", "container_id", "(.*)"),
+#            "workload", "$1/$2/$3", "container_id",
+#            "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)")
 ```
+
+**Why `workload`, not `container_id`** (amended 2026-09-23, NM-2 prep): `container_id` contains the pod name, which changes on every Deployment rollout. Grouped by `container_id`, every Flux image update would re-report all of a workload's known destinations. `<W>` strips the ReplicaSet hash and pod suffix (`/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm` → `apps/litellm/litellm`), the same rollout-stable identity as the `coalesce(workload, container_id)` that `is_new` uses in §3.3, in a different string format (`<ns>/<owner>/<container>` here, the bare owner name in §3.3) (amended 2026-09-23, NM-2 prep review). Pods whose names do not match (StatefulSets, systemd units) keep the raw `container_id`. The exact expression, with promtool unit tests for the rollout case, is in `cluster/values/kube-prometheus-stack.yaml`.
+
+**Why this `CorootNodeAgentDown` form** (amended 2026-09-23, NM-2 prep): the original `absent(up{…})` fires permanently while the spike gate is closed (DaemonSet present, 0 pods, 0 targets). The new form fires when the DaemonSet is missing, or when fewer agents are scraped successfully than are available (Service/ServiceMonitor missing, selector drift, `sampleLimit` exceeded). Crash loops, stuck rollouts and plain scrape failures are already covered by the chart's `KubePodCrashLooping`, `KubeDaemonSetRolloutStuck` and `TargetDown`, following PR #109's no-duplicate-alert rule.
 
 The expression alerts on **series presence**, not on `increase() > 0`: a brand-new destination's counter has only one sample inside a 15 m window, so `increase()` over that window would return nothing and the alert would never fire for exactly the case it exists to catch. `group by (...) (metric)` turns the raw series into a 1-valued presence indicator regardless of its counter value, and the `unless` compares that against the same presence check over the prior day.
 
-- **Labels and routing:** the alert is labelled `container_id`, with the value = the number of new destinations, and routes to the existing Discord receiver.
+- **Labels and routing:** the alert is labelled `workload`, with the value = the number of new destinations. It is `severity: info` and carries `namespace: monitoring`. The chart's `InfoInhibitor` normally suppresses `info` alerts unless a warning/critical alert fires in the same namespace, so it normally shows in Alertmanager and Prometheus without reaching Discord. The rule group is evaluated every `5m` instead of the global 30 s, because its 1-day `last_over_time` is the most expensive query of the group (amended 2026-09-23, NM-2 prep review). Raising it to `warning` is an owner decision after the spike and the noise tuning below (amended 2026-09-23, NM-2 prep).
 - **Noise:** it is expected to be noisy for CDN-rotating destinations. Tuning, such as grouping by /24 or an FQDN suffix, is an NM-2 Phase-5 follow-up. It is not an allowlist.
 
 ### 6.5 Docs
@@ -1064,7 +1083,7 @@ auth-service is Flux-auto-deployed on every merge to `main`, and its Spring conf
   - the cluster-internal auth-service, Prometheus and PostgreSQL.
 
   Blocklists are fetched **only** by data-service.
-- **Privileged DaemonSet.** coroot-node-agent runs privileged with hostPID in `monitoring`. It was explicitly approved by the owner, and the rollout needs a go after the spike.
+- **Privileged DaemonSet.** coroot-node-agent runs privileged with hostPID in `monitoring`. It was explicitly approved by the owner, and the rollout needs a go after the spike. A NetworkPolicy limits pod-network ingress to its unauthenticated `:80` (`/metrics`, `/debug/pprof/*`) to Prometheus; node-local sources, including hostNetwork pods such as Home Assistant, stay able to reach pprof (§6.1) (amended 2026-09-24, PR #133 review); cluster-wide NetworkPolicies remain the follow-up `homelab#127` (amended 2026-09-23, NM-2 prep review).
 - **HMAC key.** The key lives in auth-service only. data-service stores only HMACs, and the API exposes only an 8-hex-character prefix.
 
 ---
@@ -1144,13 +1163,11 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 |---|---|
 | Cloudflare `settings` node shape; `count` being sample-adjusted; `clientCountryName` being ISO-2; `maxPageSize` values; analytics ingest delay ≤ 2 min | NM-1 |
 | Spamhaus `drop_v4.json` exact NDJSON shape; FireHOL level1 containing private ranges | NM-1 |
-| coroot-node-agent flags, mounts, default port 80, metric and label names, `container_id` format, arm64 footprint | NM-2 |
-| Kernel versions and `CONFIG_BPF_SYSCALL` on t2linux (mba1/mba2) and linux-raspi | NM-2 |
+| coroot-node-agent arm64/amd64 footprint and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
 | ~~Whether the node-exporter scrape already adds a `node` label (possible `exported_node`)~~ — verified: it does not (`honorLabels: true`, §5.2) | NM-3 |
 | apt package name `conntrack`; sshd unit name `ssh`; UFW log rate limits on these nodes | NM-3 |
 | Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping | NM-4 |
 | `StaticClientSeeder` accepting a client with no redirect URIs | NM-4 |
-| ServiceMonitor selector label `release: kube-prometheus-stack` | NM-2 |
 
 **Decided during NM-0 implementation** (`homelab-data-service` PR #18, 2026-09-23)
 

@@ -1,0 +1,18 @@
+# Headless Service so the ServiceMonitor can discover one endpoint per agent pod.
+# Nothing else should call it: the agent's /metrics is only scraped by Prometheus.
+apiVersion: v1
+kind: Service
+metadata:
+  name: coroot-node-agent
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: coroot-node-agent
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: coroot-node-agent
+  ports:
+    - name: metrics
+      port: 80
+      targetPort: metrics
+      protocol: TCP

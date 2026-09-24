@@ -252,15 +252,15 @@ unimplemented), so these bumps are manual:
    real run.
 
 ### Helm Chart Version Tracking (Automated Freshness Check)
-- Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch, data-service) stay tag-pinned via `ImagePolicy`/Flux image automation instead
+- Container images: Pinned tags for every image; the 9 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch, data-service) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
 - GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
 - CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction
 
 ### Digest-Pinned Platform Images
 
-The 8 platform images (open-webui, litellm, n8n, cloudflared, pgvector,
-postgres-exporter, mosquitto, mosquitto-exporter) are pinned by **tag
+The 9 platform images (open-webui, litellm, n8n, cloudflared, pgvector,
+postgres-exporter, mosquitto, mosquitto-exporter, coroot-node-agent) are pinned by **tag
 and digest** (`repo:tag@sha256:...`), not tag alone — a tag can be
 repointed upstream/registry-side without changing what's in git, but a
 digest can't. Each pin's comment records the multi-arch **index**
@@ -271,6 +271,8 @@ line's index digest is the actual source of truth).
 
 **Locations:**
 - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml` — `image:` field
+- `cluster/monitoring/coroot-node-agent/daemonset.yaml` — `image:` field (in the
+  CI kubeconform/conftest loops like the three above)
 - `cluster/values/cloudflared.yaml` — `image.tag` (see that file's own
   comment for why the digest lives in `tag` rather than a dedicated field)
 - `infra/playbooks/50_apps_infra.yml` — `image:` field for pgvector,

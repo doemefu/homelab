@@ -28,7 +28,7 @@ This document defines all **integration interfaces** this infrastructure platfor
 |-----------|-------|---------------------|------------|
 | `platform` | Ansible | cert-manager, cloudflared, Traefik | Any app workloads |
 | `longhorn-system` | Helm (k3s) | Longhorn components only | Any non-Longhorn workloads |
-| `monitoring` | Ansible/Helm | Prometheus, Grafana, Alertmanager, **ServiceMonitors for all namespaces** | App workloads, non-observability resources |
+| `monitoring` | Ansible/Helm | Prometheus, Grafana, Alertmanager, **ServiceMonitors for all namespaces**, coroot-node-agent (approved privileged + hostPID DaemonSet, NM-2) | App workloads, non-observability resources, other privileged workloads without approval |
 | `apps` | Mixed | Application workloads, shared infrastructure (PostgreSQL, InfluxDB, Mosquitto, n8n, LiteLLM) | Cluster-admin ServiceAccounts, workloads without resource limits |
 | `homeassistant` | Ansible/Helm | Home Assistant only | Any non-HA workloads |
 | `flux-system` | Flux CD | Flux controllers only | Any application workloads |
@@ -458,6 +458,23 @@ To integrate your app with Prometheus monitoring:
 | node-exporter | Node metrics | 9100 | `monitoring` | kube-prometheus-stack subchart |
 | postgres-exporter | PostgreSQL metrics | 9187 | `apps` | Sidecar in `50_apps_infra.yml` |
 | mosquitto-exporter | MQTT broker metrics | 9234 | `apps` | Separate Deployment in `50_apps_infra.yml` |
+| coroot-node-agent | eBPF per-container TCP egress/east-west metrics | 80 (pod) | `monitoring` | DaemonSet in `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml`; runs only on nodes in the spike gate (`coroot_node_agent_nodes`) |
+
+**coroot-node-agent metrics contract** (NM-2, `docs/060-network-monitoring.md` §6.2). The ServiceMonitor keeps only these
+series and adds a `node` label (from the pod's node); everything else the agent exposes is dropped at scrape time:
+
+| Metric | Labels (besides `container_id`, `app_id`, `node`) | Meaning |
+|--------|------------------------|---------|
+| `container_net_tcp_successful_connects_total` | `destination`, `actual_destination` | Outbound TCP connects |
+| `container_net_tcp_failed_connects_total` | `destination` | Failed outbound connects (no `actual_destination`) |
+| `container_net_tcp_active_connections` | `destination`, `actual_destination` | Open outbound connections |
+| `container_net_tcp_bytes_sent_total` / `_bytes_received_total` | `destination`, `actual_destination` | Bytes per peer |
+| `ip_to_fqdn` | `ip`, `fqdn` (no `container_id`) | IP-to-name mapping from DNS answers the containers received |
+
+The agent also adds `machine_id` and `system_uuid` to every series; the ServiceMonitor drops both (`labeldrop`), since `node` identifies the host. `container_id` is `/k8s/<namespace>/<pod>/<container>` for pods. `destination` is the `ip:port` the container dialled
+(e.g. a ClusterIP); `actual_destination` is the peer after NAT. Scrape `sampleLimit` is 10 000 series per agent. A NetworkPolicy admits only the Prometheus pods to the agent's port 80. Consumer:
+data-service's egress collector (`docs/060` §4.6). Alerts: `NetmonNewExternalDestination` and `CorootNodeAgentDown` in
+`additionalPrometheusRulesMap.homelab-netmon-egress` — see `DEPLOYMENT.md` "coroot-node-agent (NM-2)".
 
 **App ServiceMonitors and alert rules**
 

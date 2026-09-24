@@ -1,0 +1,42 @@
+# Scrape contract: docs/060-network-monitoring.md §6.2.
+# The keep-list below is the only thing standing between the agent's full metric set
+# (L7, CPU, memory, disk, per-destination latency, DNS requests, ...) and Prometheus.
+# Adding a metric back needs a docs/060 change first (a consumer, and a cardinality estimate).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: coroot-node-agent
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: coroot-node-agent
+    release: kube-prometheus-stack  # matches the Prometheus serviceMonitorSelector
+spec:
+  namespaceSelector:
+    matchNames:
+      - monitoring
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: coroot-node-agent
+  # Hard cardinality stop, counted after metricRelabelings: a scrape above this fails (up == 0)
+  # instead of flooding the TSDB,
+  # and CorootNodeAgentDown / the chart's TargetDown fire.
+  sampleLimit: 10000
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 20s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+          action: replace
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          # One regex; the trailing backslash is a YAML line continuation (no space inserted).
+          regex: "container_net_tcp_(successful_connects|failed_connects|bytes_sent|bytes_received)_total|\
+            container_net_tcp_active_connections|ip_to_fqdn"
+          action: keep
+        # machine_id and system_uuid are added to every series by the agent's registry
+        # (main.go) and are constant per node; the `node` label above already identifies it.
+        - regex: machine_id|system_uuid
+          action: labeldrop
