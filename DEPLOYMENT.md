@@ -1361,6 +1361,52 @@ auth-service then logs the "disabled" WARN and answers 503. The seeded `data-ser
 
 **Rotation.** `auth_service_login_event_hmac_key`: rotating it breaks HMAC continuity for login events already stored in data-service, so avoid it. `auth_service_data_service_client_secret`: auth-service seeds a client only once and never updates it, so a new SOPS value plus playbook 59 is not enough. Also update the `data-service` row in `oauth2_registered_client` (see homelab-auth-service `INTERFACES.md` §6), then restart auth-service and data-service.
 
+### NM-1 follow-up: AbuseIPDB key (optional)
+
+The `reputation` collector in data-service checks suspicious public IPs against AbuseIPDB (`docs/060-network-monitoring.md` §4.5). It stays off until the key exists. With the key, it runs every 30 min at :00 and :30. It checks at most 10 IPs per run and 200 per UTC day, which is well under the free plan's 1 000 checks per day.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variable (owner, optional) | `infra/inventory/group_vars/all.sops.yml` | `data_service_abuseipdb_key` |
+| data-service key | `59_app_services.yml` → `apps/data-service-secrets` | `abuseipdb-api-key` (env `ABUSEIPDB_API_KEY`) |
+
+Without the variable, playbook 59 skips the key and prints a note. If the variable is set but empty, the playbook fails.
+
+#### Enable order
+
+1. Owner: create a free account at abuseipdb.com, then create an API key (Account → API).
+2. Owner: `sops infra/inventory/group_vars/all.sops.yml` and add `data_service_abuseipdb_key: "<key>"`.
+3. Commit the encrypted file on a branch, open a PR and merge it.
+4. Run playbook 59 **twice**. The first run adds the key. The second run must report no change for the Secret tasks.
+5. Restart data-service by deleting its pod (see the Flux note in "Enable order (NM-4)"). `ABUSEIPDB_API_KEY` is read at pod start, and `rollout restart` is reverted by Flux.
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret tasks
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect abuseipdb-api-key next to the existing keys
+kubectl -n apps delete pod -l app=data-service
+kubectl -n apps get pods -l app=data-service          # the pod age must be new
+```
+
+#### Verify
+
+After the next :00 or :30 run:
+- The Prometheus series `netmon_collector_last_success_timestamp_seconds{collector="reputation"}` exists. data-service registers it only when the key is set, so it is NaN until the first success.
+- `GET /api/netmon/status` lists `reputation` with `enabled: true` and without a `credentials` error. You can see this in furchert-ch `/dashboard/network`.
+
+A run with no candidate IPs also counts as a success. A `credentials` error means AbuseIPDB rejected the key.
+
+**Turning it off.** Removing the SOPS variable does not remove the key, because playbook 59 then only skips it. Remove the key by hand and restart data-service:
+
+```bash
+kubectl -n apps patch secret data-service-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/abuseipdb-api-key"}]'
+kubectl -n apps delete pod -l app=data-service
+```
+
+The new pod exports no `reputation` gauge, so `NetmonCollectorStale` does not fire for it.
+
 ---
 
 ### Network monitoring: node LAN metrics (NM-3)
