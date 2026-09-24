@@ -53,7 +53,8 @@
 #       auth-service only (homelab-auth-secrets/login-event-hmac-key). Rotating it breaks
 #       HMAC continuity for events already stored in data-service.
 #   Set both or neither. With neither, the play skips these keys and auth-service keeps
-#   login-event capture off. With only one, the play fails.
+#   login-event capture off. With only one, the play fails. Removing both later does NOT
+#   delete keys created by an earlier run — see DEPLOYMENT.md "Turning NM-4 off".
 #
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
@@ -127,7 +128,8 @@
       ansible.builtin.debug:
         msg: >-
           auth_service_data_service_client_secret and auth_service_login_event_hmac_key are not set:
-          skipping the NM-4 login-event Secret keys. auth-service keeps login-event capture off.
+          skipping the NM-4 login-event Secret keys. Keys created by an earlier run are NOT removed
+          (see DEPLOYMENT.md "Turning NM-4 off"); if none exist, auth-service keeps login-event capture off.
       when: not auth_service_login_events_configured
       delegate_to: localhost
 

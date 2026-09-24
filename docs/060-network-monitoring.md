@@ -1029,7 +1029,7 @@ Secrets are provisioned by the owner. Implementers add only variable **names**, 
 | `data-service-secrets` | `db-username` (literal `data_service`), `db-password`, `cloudflare-api-token`, `cloudflare-zone-id`, `abuseipdb-api-key` (only when defined), `auth-client-secret` | NM-0 creates it with the DB keys. NM-1 and NM-4 add keys. |
 | `homelab-auth-secrets` (existing) | add `data-service-client-secret: "{noop}<value>"` and `login-event-hmac-key` | NM-4 |
 
-**NM-4 keys are optional in playbook 59.** The two NM-4 SOPS variables go together. With neither set, playbook 59 skips `data-service-client-secret`, `login-event-hmac-key` and `auth-client-secret`, so it keeps working before the owner adds the values. With only one set, a short HMAC key or a client secret that already starts with `{`, the playbook fails. The keys are added by separate tasks that patch the existing Secrets (amended 2026-09-24, NM-4 infra: homelab#134).
+**NM-4 keys are optional in playbook 59.** The two NM-4 SOPS variables go together. With neither set, playbook 59 skips `data-service-client-secret`, `login-event-hmac-key` and `auth-client-secret`, so it keeps working before the owner adds the values. It does not delete keys that an earlier run created; turning NM-4 off again is a manual step (infra `DEPLOYMENT.md`). With only one set, a short HMAC key or a client secret that already starts with `{`, the playbook fails. The keys are added by separate tasks that patch the existing Secrets (amended 2026-09-24, NM-4 infra: homelab#134).
 
 **Postgres tasks.** These go in `59_app_services.yml` and mirror the LiteLLM block (`:290-359`):
 

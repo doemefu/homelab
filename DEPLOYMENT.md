@@ -24,7 +24,7 @@ Before starting any deployment or upgrade, verify:
 - [ ] `ansible-lint` installed
 - [ ] `kubectl` installed and configured (`export KUBECONFIG=~/.kube/homelab.yaml`)
 - [ ] `helm@3` installed (NOT Helm 4 — see [CONTRIBUTING.md](CONTRIBUTING.md))
-- [ ] helm-diff plugin installed, pinned: `helm plugin install https://github.com/databus23/helm-diff --version v3.15.13`. Without it, `kubernetes.core.helm` cannot diff a release and reports `changed` on every run, even when nothing changed (homelab#66).
+- [ ] helm-diff plugin installed, pinned: `helm plugin install https://github.com/databus23/helm-diff --version v3.15.13`. Without it, `kubernetes.core.helm` warns and falls back to a values comparison. That fallback compares the release only with the values file, so the InfluxDB task in `50_apps_infra.yml` (values file plus inline SOPS values) reports `changed` on every run (homelab#66).
 - [ ] `sops` installed
 - [ ] `age` installed
 - [ ] `flux` installed
@@ -694,7 +694,7 @@ Host 192.168.1.61
 Host 192.168.1.*
   User ansible
   IdentityFile ~/.ssh/homelab
-  StrictHostKeyChecking accept-new
+  StrictHostKeyChecking yes
   ProxyCommand ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
 ```
 
@@ -708,7 +708,9 @@ ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o Con
   timed out once. The other nodes jump through raspi5.
 - `ANSIBLE_SSH_ARGS` replaces Ansible's default SSH arguments, so the `ControlMaster`/`ControlPersist`
   flags are passed again explicitly.
-- Verified on all four nodes on 2026-09-24.
+- `StrictHostKeyChecking yes` accepts only host keys already in `~/.ssh/known_hosts`. On-LAN Ansible runs record the nodes' LAN IPs there, and earlier `cloudflared` SSH use records `ssh.furchert.ch`. Add a missing key on the LAN first (`ssh ansible@<LAN IP>` once, then compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node). Never accept a first key over the tunnel.
+- Keep the file private: `chmod 600 ~/.ssh/homelab-offlan.conf`.
+- Verified on all four nodes on 2026-09-24 (with `accept-new` and existing known_hosts entries).
 
 #### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
 
@@ -1302,6 +1304,18 @@ kubectl -n apps rollout status deploy/auth-service
 kubectl -n apps logs deploy/auth-service | grep -i 'login-event'
 # expect "Login-event outbox enabled (consumer client 'data-service')"; a WARN "disabled" names the missing variable
 ```
+
+**Turning NM-4 off.** Removing the two SOPS variables does not remove the keys: playbook 59 then skips the NM-4 tasks, and its other Secret tasks patch the Secrets without deleting unknown keys. Remove the keys by hand, then restart both services:
+
+```bash
+kubectl -n apps patch secret homelab-auth-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/data-service-client-secret"},{"op":"remove","path":"/data/login-event-hmac-key"}]'
+kubectl -n apps patch secret data-service-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/auth-client-secret"}]'
+kubectl -n apps rollout restart deploy/auth-service deploy/data-service
+```
+
+auth-service then logs the "disabled" WARN and answers 503. The seeded `data-service` row in `oauth2_registered_client` stays until it is deleted there.
 
 **Rotation.** `auth_service_login_event_hmac_key`: rotating it breaks HMAC continuity for login events already stored in data-service, so avoid it. `auth_service_data_service_client_secret`: auth-service seeds a client only once and never updates it, so a new SOPS value plus playbook 59 is not enough. Also update the `data-service` row in `oauth2_registered_client` (see homelab-auth-service `INTERFACES.md` §6), then restart auth-service and data-service.
 
