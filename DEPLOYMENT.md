@@ -24,6 +24,7 @@ Before starting any deployment or upgrade, verify:
 - [ ] `ansible-lint` installed
 - [ ] `kubectl` installed and configured (`export KUBECONFIG=~/.kube/homelab.yaml`)
 - [ ] `helm@3` installed (NOT Helm 4 — see [CONTRIBUTING.md](CONTRIBUTING.md))
+- [ ] helm-diff plugin installed, pinned: `helm plugin install https://github.com/databus23/helm-diff --version v3.15.13`. Without it, `kubernetes.core.helm` cannot diff a release and reports `changed` on every run, even when nothing changed (homelab#66).
 - [ ] `sops` installed
 - [ ] `age` installed
 - [ ] `flux` installed
@@ -1237,6 +1238,41 @@ curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name
 4. A collector that is disabled (`netmon.collectors.<name>.enabled=false`) must not export the gauge. If one stays NaN forever, that is a data-service bug, not an outage.
 
 **`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system` and `kubectl -n monitoring get servicemonitor data-service`. The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
+
+### NM-4: login-event secrets (auth-service → data-service)
+
+NM-4 (#134) adds the secrets for the login-event pipeline: auth-service records form logins in an outbox, and data-service pulls them with its own client (`data-service`, scope `login-events:read`). Contract: `docs/060-network-monitoring.md` §7.6, §9.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variables (owner, optional) | `infra/inventory/group_vars/all.sops.yml` | `auth_service_data_service_client_secret` (plain, e.g. `openssl rand -hex 32`), `auth_service_login_event_hmac_key` (at least 32 characters, e.g. `openssl rand -base64 48`) |
+| auth-service keys | `59_app_services.yml` → `apps/homelab-auth-secrets` | `data-service-client-secret` (`{noop}<value>`, env `DATA_SERVICE_CLIENT_SECRET`), `login-event-hmac-key` (env `LOGIN_EVENT_HMAC_KEY`) |
+| data-service key | `59_app_services.yml` → `apps/data-service-secrets` | `auth-client-secret` (plain `<value>`, env `AUTH_CLIENT_SECRET`) |
+
+Both variables are optional. With neither, playbook 59 skips the three keys and prints a note. With only one, a key shorter than 32 characters, or a client secret that already starts with `{` (such as `{noop}`), the playbook fails. auth-service wires both env vars with `optional: true`, so it starts without them, keeps login-event capture off, answers 503 on `/api/v1/login-events` and logs one WARN. The auth-service PR (homelab-auth-service#94) can therefore merge before the keys exist.
+
+#### Enable order (NM-4)
+
+1. Owner: add both SOPS variables (`sops infra/inventory/group_vars/all.sops.yml`).
+2. Run playbook 59 **twice**. The first run adds the keys. The second run must report no change for the Secret tasks.
+3. Restart auth-service so the pod reads the new env vars. On startup it seeds the `data-service` client and logs `Login-event outbox enabled`.
+4. Merge the data-service PR (homelab-data-service#17), then restart data-service if its image rollout does not follow right away (`AUTH_CLIENT_SECRET` is read at pod start).
+5. Merge the furchert-ch PR (furchert-ch#64).
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret tasks
+kubectl -n apps get secret homelab-auth-secrets -o json | jq '.data | keys'
+# expect data-service-client-secret and login-event-hmac-key next to the existing keys
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect auth-client-secret next to the existing keys
+kubectl -n apps rollout restart deploy/auth-service
+kubectl -n apps rollout status deploy/auth-service
+kubectl -n apps logs deploy/auth-service | grep -i 'login-event'
+# expect "Login-event outbox enabled (consumer client 'data-service')"; a WARN "disabled" names the missing variable
+```
+
+**Rotation.** `auth_service_login_event_hmac_key`: rotating it breaks HMAC continuity for login events already stored in data-service, so avoid it. `auth_service_data_service_client_secret`: auth-service seeds a client only once and never updates it, so a new SOPS value plus playbook 59 is not enough. Also update the `data-service` row in `oauth2_registered_client` (see homelab-auth-service `INTERFACES.md` §6), then restart auth-service and data-service.
 
 ---
 

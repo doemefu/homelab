@@ -138,8 +138,6 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | is_final | boolean | no | `true` once re-collected ≥ 15 min after `window_end` |
 | client_ip | inet | no | `clientIP` |
 | country | char(2) | yes | `clientCountryName`. It is an ISO alpha-2 code (unverified). |
-| asn | integer | yes | `clientAsn` |
-| asn_org | text | yes | `clientASNDescription` (unverified on Free) |
 | host | text | no | `clientRequestHTTPHost` |
 | method | text | no | `clientRequestHTTPMethodName` |
 | path | text | no | `clientRequestPath`, which excludes the query string |
@@ -150,6 +148,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 
 - UNIQUE `(window_start, client_ip, host, method, path, status)`
 - Indexes: `(window_start)`, `(client_ip, window_start)`, `(host, window_start)`
+- No `asn`/`asn_org` columns: `httpRequestsAdaptiveGroups` does not offer `clientAsn` or `clientASNDescription` on this zone (§4.2 probe). ASN comes only from `firewallEventsAdaptive` and reaches `ip_enrichment` from there (amended 2026-09-24, NM-1: data-service PR #19).
 
 **`netmon.firewall_events`** (NM-1). Source: `firewallEventsAdaptive`, with raw events. Write mode: upsert, do nothing on conflict. Retention: 180 d.
 
@@ -158,7 +157,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | occurred_at | timestamptz | no | `datetime` |
 | ray_name | text | no | `rayName` |
 | client_ip | inet | no | |
-| country, asn, asn_org | char(2), integer, text | yes | as above |
+| country, asn, asn_org | char(2), integer, text | yes | `clientCountryName`, `clientAsn`, `clientASNDescription` |
 | action | text | no | e.g. `block`, `managed_challenge`, `skip`, `log` |
 | security_source | text | no | Cloudflare's `source`, e.g. `firewallManaged`, `botFight`. It is renamed to avoid clashing with the common `source` column. |
 | rule_id | text | yes | `ruleId` |
@@ -175,7 +174,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | ip | inet | no | PK. Only public addresses (see 4.3). |
 | first_seen, last_seen | timestamptz | no | min/max over all data sets |
 | seen_in | text[] | no | Subset of `{inbound, firewall, login, lan, egress}` |
-| country, asn, asn_org | char(2), integer, text | yes | Latest Cloudflare value |
+| country, asn, asn_org | char(2), integer, text | yes | Latest Cloudflare value. ASN only from `firewall_events` (amended 2026-09-24, NM-1: data-service PR #19) |
 | blocklist_hits | jsonb | no | Default `[]`. Array of `{"list":"spamhaus-drop-v4","cidr":"x.x.x.x/nn","fetchedAt":"…Z"}`, recomputed on every blocklist refresh |
 | blocklisted | boolean | no | Default false; true iff `blocklist_hits` is non-empty. Maintained together with it. |
 | abuseipdb_score | smallint | yes | `abuseConfidenceScore` from 0 to 100 |
@@ -318,7 +317,7 @@ The scheduler is Spring `@Scheduled` on the Boot-managed `ThreadPoolTaskSchedule
 | Collector | Cron (UTC) | Unit of work | Catch-up cap |
 |---|---|---|---|
 | cloudflare-requests | `0 */5 * * * *` | Current hour so far, plus the previous hour until final | 24 h |
-| cloudflare-firewall | `30 */5 * * * *` | `[cursor, now − 2 min)` | 24 h (Free-plan limit) |
+| cloudflare-firewall | `30 */5 * * * *` | `[cursor, now − 2 min)` | 24 h (design cap; Cloudflare keeps 31 d, §4.2) |
 | blocklists | `0 0 5 * * *` | Both lists | — |
 | reputation | `0 */30 * * * *` | ≤ `netmon.abuseipdb.per-run` IPs | — |
 | lan | `0 4,19,34,49 * * * *` | Last completed 15-min window | 48 h |
@@ -350,7 +349,7 @@ The scheduler is Spring `@Scheduled` on the Boot-managed `ThreadPoolTaskSchedule
 - **Request:** `POST https://api.cloudflare.com/client/v4/graphql` with headers `Authorization: Bearer ${CLOUDFLARE_API_TOKEN}` and `Content-Type: application/json`. The body is `{"query": "...", "variables": {...}}`.
 - **Timeouts:** 10 s connect and read.
 - **Zone:** `zoneTag` = `${CLOUDFLARE_ZONE_ID}`.
-- **Token permissions** (created by the owner): zone `furchert.ch` with Analytics:Read. Firewall events may also need Firewall Services:Read (unverified).
+- **Token permissions** (created by the owner): zone `furchert.ch` with Analytics:Read. That permission serves both datasets: both Cloudflare collectors have run successfully with it since 2026-09-24, so Firewall Services:Read is not needed (amended 2026-09-24, NM-1: data-service PR #19).
 
 **Phase-1 probe (NM-1 must run this first and record the result in its worklog).** It confirms that the fields below are available on the Free plan.
 
@@ -363,7 +362,20 @@ query Probe($zoneTag: string!) {
 }
 ```
 
-The `settings` node shape is unverified. If a field used below is missing from `availableFields`, drop it from the query and keep the column nullable. If `clientIP` is unavailable in groups, NM-1 stops and returns to the architect.
+If a field used below is missing from `availableFields`, drop it from the query and keep the column nullable. If `clientIP` is unavailable in groups, NM-1 stops and returns to the architect.
+
+**Probe result** (zone `furchert.ch`, Free plan, 2026-09-24). The `settings` node shape above is correct. (amended 2026-09-24, NM-1: data-service PR #19)
+
+| | `httpRequestsAdaptiveGroups` | `firewallEventsAdaptive` |
+|---|---|---|
+| enabled | true | true |
+| maxDuration | 2 592 000 s (30 d) | 2 592 000 s (30 d) |
+| notOlderThan | 2 678 400 s (31 d) | 2 678 400 s (31 d) |
+| maxPageSize | 10 000 | 10 000 |
+| maxNumberOfFields | 40 | 40 |
+| `clientAsn` / `clientASNDescription` | **missing** | present |
+
+Every other field in queries A and B is available. The 5-min cadence and the ≤ 24 h query windows stay as specified. A 30-day initial backfill is a follow-up (`homelab-data-service#20`).
 
 **Query A: request groups.** One call per window.
 
@@ -374,7 +386,7 @@ query InboundGroups($zoneTag: string!, $since: Time!, $until: Time!, $limit: uin
         filter: {datetime_geq: $since, datetime_lt: $until}, orderBy: [count_DESC]) {
       count
       avg { sampleInterval }
-      dimensions { clientIP clientCountryName clientAsn clientASNDescription
+      dimensions { clientIP clientCountryName
                    clientRequestHTTPHost clientRequestHTTPMethodName clientRequestPath edgeResponseStatus }
     } } }
 }
@@ -754,6 +766,7 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 
 - The `timeline` bucket is 1 h when `to − from` ≤ 7 d, otherwise 1 d.
 - `sampled` is true if any contributing row is sampled.
+- `topClientIps[].asn`/`asnOrg` come from `ip_enrichment`, and `topAsns` joins `ip_enrichment`. Both cover only IPs whose ASN is known from firewall events (§3.3), so `topAsns` does not sum to `totals.requests` (amended 2026-09-24, NM-1: data-service PR #19).
 
 **`GET /inbound/firewall-events?from&to&action&host&ip&limit&cursor`** (NM-1)
 
@@ -900,7 +913,7 @@ grant_type=client_credentials&scope=netmon:read
 
 **auth-service side (NM-4)**
 
-- **Capture.** Listen for Spring Security `AuthenticationSuccessEvent` and `AbstractAuthenticationFailureEvent`, and **only** where the authentication is a `UsernamePasswordAuthenticationToken` from the form login. JWT-bearer and client authentications also publish events and must be ignored. Whether these events fire for the login chain in auth-service is unverified, and NM-4 Phase 1 must confirm it.
+- **Capture.** Listen for Spring Security `AuthenticationSuccessEvent` and `AbstractAuthenticationFailureEvent`, and **only** where the authentication is a `UsernamePasswordAuthenticationToken` from the form login. JWT-bearer and client authentications also publish events and must be ignored. Verified: the events fire exactly once per form-login attempt, for success, failure and locked (amended 2026-09-24, NM-4: auth-service PR #96).
 - **Outcome mapping.** `CustomUserDetailsService` (`auth-service/.../security/CustomUserDetailsService.java:27-34`) sets only `enabled = (users.status == "ACTIVE")`; it never sets the locked/expired flags. So `DisabledException` is the only account-status exception this codebase can actually throw, and it is thrown **before** the password check.
 
   | Result | `outcome` |
@@ -915,10 +928,15 @@ grant_type=client_credentials&scope=netmon:read
   - `subject` (plaintext username) is set **only** for `success`.
 - **Outbox.** A table `login_event_outbox` in `homelabdb`, owned by auth-service and created by its own Flyway migration. Its columns are `id bigserial PK`, `event_id uuid unique`, `occurred_at`, `outcome`, `client_ip`, `ip_source`, `username_hmac`, `subject`, `user_agent` and `recorded_at default now()`.
   - Capture IP, user agent and username **synchronously**, inside the Spring Security event listener itself — auth-service has no `@EnableAsync` (`AuthServiceApplication.java:10` only has `@EnableScheduling`), so the insert cannot rely on Spring's `@Async`. Hand the captured, immutable record to a bounded single-thread executor that performs the actual insert off the login path. If that queue is full, the record is dropped and a **WARN** (not ERROR — this is expected, bounded backpressure, not an incident that should page through Sentry) is logged **without** the IP or username. A login must never fail because of telemetry.
-  - Purge job: rows with `recorded_at < now() - 72h`, hourly.
+  - Purge job: rows with `recorded_at < now() - 72h`, hourly. This TTL purge is the only one. There is no early purge below data-service's cursor (§10) (amended 2026-09-24, NM-4: auth-service PR #96).
 - **Endpoint.** `GET /api/v1/login-events?after=<id>&limit=<n>`, where `after` defaults to 0 and `limit` defaults to 500 with a maximum of 1000.
   - It requires `SCOPE_login-events:read` via `@PreAuthorize("hasAuthority('SCOPE_login-events:read')")` on the controller method — the chain-wide `.anyRequest().authenticated()` (`SecurityConfig.java:51`) is not enough by itself, since it would also accept a signed-in user's `ROLE_ADMIN` token. NM-4's tests include a case asserting that an ADMIN user token gets 403 here.
   - It returns rows with `id > after AND recorded_at <= now() - interval '10 seconds'`, ordered by `id`. The 10 s settle window avoids skipping ids whose transactions commit late.
+  - While the feature is disabled (§9), the endpoint answers **503**, not 404.
+  - Errors use auth-service's existing body `{"status": 400, "error": "…", "timestamp": "…Z"}`, not RFC 9457 `problem+json`. The codes are 400 for a negative or non-numeric `after` or a `limit` outside 1–1000, 401 without a token, 403 without the scope, and 503 while disabled.
+  - Settings live under `app.login-events.*`: `hmac-key`, `ttl` (72 h), `settle` (10 s), `queue-capacity` (1000), `default-limit` (500), `max-limit` (1000) and `purge-cron` (hourly).
+  - The payload field names are exactly those in the example below. `source_service` is a data-service column (§3.3), not part of the auth-service payload.
+  - (amended 2026-09-24, NM-4: auth-service PR #96)
 
 ```json
 { "events": [ {"id": 1234, "eventId": "0b6f…", "occurredAt": "…Z", "outcome": "failure", "clientIp": "203.0.113.7",
@@ -929,7 +947,9 @@ grant_type=client_credentials&scope=netmon:read
 **New auth-service client for data-service.** Its client ID is `data-service`, with `grant-types: [client_credentials]`, `scopes: ["login-events:read"]` and no redirect URIs.
 
 - Because it is a new client, the YAML seeder creates it on the next boot, so no migration is needed.
-- Unverified: that `StaticClientSeeder` accepts an empty redirect-URI list. NM-4 must check this, and a Flyway `INSERT` is the fallback.
+- Verified: `StaticClientSeeder` accepts the empty redirect-URI list. It skips the client while `DATA_SERVICE_CLIENT_SECRET` is blank, and creates it on the first boot that has the secret.
+- The seeder never updates an existing client. Rotating the secret after that first boot therefore also needs an update of the `oauth2_registered_client` row (auth-service `INTERFACES.md` §6), not only a new SOPS value.
+- (amended 2026-09-24, NM-4: auth-service PR #96)
 
 **data-service side.** The `login-events` collector runs every minute.
 
@@ -997,8 +1017,8 @@ Secrets are provisioned by the owner. Implementers add only variable **names**, 
 | `data_service_cloudflare_analytics_token` | NM-1 | data-service | Created by the owner (§4.2 permissions) |
 | `data_service_cloudflare_zone_id` | NM-1 | data-service | Not a credential, but kept with the token for one source of config |
 | `data_service_abuseipdb_key` | NM-1 (later) | data-service | Optional. Its assert is skipped when undefined. |
-| `auth_service_data_service_client_secret` | NM-4 | auth-service (`{noop}`-prefixed), data-service (plain) | Follows the `auth_service_<client>_client_secret` pattern |
-| `auth_service_login_event_hmac_key` | NM-4 | auth-service only | e.g. `openssl rand -hex 32`. Rotating it breaks HMAC continuity for events already stored. |
+| `auth_service_data_service_client_secret` | NM-4 | auth-service (`{noop}`-prefixed), data-service (plain) | Follows the `auth_service_<client>_client_secret` pattern. Optional, see below. |
+| `auth_service_login_event_hmac_key` | NM-4 | auth-service only | At least 32 characters, e.g. `openssl rand -base64 48`. Rotating it breaks HMAC continuity for events already stored. Optional, see below. |
 | *(reused)* `auth_service_furchert_ch_client_secret` | NM-0 | furchert-ch (existing `oidc-client-secret`) | **No new var.** The client-credentials call uses the existing secret. |
 
 **Kubernetes Secrets** (ns `apps`, created by `59_app_services.yml`, `no_log: true`)
@@ -1007,6 +1027,8 @@ Secrets are provisioned by the owner. Implementers add only variable **names**, 
 |---|---|---|
 | `data-service-secrets` | `db-username` (literal `data_service`), `db-password`, `cloudflare-api-token`, `cloudflare-zone-id`, `abuseipdb-api-key` (only when defined), `auth-client-secret` | NM-0 creates it with the DB keys. NM-1 and NM-4 add keys. |
 | `homelab-auth-secrets` (existing) | add `data-service-client-secret: "{noop}<value>"` and `login-event-hmac-key` | NM-4 |
+
+**NM-4 keys are optional in playbook 59.** The two NM-4 SOPS variables go together. With neither set, playbook 59 skips `data-service-client-secret`, `login-event-hmac-key` and `auth-client-secret`, so it keeps working before the owner adds the values. With only one set, a short HMAC key or a client secret that already starts with `{`, the playbook fails. The keys are added by separate tasks that patch the existing Secrets (amended 2026-09-24, NM-4 infra: homelab#134).
 
 **Postgres tasks.** These go in `59_app_services.yml` and mirror the LiteLLM block (`:290-359`):
 
@@ -1056,7 +1078,7 @@ The rest of the deployment follows the `052` baseline:
 | `DATA_SERVICE_CLIENT_SECRET` | secretKeyRef `homelab-auth-secrets` / `data-service-client-secret` |
 | `LOGIN_EVENT_HMAC_KEY` | secretKeyRef `homelab-auth-secrets` / `login-event-hmac-key` |
 
-auth-service is Flux-auto-deployed on every merge to `main`, and its Spring config resolves `${DATA_SERVICE_CLIENT_SECRET}` and `${LOGIN_EVENT_HMAC_KEY}` at startup with no default value. If the Secret keys do not exist yet when the auth-service PR merges, the pod fails to start and **all SSO goes down**, because auth-service is the sole IdP. **NM-4 order:** SOPS vars added → playbook 59 run (creates the Secret keys) → auth-service PR merged → data-service PR → furchert-ch PR. §11's NM-4 acceptance criteria include "the auth-service pod restarts cleanly" for exactly this reason.
+auth-service is Flux-auto-deployed on every merge to `main`, and it is the sole IdP, so a missing Secret key must never stop the pod. Both env vars are therefore **optional**: the `secretKeyRef`s have `optional: true`, and the Spring config uses empty defaults (`${DATA_SERVICE_CLIENT_SECRET:}`, `${LOGIN_EVENT_HMAC_KEY:}`). While either is missing, or the HMAC key is shorter than 32 characters, auth-service starts normally, does not seed the `data-service` client, records no login events, answers 503 on `/api/v1/login-events` and logs one WARN. The auth-service PR can therefore merge at any time. **NM-4 enable order:** SOPS vars added → playbook 59 run (creates the Secret keys) → auth-service restart (env vars are read at pod start) → data-service PR (`homelab-data-service#17`) → furchert-ch PR (`furchert-ch#64`). §11's NM-4 acceptance criteria still include "the auth-service pod restarts cleanly" (amended 2026-09-24, NM-4: auth-service PR #96, homelab#134).
 
 **Backups.** No change is needed. `scripts/backup-app-data.sh` reads the database list from the server at runtime (`PG_DATABASE_QUERY`), so `data_service` is dumped automatically. The brief assumed a per-DB list, and that assumption is corrected here. Longhorn and restic cover the Postgres PVC as before.
 
@@ -1074,7 +1096,7 @@ auth-service is Flux-auto-deployed on every merge to `main`, and its Spring conf
   - furchert-ch never logs tokens or IPs;
   - node scripts never emit usernames.
 - **`CF-Connecting-IP` is spoofable in-cluster, and so is the `remote-addr` fallback.** No NetworkPolicy exists, so any pod can call auth-service directly with a forged `CF-Connecting-IP` header; and because Tomcat's RemoteIpValve is active, `request.getRemoteAddr()` can itself already be XFF-derived (§7.6), so falling back to it is not a materially more trustworthy path. This is accepted for the homelab. **Follow-up issue:** add NetworkPolicies so that auth-service :8080 accepts ingress only from cloudflared (ns `platform`), furchert-ch and data-service, and data-service :8082 accepts ingress only from furchert-ch. k3s' embedded policy controller enforces them.
-- **The login-event outbox is a transient buffer, but backups are not.** `login_event_outbox` (§7.6) holds up to 72 h of login IPs, user agents and (for successful logins) plaintext usernames before its hourly purge. `scripts/backup-app-data.sh`'s dumps and the nightly Longhorn snapshot both capture whatever is in the table when they run, so up to 72 h of that data can persist in a backup or snapshot after the live row has been purged. This is accepted as a bounded, documented exposure. NM-4 may additionally purge rows once their `id` is at or below data-service's last-pulled cursor, ahead of the 72 h cap, to shrink the window further.
+- **The login-event outbox is a transient buffer, but backups are not.** `login_event_outbox` (§7.6) holds up to 72 h of login IPs, user agents and (for successful logins) plaintext usernames before its hourly purge. `scripts/backup-app-data.sh`'s dumps and the nightly Longhorn snapshot both capture whatever is in the table when they run, so up to 72 h of that data can persist in a backup or snapshot after the live row has been purged. This is accepted as a bounded, documented exposure. NM-4 does not purge rows at or below data-service's last-pulled cursor ahead of the 72 h cap. auth-service does not know that cursor, so the 72 h TTL purge is the only one (amended 2026-09-24, NM-4: auth-service PR #96).
 - **No Sentry in data-service v1** (§12 dependency table). Both auth-service and device-service ship `sentry-spring-boot-4`; data-service defers it to keep the initial dependency set minimal, and because `last_error` (§3.3) already captures the exception class and a short message — with no IPs — for the collector-failure case that matters most.
 - **Never raise cloudflared's log level** to debug. At debug it logs request headers, including cookies and `Authorization`.
 - **Tunnelled SSH hides client IPs.** fail2ban and `ssh_auth_snapshots` see the cloudflared path, not the attacker. Cloudflare Access for ssh/grafana/n8n is a follow-up.
@@ -1109,7 +1131,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | NM-1 | #116 (secret, scrape, alerts) | #14 | — | #61 |
 | NM-3 | #117 | #15 | — | #62 |
 | NM-2 | #118 | #16 | — | #63 |
-| NM-4 | none yet (secrets) | #17 | #94 | #64 |
+| NM-4 | #134 (secrets, spec amendments) | #17 | #94 | #64 |
 
 ---
 
@@ -1119,8 +1141,8 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 
 | # | Question | Blocks | Default if unanswered |
 |---|---|---|---|
-| Q1 | Cloudflare token creation, plus whether Firewall Services:Read is needed | **NM-1 (blocker)** | — (owner action) |
-| Q2 | Free-plan availability of `clientIP`, `clientASNDescription` and `userAgent` (§4.2 probe) | **NM-1 (blocker if `clientIP` is missing)** | Drop the optional fields |
+| Q1 | Cloudflare token creation, plus whether Firewall Services:Read is needed | resolved 2026-09-24: token created, Analytics:Read is enough (§4.2) | — |
+| Q2 | Free-plan availability of `clientIP`, `clientASNDescription` and `userAgent` (§4.2 probe) | resolved 2026-09-24: all available except `clientAsn`/`clientASNDescription` on request groups, which were dropped (§4.2) | — |
 | Q3 | `homelab` PR #109 merged (textfile collector) | **NM-3 (blocker)** | NM-3's PR does not duplicate #109 and targets `main`; #109 merges first, then NM-3 resolves the `additionalPrometheusRulesMap` conflict (one key, all entries) (amended 2026-09-23, NM-3) |
 | Q4 | Go for the coroot spike, then for the all-node rollout | **NM-2 (blocker)** | — (owner action) |
 | Q5 | data-service dependency set — see the table below. It must be approved before NM-0 implementation starts. | **NM-0 (blocker: approval)** | — |
@@ -1161,13 +1183,13 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 
 | Item | Owner |
 |---|---|
-| Cloudflare `settings` node shape; `count` being sample-adjusted; `clientCountryName` being ISO-2; `maxPageSize` values; analytics ingest delay ≤ 2 min | NM-1 |
+| ~~Cloudflare `settings` node shape; `maxPageSize` values~~ — verified by the 2026-09-24 probe (§4.2). Still open: `count` being sample-adjusted; `clientCountryName` being ISO-2; analytics ingest delay ≤ 2 min | NM-1 |
 | Spamhaus `drop_v4.json` exact NDJSON shape; FireHOL level1 containing private ranges | NM-1 |
 | coroot-node-agent arm64/amd64 footprint and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
 | ~~Whether the node-exporter scrape already adds a `node` label (possible `exported_node`)~~ — verified: it does not (`honorLabels: true`, §5.2) | NM-3 |
 | apt package name `conntrack`; sshd unit name `ssh`; UFW log rate limits on these nodes | NM-3 |
-| Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping | NM-4 |
-| `StaticClientSeeder` accepting a client with no redirect URIs | NM-4 |
+| ~~Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping~~ — verified in auth-service PR #96: one event per form-login attempt, `DisabledException` → `locked` (§7.6) | NM-4 |
+| ~~`StaticClientSeeder` accepting a client with no redirect URIs~~ — verified in auth-service PR #96 (§7.6) | NM-4 |
 
 **Decided during NM-0 implementation** (`homelab-data-service` PR #18, 2026-09-23)
 
