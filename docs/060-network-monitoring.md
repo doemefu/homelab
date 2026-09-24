@@ -596,8 +596,8 @@ NM-3's rules go under `additionalPrometheusRulesMap.homelab-netmon-node` (group 
 | Pod security | `hostPID: true`, container `securityContext.privileged: true`. No `hostNetwork` (unverified; confirm against upstream). |
 | Host mounts (verified against coroot-operator v1.10.2 `controller/node_agent.go`) | `/sys/fs/cgroup` → `/host/sys/fs/cgroup` (ro), `/sys/kernel/tracing` → `/sys/kernel/tracing`, `/sys/kernel/debug` → `/sys/kernel/debug`, plus an `emptyDir` at `/tmp` (default `--wal-dir`). The containerd socket is reached through `/proc/1/root` (hostPID); `/run/k3s/containerd/containerd.sock` is in the agent's built-in probe list. No `hostNetwork` (the operator does not set it either). |
 | Args (verified in `flags/flags.go`, `flags/flags_linux.go` at v1.35.10) | `--cgroupfs-root=/host/sys/fs/cgroup`, `--listen=0.0.0.0:80`, `--disable-log-parsing`, `--disable-pinger`, `--disable-gpu-monitoring`; no `--collector-endpoint`/`--metrics-endpoint` (either one moves the listener to `127.0.0.1:10300` and pushes data out). **L7 tracing stays on:** `ip_to_fqdn` is filled from DNS responses seen by the L7 tracer, so `--disable-l7-tracing` would empty the FQDN mapping. The agent never calls the Kubernetes API, so `automountServiceAccountToken: false`. |
-| Tolerations and gate | `operator: Exists`. Scheduling is gated by `nodeSelector` `homelab.furchert.ch/coroot-node-agent: "enabled"`; `41_monitoring.yml` sets that label on the nodes in `coroot_node_agent_nodes` (default `[]`) and removes it elsewhere, so the spike and the all-node rollout are playbook runs, not manifest edits |
-| Resources (proposal; the spike confirms) | requests `cpu: 50m`, `memory: 128Mi`; limits `cpu: 300m`, `memory: 384Mi` (raised from 256Mi so an OOMKill cannot mask the §6.3 criterion-5 measurement) |
+| Tolerations and gate | `operator: Exists`. Scheduling is gated by `nodeSelector` `homelab.furchert.ch/coroot-node-agent: "enabled"`; `41_monitoring.yml` sets that label on the nodes in `coroot_node_agent_nodes` (default `[]` until the spike; `[raspi5, mba1]` since 2026-09-24) and removes it elsewhere, so the spike and the all-node rollout are playbook runs, not manifest edits |
+| Resources (sized by the spike, §6.3) | requests `cpu: 50m`, `memory: 256Mi`; limits `cpu: 300m`, `memory: 1Gi`. 384Mi OOMKilled both spike agents during the startup scan (peaks 410 / 702 MiB); 1Gi leaves margin above that peak (amended 2026-09-24, NM-2 spike). |
 | Labels | `app.kubernetes.io/name: coroot-node-agent` |
 | NetworkPolicy | `networkpolicy.yaml`: ingress to the agent pods only from the kube-prometheus-stack Prometheus pods (`app.kubernetes.io/name: prometheus`, `operator.prometheus.io/name: kube-prometheus-stack-prometheus`, verified live) on TCP 80. The agent serves `/metrics` and Go's `/debug/pprof/*` unauthenticated from a privileged hostPID pod; pprof shares the default mux and has no disable flag at v1.35.10. Node-local traffic is always admitted by Kubernetes, so host processes and hostNetwork pods on an agent node (Home Assistant has no node pin) still reach pprof. Accepting that, or adding a `/metrics`-only proxy sidecar (a new pinned image, needs owner approval), is an owner decision before the all-node rollout (amended 2026-09-24, PR #133 review). Egress is not restricted (amended 2026-09-23, NM-2 prep review). |
 
@@ -647,9 +647,23 @@ Every criterion must hold on **both** raspi5 and mba1:
 | 2 | The agent is `Running` for ≥ 24 h with 0 restarts and no OOMKilled. The node's `journalctl -k` shows no BPF verifier errors. |
 | 3 | `container_net_tcp_successful_connects_total` has a non-empty `actual_destination` for ≥ 3 known flows: furchert-ch → auth-service, flux → github.com, litellm → an external API. |
 | 4 | The post-relabel series count per agent is below **5 000** (`scrape_samples_post_metric_relabeling`). |
-| 5 | CPU averages below **100m** and stays below 250m at p95. Working-set memory stays below **200 Mi**. |
+| 5 | CPU averages below **100m** and stays below 250m at p95. Memory: RSS below **150 MiB** steady, working set below **450 MiB** steady (it includes reclaimable page cache from reading container binaries), and the startup peak below the memory limit. This replaces the earlier "working set < 200 Mi", which counted page cache (amended 2026-09-24, NM-2 spike). |
 | 6 | Prometheus `prometheus_tsdb_head_series` grows by less than **10 %**. |
 | 7 | The `container_id` format is recorded and §3.3/§4.6 are updated to match. |
+
+**Spike result (raspi5 + mba1, from 2026-09-24 11:52)** (amended 2026-09-24, NM-2 spike):
+
+| Measure | raspi5 | mba1 |
+|---|---|---|
+| First start at a 384Mi limit | OOMKilled in the startup scan, working-set peak 410 MiB | OOMKilled, peak 702 MiB |
+| Restarts at 768Mi, 2 h+ | 0 | 0 |
+| `up` | 1 | 1 |
+| Series after relabeling | 161 | 771 |
+| CPU | 0.02 cores | 0.05 cores |
+| Working set steady (2 h band) | 320 MiB (313–327) | 399 MiB (370–420) |
+| RSS steady | 69 MiB | 105 MiB |
+
+eBPF loads on mba1's BTF-less t2 kernel. No alerts fired. Metrics flow (285 connect series, 12 `ip_to_fqdn` series). Criteria 1, 4 and 5 hold. Still to record: criterion 2's full 24 h window, and criteria 3, 6 and 7. Rollout order after the go: mba2 (different t2 kernel), then raspi4 (4 GB RAM).
 
 **If criteria 1–3 fail on mba1/mba2**, run the agent on arm64 only (`nodeSelector: kubernetes.io/arch: arm64`) and use the §6.6 fallback on the Macs. **If they fail on the Pis too**, use the full fallback.
 
@@ -1163,7 +1177,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 |---|---|
 | Cloudflare `settings` node shape; `count` being sample-adjusted; `clientCountryName` being ISO-2; `maxPageSize` values; analytics ingest delay ≤ 2 min | NM-1 |
 | Spamhaus `drop_v4.json` exact NDJSON shape; FireHOL level1 containing private ranges | NM-1 |
-| coroot-node-agent arm64/amd64 footprint and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
+| coroot-node-agent footprint measured on raspi5 + mba1 (§6.3 spike result: RSS 69 / 105 MiB, working set 320 / 399 MiB, startup peak 410 / 702 MiB); still open: mba2, raspi4, and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
 | ~~Whether the node-exporter scrape already adds a `node` label (possible `exported_node`)~~ — verified: it does not (`honorLabels: true`, §5.2) | NM-3 |
 | apt package name `conntrack`; sshd unit name `ssh`; UFW log rate limits on these nodes | NM-3 |
 | Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping | NM-4 |
