@@ -21,10 +21,13 @@
     # coroot-node-agent spike gate (NM-2, #118): nodes listed here get the label
     # homelab.furchert.ch/coroot-node-agent=enabled, every other node loses it, and the
     # DaemonSet schedules only on labelled nodes. Empty = the DaemonSet exists but runs no pod.
-    # This list is the source of truth: a run without it removes the label again. Override for
-    # the spike with -e '{"coroot_node_agent_nodes": ["raspi5"]}'; persist the rollout by PR.
-    # Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
-    coroot_node_agent_nodes: []
+    # This list is the source of truth: nodes not listed lose the label on the next run.
+    # raspi5 + mba1 = the owner-approved spike nodes (2026-09-24); mba2 (different t2 kernel)
+    # and raspi4 (4 GB RAM) are later decisions, added by PR. Stop all agents with
+    # -e '{"coroot_node_agent_nodes": []}'. Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
+    coroot_node_agent_nodes:
+      - raspi5
+      - mba1
     coroot_node_agent_label: homelab.furchert.ch/coroot-node-agent
     coroot_node_agent_dir: "{{ playbook_dir }}/../../cluster/monitoring/coroot-node-agent"
 

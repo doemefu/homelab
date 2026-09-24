@@ -10,7 +10,8 @@
 #
 # SPIKE GATE: the pod only schedules on nodes labelled
 # `homelab.furchert.ch/coroot-node-agent=enabled`. 41_monitoring.yml manages that label from
-# `coroot_node_agent_nodes` (default: none), so applying this manifest alone starts no pod.
+# `coroot_node_agent_nodes` (raspi5 + mba1 since the 2026-09-24 spike); applying this manifest
+# alone starts no pod on an unlabelled node.
 # Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
 apiVersion: apps/v1
 kind: DaemonSet
@@ -65,15 +66,20 @@ spec:
               protocol: TCP
           securityContext:
             privileged: true
-          # Proposal from docs/060 §6.1; the memory limit is raised from 256Mi to 384Mi so an
-          # OOMKill does not mask the §6.3 criterion-5 measurement (< 200Mi working set).
+          # Sized from the NM-2 spike (2026-09-24, raspi5 + mba1, docs/060 §6.3): at 384Mi both
+          # agents were OOMKilled during the startup scan (working-set peaks 410 / 702 MiB, from
+          # parsing the ELF symbols of Go/Rust/OpenSSL binaries for TLS uprobes). At 768Mi both
+          # ran 0 restarts; steady working set 320 / 399 MiB (2 h band 313–327 / 370–420) but RSS
+          # only 69 / 105 MiB, the rest is reclaimable page cache; CPU 0.02 / 0.05 cores.
+          # The 1Gi limit keeps margin above the 702 MiB startup peak; the request covers the
+          # steady working set.
           resources:
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: 300m
-              memory: 384Mi
+              memory: 1Gi
           volumeMounts:
             - name: cgroupfs
               mountPath: /host/sys/fs/cgroup

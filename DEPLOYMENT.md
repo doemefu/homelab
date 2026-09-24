@@ -934,13 +934,31 @@ in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgrou
 | DaemonSet, headless Service, ServiceMonitor, NetworkPolicy (ingress only from Prometheus on TCP 80) | `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml` (no Helm chart; the chart is stale) |
 | Alert rules `NetmonNewExternalDestination`, `CorootNodeAgentDown` | `cluster/values/kube-prometheus-stack.yaml` → `additionalPrometheusRulesMap.homelab-netmon-egress` |
 | Image | `ghcr.io/coroot/coroot-node-agent:1.35.10@sha256:…` (index digest in the manifest comment; bumped by hand) |
-| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default `[]`) |
+| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default `[raspi5, mba1]` since the 2026-09-24 spike) |
 
 **The gate.** The DaemonSet only schedules on labelled nodes. `41_monitoring.yml` labels exactly
 the nodes in `coroot_node_agent_nodes` and **removes** the label from every other node, so the
-play variable is the source of truth: a run without the override closes the gate again. With the
-default empty list, merging the PR and running the playbook creates the DaemonSet with 0 pods,
-and neither rule fires.
+play variable is the source of truth: nodes missing from the list lose the label on the next run.
+Since the 2026-09-24 spike the default is `[raspi5, mba1]`. With an empty list
+(`-e '{"coroot_node_agent_nodes": []}'`) the DaemonSet runs 0 pods and neither rule fires.
+
+**Memory options (researched 2026-09-24 against the v1.35.10 source; none applied).** The startup
+peak comes from TLS uprobe setup. For every new process the agent opens its executable, or its
+libssl, and loads the full ELF symbol table (`ebpftracer/tls.go`, `elf.go`) to find Go TLS, Rust
+TLS and OpenSSL functions. Large Go binaries such as k3s itself (`/system.slice/k3s*.service`) are
+the likely main cost, which is not measured per binary. Upstream docs and the README list no flags for this, and the only relevant
+flags are in `flags/flags*.go`:
+
+| Option | Effect | Keeps `ip_to_fqdn`? | Verdict |
+|---|---|---|---|
+| `--disable-l7-tracing` | Skips all TLS uprobes and ELF parsing, and all L7 events | **No**: `ip_to_fqdn` comes from DNS L7 events | Not usable |
+| `--container-denylist=<regex>` (e.g. `/system.slice/k3s.*`) | The agent ignores matching cgroups entirely: no ELF scan, but also no egress metrics for them | Yes, for the others | Possible if the owner accepts losing k3s/containerd egress (image pulls, Helm/Git fetches). Measure the effect first |
+| `--instrumentation-delay` (default `30s`) | Delays TLS attach after a process starts | Yes | Spreads the work but does not shrink the peak. No benefit |
+| Env `GOMEMLIMIT` (e.g. `600MiB`) | Go runtime soft limit, so the GC collects harder before the cgroup limit | Yes | Possible, but the risk is GC thrash if live heap during the scan really needs more. Would need its own measurement |
+| `--max-fqdns-per-container` (default 50), `--min-container-age` (default `30s`) | Cardinality limits, not memory | Yes | Not relevant to the peak |
+| `--go-heap-profiler`, Java/async-profiler flags | Only active with a profiles endpoint, which is not set | Yes | Already inert |
+
+No flag is both clearly safe and memory-reducing, so this PR only sizes the resources.
 
 **Kernel prerequisites** (read-only checks 2026-09-23, docs/060 §6.3): all four nodes have
 `CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`, tracefs and debugfs mounted, and lockdown `none`.
@@ -989,7 +1007,7 @@ dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Ass
    | 2 | `kube_pod_container_status_restarts_total{namespace="monitoring", container="coroot-node-agent"}` and `kube_pod_container_status_last_terminated_reason{container="coroot-node-agent", reason="OOMKilled"}` | 0 restarts, no OOMKilled |
    | 3 | `group by (container_id, actual_destination) (container_net_tcp_successful_connects_total)` and `ip_to_fqdn` | ≥ 3 known flows with a non-empty `actual_destination`; external IPs have an FQDN |
    | 4 | `scrape_samples_post_metric_relabeling{job="coroot-node-agent"}` | < 5 000 per agent |
-   | 5 | `avg_over_time(rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `max_over_time(container_memory_working_set_bytes{namespace="monitoring", container="coroot-node-agent"}[24h])` | avg < 100m, p95 < 250m, max < 200 Mi |
+   | 5 | CPU: `avg_over_time(rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`. Steady memory (the p95 over 24 h ignores the startup spike, which lasts minutes): `quantile_over_time(0.95, container_memory_rss{namespace="monitoring", container="coroot-node-agent"}[24h])`, `quantile_over_time(0.95, container_memory_working_set_bytes{namespace="monitoring", container="coroot-node-agent"}[24h])`. Startup peak, checked separately: `max_over_time(container_memory_working_set_bytes{namespace="monitoring", container="coroot-node-agent"}[24h])` against the limit `kube_pod_container_resource_limits{namespace="monitoring", container="coroot-node-agent", resource="memory"}` | avg < 100m, p95 < 250m; RSS p95 < 150 MiB, working-set p95 < 450 MiB; startup peak < memory limit (and no OOMKilled, row 2) |
    | 6 | `prometheus_tsdb_head_series` | < +10 % over the baseline |
    | 7 | `count by (container_id) (container_net_tcp_active_connections)` | record the `container_id` format (expected `/k8s/<ns>/<pod>/<container>`) |
    | — | `prometheus_rule_group_last_duration_seconds{rule_group=~".*homelab-netmon-egress.*"}` | < 1 s (the group runs every 5 min) |
@@ -998,12 +1016,32 @@ dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Ass
    `sampleLimit` (10 000) is counted after the keep-list.
 5. **Add mba1** (no BTF): repeat steps 2–4 with `-e '{"coroot_node_agent_nodes": ["raspi5", "mba1"]}'`
    (or `kubectl label node mba1 …`). Every criterion must hold on both nodes.
+
+   **Result (2026-09-24, from 11:52):** raspi5 and mba1 are now the playbook default.
+
+   | Measure | raspi5 | mba1 |
+   |---|---|---|
+   | First start at a 384Mi limit | OOMKilled, working-set peak 410 MiB | OOMKilled, peak 702 MiB |
+   | Restarts at 768Mi (temporary `kubectl set resources`), 2 h+ | 0 | 0 |
+   | Series after relabeling | 161 | 771 |
+   | CPU | 0.02 cores | 0.05 cores |
+   | Working set steady (2 h band) | 320 MiB (313–327) | 399 MiB (370–420) |
+   | RSS steady | 69 MiB | 105 MiB |
+
+   eBPF works on mba1's t2 kernel. No alerts fired, and 285 connect series plus 12 `ip_to_fqdn`
+   series flow. The working set is mostly reclaimable page cache from reading container binaries.
+   The manifest now requests 256Mi and limits at 1Gi, which leaves margin above the 702 MiB startup
+   peak. The next `41_monitoring.yml` run replaces the temporary 768Mi `kubectl set resources` drift.
 6. **Record and roll out.** Update docs/060 §3.3/§4.6 with the observed `container_id` format and
-   metric labels. After the owner's go for all nodes, a PR sets `coroot_node_agent_nodes` in
-   `41_monitoring.yml` to all four nodes, then run `41_monitoring.yml`.
+   metric labels. Extend the rollout one node at a time, each with the owner's go, a PR adding the
+   node to `coroot_node_agent_nodes` in `41_monitoring.yml`, a `41_monitoring.yml` run, and steps 3–4:
+   first **mba2**, whose t2 kernel (6.19) differs from mba1's (6.12), then **raspi4**, which has
+   only 4 GB RAM and about 2 GB available.
 7. **Rollback.**
-   - *Stop the agent, keep everything else:* run `41_monitoring.yml` without the override (the
-     gate closes and the pods terminate), or `kubectl label node --all homelab.furchert.ch/coroot-node-agent-`.
+   - *Stop the agent, keep everything else:* run `41_monitoring.yml` with
+     `-e '{"coroot_node_agent_nodes": []}'` (the gate closes and the pods terminate), or
+     `kubectl label node --all homelab.furchert.ch/coroot-node-agent-`. The label is restored on the next
+     run without the override.
      No alert fires in this state.
    - *Remove it entirely:* revert the NM-2 PR and run `41_monitoring.yml` (removes the rule group),
      then `kubectl delete -k cluster/monitoring/coroot-node-agent` from a checkout that still has the
