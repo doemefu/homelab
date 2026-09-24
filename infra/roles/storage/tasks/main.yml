@@ -14,6 +14,18 @@
     group: root
     mode: "0750"
 
+# Every node runs node-exporter with --collector.textfile.directory pointing here
+# (cluster/values/kube-prometheus-stack.yaml), so the directory must exist fleet-wide
+# even where no backup writes into it — otherwise node-exporter raises
+# node_textfile_scrape_error=1. Mode 0755 because node-exporter runs as UID 65534.
+- name: Create node-exporter textfile collector directory
+  ansible.builtin.file:
+    path: "{{ storage_textfile_collector_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 # --- Externer Backup-Mount (nur pi5) ---
 
 - name: Backup-Mountpoint anlegen (externer USB/SSD)
@@ -105,6 +117,53 @@
       exec 9>/var/lock/homelab-backup.lock
       flock -n 9 || { logger -p user.err -t homelab-backup "another backup run is active, aborting"; exit 1; }
 
+      # Node-exporter textfile metrics (#92). node-exporter mounts this directory
+      # read-only and scrapes *.prom from it, so a failed or missing run becomes an
+      # Alertmanager alert instead of a log line nobody reads.
+      # The lock collision above exits before this point on purpose: the run that holds
+      # the lock owns the metrics, and writing a failure here would be a false alarm.
+      METRICS_FILE="{{ storage_textfile_collector_dir }}/homelab-backup.prom"
+      START_TS=$(date +%s)
+
+      # Carry the previous last-success timestamp forward so a failed run does not erase
+      # it. Guarded on every side: a missing file must not abort the script under
+      # `set -e`, and a non-numeric or empty value would produce a malformed .prom line,
+      # which makes node-exporter discard the whole file (node_textfile_scrape_error=1)
+      # and would then look like a stale backup. 0 reads as "never succeeded".
+      LAST_SUCCESS=$(awk '$1 == "homelab_backup_last_success_timestamp_seconds" { print $2 }' \
+        "$METRICS_FILE" 2>/dev/null | tail -n 1 || echo 0)
+      LAST_SUCCESS=${LAST_SUCCESS:-0}
+      case "$LAST_SUCCESS" in
+        ''|*[!0-9]*) LAST_SUCCESS=0 ;;
+      esac
+
+      # Written to a temp file in the same directory and moved into place, so a scrape
+      # never observes a partially written file. mktemp creates 0600; node-exporter runs
+      # as UID 65534, hence the chmod before the rename. The temp name does not end in
+      # .prom, so the collector ignores it even if a run dies mid-write.
+      write_metrics() {
+        rc=$1
+        now=$(date +%s)
+        success_ts=$LAST_SUCCESS
+        if [ "$rc" -eq 0 ]; then
+          success_ts=$now
+        fi
+        tmp_metrics=$(mktemp "${METRICS_FILE}.XXXXXX")
+        {
+          echo "# HELP homelab_backup_exit_code Exit status of the most recent homelab-backup.sh run (0 = success)."
+          echo "# TYPE homelab_backup_exit_code gauge"
+          echo "homelab_backup_exit_code ${rc}"
+          echo "# HELP homelab_backup_duration_seconds Wall-clock duration of the most recent homelab-backup.sh run."
+          echo "# TYPE homelab_backup_duration_seconds gauge"
+          echo "homelab_backup_duration_seconds $((now - START_TS))"
+          echo "# HELP homelab_backup_last_success_timestamp_seconds Unix time of the last successful homelab-backup.sh run."
+          echo "# TYPE homelab_backup_last_success_timestamp_seconds gauge"
+          echo "homelab_backup_last_success_timestamp_seconds ${success_ts}"
+        } >"$tmp_metrics"
+        chmod 0644 "$tmp_metrics"
+        mv "$tmp_metrics" "$METRICS_FILE"
+      }
+
       export RESTIC_PASSWORD_FILE=/etc/restic-password
       REPO="{{ storage_restic_repo }}"
 
@@ -121,7 +180,14 @@
       TMP="${COPY}.tmp"
       # A copy left behind by an interrupted run must never reach restic as stale state.
       rm -f "$TMP" "$COPY"
-      trap 'rm -f "$TMP" "$COPY"' EXIT
+      # One EXIT trap only — a second `trap ... EXIT` would silently replace this one.
+      # rc must be captured first, before any command in the handler overwrites $?.
+      on_exit() {
+        rc=$?
+        rm -f "$TMP" "$COPY"
+        write_metrics "$rc" || logger -p user.err -t homelab-backup "failed to write textfile metrics"
+      }
+      trap on_exit EXIT
 
       if [ -f "$SRC" ]; then
       OLDMASK=$(umask)

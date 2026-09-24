@@ -474,6 +474,21 @@ The agent also adds `machine_id` and `system_uuid` to every series; the ServiceM
 data-service's egress collector (`docs/060` §4.6). Alerts: `NetmonNewExternalDestination` and `CorootNodeAgentDown` in
 `additionalPrometheusRulesMap.homelab-netmon-egress` — see `DEPLOYMENT.md` "coroot-node-agent (NM-2)".
 
+**node-exporter textfile collector (#92)**
+
+node-exporter reads `*.prom` files from the host directory `/var/lib/node_exporter/textfile_collector`
+on every node (`--collector.textfile.directory`, configured in
+`cluster/values/kube-prometheus-stack.yaml`; the directory is created by the `storage` role and by
+the DaemonSet's `hostPath: DirectoryOrCreate`). Anything a node-local job writes there is scraped
+as a normal node-exporter series.
+
+| Producer | File | Metrics |
+|----------|------|---------|
+| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+
+Write the file atomically (temp file in the same directory, then `mv`); a partially written file
+makes node-exporter discard the whole directory and set `node_textfile_scrape_error=1`.
+
 ---
 
 ## 10) Network Interface
