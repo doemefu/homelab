@@ -488,7 +488,7 @@ group by (node, container_id, destination, actual_destination) (last_over_time(c
 - **Script:** `/usr/local/sbin/homelab-netmon-collect`, written in Python 3 with the stdlib only (the Ubuntu base python3; no pip).
 - **Units:** `homelab-netmon.service` (`Type=oneshot`, runs as root because conntrack and the kernel journal need it) and `homelab-netmon.timer` (`OnCalendar=*-*-* *:*:05`, `AccuracySec=1s`, `Persistent=false`).
 - **Output:** one file, `/var/lib/node_exporter/textfile_collector/homelab_netmon.prom`. It is written atomically to `…/.homelab_netmon.prom.tmp` and then renamed.
-- **Prerequisite:** the directory and the node-exporter `--collector.textfile.directory` flag come from `homelab` PR #109, via `prometheus-node-exporter.extraArgs` and a hostPath mount. NM-3 must not duplicate them. If #109 has not merged by then, NM-3 rebases on it.
+- **Prerequisite:** the node-exporter `--collector.textfile.directory` flag comes from `homelab` PR #109, via `prometheus-node-exporter.extraArgs` and a hostPath mount. NM-3 must not duplicate it. The directory is created by both `netmon_node` and #109's storage role, with identical attributes. NM-3's PR targets `main`, and #109 merges first (§12 Q3) (amended 2026-09-23, NM-3: PR #132).
 - **Playbook:** role `netmon_node` added to `10_base.yml`, gated behind tag `netmon_node`, mirroring the `mac_tweaks` precedent (PR #108). **Decision (main session, Phase 3 review, 2026-09-23):** not `41_monitoring.yml`, and not a new playbook — `10_base.yml` already runs with `become: true` for every node, so this role needs no new privilege escalation to justify.
 - **Configuration:** role variables are `netmon_node_lan_cidr` (default from the inventory LAN var, `192.168.1.0/24`), `netmon_node_pod_cidr` (`10.42.0.0/16`), `netmon_node_ports` (`[1883, 22, 8123, 6443, 10250]` — `10250`, the kubelet API, is added beyond the four ports originally discussed with the owner; it is read-only visibility into an existing UFW-allowed port, not a new opening), `netmon_node_max_series` (`200`) and `netmon_node_conntrack_acct` (`false`). The role is idempotent.
 
@@ -630,7 +630,7 @@ Every criterion must hold on **both** raspi5 and mba1:
 
 ### 6.4 PrometheusRules
 
-These go in `additionalPrometheusRulesMap.homelab-netmon`, **created by NM-3 (§5.6)**; NM-2 appends to that same map, following the `homelab-backups` precedent from PR #109.
+These go in `additionalPrometheusRulesMap.homelab-netmon-egress` (NM-2's own key, see §5.6), following the `homelab-backups` precedent from PR #109.
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -1133,7 +1133,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | Spamhaus `drop_v4.json` exact NDJSON shape; FireHOL level1 containing private ranges | NM-1 |
 | coroot-node-agent flags, mounts, default port 80, metric and label names, `container_id` format, arm64 footprint | NM-2 |
 | Kernel versions and `CONFIG_BPF_SYSCALL` on t2linux (mba1/mba2) and linux-raspi | NM-2 |
-| Whether the node-exporter scrape already adds a `node` label (possible `exported_node`) | NM-3 |
+| ~~Whether the node-exporter scrape already adds a `node` label (possible `exported_node`)~~ — verified: it does not (`honorLabels: true`, §5.2) | NM-3 |
 | apt package name `conntrack`; sshd unit name `ssh`; UFW log rate limits on these nodes | NM-3 |
 | Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping | NM-4 |
 | `StaticClientSeeder` accepting a client with no redirect URIs | NM-4 |
