@@ -556,7 +556,7 @@ NM-3 leaves `net.netfilter.nf_conntrack_acct` **unchanged** (default 0), because
 
 ### 5.6 PrometheusRules (NM-3)
 
-NM-3 creates `additionalPrometheusRulesMap.homelab-netmon` — NM-2 **appends** to this same map in §6.4, it does not create it, since the node script ships before coroot in the owner-approved order (NM-0 → NM-1 → NM-3 → NM-2 → NM-4). *Superseded for NM-2:* NM-2's rules use their own map key `homelab-netmon-egress` so the sub-project PRs cannot conflict inside one map (§6.4) (amended 2026-09-23, NM-2 prep: homelab PR for #118).
+NM-3 creates `additionalPrometheusRulesMap.homelab-netmon` — NM-2 **appends** to this same map in §6.4, it does not create it, since the node script ships before coroot in the owner-approved order (NM-0 → NM-1 → NM-3 → NM-2 → NM-4).
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -579,7 +579,7 @@ NM-3 creates `additionalPrometheusRulesMap.homelab-netmon` — NM-2 **appends** 
 | Tolerations and gate | `operator: Exists`. Scheduling is gated by `nodeSelector` `homelab.furchert.ch/coroot-node-agent: "enabled"`; `41_monitoring.yml` sets that label on the nodes in `coroot_node_agent_nodes` (default `[]`) and removes it elsewhere, so the spike and the all-node rollout are playbook runs, not manifest edits |
 | Resources (proposal; the spike confirms) | requests `cpu: 50m`, `memory: 128Mi`; limits `cpu: 300m`, `memory: 384Mi` (raised from 256Mi so an OOMKill cannot mask the §6.3 criterion-5 measurement) |
 | Labels | `app.kubernetes.io/name: coroot-node-agent` |
-| NetworkPolicy | `networkpolicy.yaml`: ingress to the agent pods only from the kube-prometheus-stack Prometheus pods (`app.kubernetes.io/name: prometheus`, `operator.prometheus.io/name: kube-prometheus-stack-prometheus`, verified live) on TCP 80. The agent serves `/metrics` and Go's `/debug/pprof/*` unauthenticated from a privileged hostPID pod. Egress is not restricted (amended 2026-09-23, NM-2 prep review). |
+| NetworkPolicy | `networkpolicy.yaml`: ingress to the agent pods only from the kube-prometheus-stack Prometheus pods (`app.kubernetes.io/name: prometheus`, `operator.prometheus.io/name: kube-prometheus-stack-prometheus`, verified live) on TCP 80. The agent serves `/metrics` and Go's `/debug/pprof/*` unauthenticated from a privileged hostPID pod; pprof shares the default mux and has no disable flag at v1.35.10. Node-local traffic is always admitted by Kubernetes, so host processes and hostNetwork pods on an agent node (Home Assistant has no node pin) still reach pprof. Accepting that, or adding a `/metrics`-only proxy sidecar (a new pinned image, needs owner approval), is an owner decision before the all-node rollout (amended 2026-09-24, PR #133 review). Egress is not restricted (amended 2026-09-23, NM-2 prep review). |
 
 ### 6.2 Scrape
 
@@ -635,7 +635,7 @@ Every criterion must hold on **both** raspi5 and mba1:
 
 ### 6.4 PrometheusRules
 
-These go in their own map key `additionalPrometheusRulesMap.homelab-netmon-egress` (NM-1 uses `homelab-netmon`, NM-3 `homelab-netmon-node`, PR #109 `homelab-backups`), so the sub-project PRs never edit the same rule group (amended 2026-09-23, NM-2 prep: homelab PR for #118).
+These go in `additionalPrometheusRulesMap.homelab-netmon-egress` (NM-2's own key, see §5.6), following the `homelab-backups` precedent from PR #109.
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -1063,7 +1063,7 @@ auth-service is Flux-auto-deployed on every merge to `main`, and its Spring conf
   - the cluster-internal auth-service, Prometheus and PostgreSQL.
 
   Blocklists are fetched **only** by data-service.
-- **Privileged DaemonSet.** coroot-node-agent runs privileged with hostPID in `monitoring`. It was explicitly approved by the owner, and the rollout needs a go after the spike. A NetworkPolicy limits ingress to its unauthenticated `:80` (`/metrics`, `/debug/pprof/*`) to Prometheus (§6.1); cluster-wide NetworkPolicies remain the follow-up `homelab#127` (amended 2026-09-23, NM-2 prep review).
+- **Privileged DaemonSet.** coroot-node-agent runs privileged with hostPID in `monitoring`. It was explicitly approved by the owner, and the rollout needs a go after the spike. A NetworkPolicy limits pod-network ingress to its unauthenticated `:80` (`/metrics`, `/debug/pprof/*`) to Prometheus; node-local sources, including hostNetwork pods such as Home Assistant, stay able to reach pprof (§6.1) (amended 2026-09-24, PR #133 review); cluster-wide NetworkPolicies remain the follow-up `homelab#127` (amended 2026-09-23, NM-2 prep review).
 - **HMAC key.** The key lives in auth-service only. data-service stores only HMACs, and the API exposes only an 8-hex-character prefix.
 
 ---

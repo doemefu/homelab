@@ -687,6 +687,16 @@ The Pis (6.8.0-raspi) have BTF; mba1 (6.12.79-1-t2-noble) and mba2 (6.19.10-2-t2
 (`CONFIG_DEBUG_INFO_NONE=y`). coroot-node-agent ships precompiled programs, so BTF is not
 required; the spike on mba1 is what proves that.
 
+**Residual risk: unauthenticated pprof.** The agent registers Go's `/debug/pprof/*` on the same
+`:80` listener as `/metrics`, and v1.35.10 has no flag to turn it off. The NetworkPolicy admits
+only Prometheus from the pod network, but Kubernetes always admits traffic from the pod's own node.
+Host processes and hostNetwork pods on an agent node can therefore still fetch profiles and heap
+dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Assistant, which has
+`hostNetwork: true` and no node pin. Before the all-node rollout the owner decides between:
+- accepting this for the homelab, since those sources already share the node;
+- a `/metrics`-only reverse-proxy sidecar with the agent bound to `127.0.0.1`, which adds a new pinned image and needs approval;
+- an upstream request for a disable flag.
+
 #### Spike runbook (needs the owner's go — docs/060 §12 Q4)
 
 1. **Baseline** (Prometheus port-forward, see "Access" above): record `prometheus_tsdb_head_series`
