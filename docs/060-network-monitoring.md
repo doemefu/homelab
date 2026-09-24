@@ -128,7 +128,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | last_attempt_at / last_success_at | timestamptz | yes | |
 | consecutive_failures | int | no | default 0 |
 | last_error | text | yes | Exception class and short message. **Never** a URL with a query string, a header or a token. `last_error` carries a message only for collector-authored `CollectorException`s; for any other exception only the class name is stored (no payload, no IPs) (amended 2026-09-23, NM-0: data-service PR #18). |
-| last_error_code | text | yes | CHECK constraint restricts values to `credentials`, `rate_limited`, `upstream`, `truncated`, `internal` (the §7.2 status error-code enum) (amended 2026-09-23, NM-0: data-service PR #18) |
+| last_error_code | text | yes | CHECK constraint restricts values to `credentials`, `rate_limited`, `upstream`, `truncated`, `partial`, `internal` (the §7.2 status error-code enum; `partial` added by `V5` (amended 2026-09-24, NM-4: data-service#23, homelab#134)) (amended 2026-09-23, NM-0: data-service PR #18) |
 
 **`netmon.inbound_request_groups`** (NM-1). Source: `httpRequestsAdaptiveGroups`. Granularity is 1 h. Write mode: replace per window. Retention: 90 d.
 
@@ -291,7 +291,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | `V2__netmon_inbound.sql` | NM-1 | `inbound_request_groups`, `firewall_events`, `ip_enrichment`, `blocklist_snapshots` and `blocklist_entries` |
 | `V3__netmon_lan.sql` | NM-3 | `lan_connection_snapshots`, `ufw_block_snapshots`, `ssh_auth_snapshots` |
 | `V4__netmon_egress.sql` | NM-2 | `egress_flow_snapshots` |
-| `V5__netmon_login_events.sql` | NM-4 | `login_events` |
+| `V5__netmon_login_events.sql` | NM-4 | `login_events`; `partial` added to the `collector_state.last_error_code` CHECK |
 
 The NM-1 tables moved out of `V1` (an earlier draft bundled them in): the Cloudflare field probe (§4.2) that fixes their NOT NULL columns runs only in NM-1's own Phase 1, after `V1` is already merged and immutable, and the `CLOUDFLARE_API_TOKEN` this needs may not exist at NM-0 time. **Rule:** the version number is the next free number at PR time; migrations are never merged out of order (`outOfOrder=false`), and a migration is never edited after it is merged to main. Flyway settings are `table=flyway_schema_history_data`, `default-schema=public` and `schemas=public,netmon`. Use `ddl-auto=validate` if JPA is used (§12 Q5).
 
@@ -461,7 +461,7 @@ The collector is disabled while `ABUSEIPDB_API_KEY` is absent. The owner turns i
 - **Fields read:** `data.abuseConfidenceScore` and `data.totalReports`. Nothing else is stored.
 - **Budget:** at most `netmon.abuseipdb.daily-budget` = **200** checks per UTC day, well under the free 1 000, and `per-run` = 10. The counter lives in memory plus `collector_state.cursor`, formatted as `date:count`.
 - **Candidates:** public IPs that are not blocklisted and have `abuseipdb_checked_at` null or older than 7 d. Only IPs meeting **one** of these conditions (the threshold) are checked, in this priority order:
-  1. ≥ 1 `login_events` failure or locked outcome in the last 24 h.
+  1. ≥ 1 `login_events` failure or locked outcome in the last 24 h (implemented (amended 2026-09-24, NM-4: data-service#23, homelab#134)).
   2. ≥ 1 `firewall_events` row with an action other than `skip`/`log` in the last 24 h.
   3. ≥ 50 requests in the last 24 h with ≥ 50 % of them `status >= 400`.
   4. Top 5 IPs by request count in the last 24 h.
@@ -768,9 +768,10 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 ```
 
 - `stale` = `lastSuccessAt` is older than 3 × the cadence.
-- `lastErrorCode` is `null`, `credentials`, `rate_limited`, `upstream`, `truncated` or `internal`. It is never a message.
+- `lastErrorCode` is `null`, `credentials`, `rate_limited`, `upstream`, `truncated`, `partial` or `internal`. It is never a message.
 - Before a collector's first success, staleness is measured from the service start time (amended 2026-09-23, NM-0: data-service PR #18).
 - A collector run that completes with a warning (e.g. `upstream` when no node exposes the NM-3 metrics yet, or `truncated`) is recorded as a success: `lastSuccessAt` advances, `consecutiveFailures` stays 0 and `lastErrorCode` carries the warning code. Consumers must treat `lastErrorCode = upstream` with `consecutiveFailures = 0` as "no data yet", not as an outage (amended 2026-09-24, data-service `INTERFACES.md`).
+- `partial` means a run that stored what it could but skipped upstream rows violating the table contract (§3.3). The message carries only the skipped count, never the payload. Like `upstream` and `truncated`, it is recorded as a success. The UI shows it as a warning, not as "no data yet". Consumers show unknown codes as a generic warning (amended 2026-09-24, NM-4: data-service#23, homelab#134).
 
 **`GET /inbound/summary?from&to&host&limit`** (NM-1)
 
@@ -817,7 +818,7 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 
 - `abuseIpDb` is `null` if the IP was never checked.
 - `firewallEvents` holds the last 20 items, in the same shape as the firewall-events list.
-- `logins` is `null` before NM-4 and `lan` is `null` before NM-3.
+- `logins` is always an object `{success, failure, locked}` counted in the window; it is zeros when the IP never logged in (amended 2026-09-24, NM-4: data-service#23, homelab#134). `lan` is `null` before NM-3.
 
 **`GET /egress/top?from&to&namespace&workload&scope&limit`** (NM-2). `scope` is `external` (the default) or `all`. `workload` is an optional filter (amended 2026-09-24, NM-2: data-service#22, homelab#118).
 
@@ -863,6 +864,12 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 ```
 
 - `failureSameHmac` counts failures whose `usernameHmac` equals the HMAC seen on that subject's successes. That links failed attempts to known accounts without storing the attempted usernames.
+- The window filter is `occurred_at ∈ [from, to)`. The default window is 24 h. `limit` is the top-N limit of `byIp` and `bySubject`: default 10, max 50.
+- `byIp` lists only events with a non-null `client_ip`. It is ordered by `failure + locked` descending, then total descending, then IP. `country`, `blocklisted` and `abuseScore` come from `ip_enrichment`; for a private IP they are `null`/`false`/`null`, never omitted.
+- `bySubject` has one row per subject that has a `success` in the window, or is the target of `failure` events in the window whose `usernameHmac` equals an HMAC seen on **any retained** `success` of that subject. The known pairs are the `DISTINCT (subject, username_hmac)` over all `success` rows, so repeated successes never multiply the count. `failureSameHmac` counts `failure` only; `locked` is excluded from the match. Rows are ordered by `failureSameHmac` descending, then `success` descending, then `subject`.
+- Rotating `LOGIN_EVENT_HMAC_KEY` resets the per-account failure matching for up to the 180 d retention: failures after a rotation match only successes after it. This is accepted.
+- `timeline` has buckets with data only, in UTC: 1 h when `to − from` ≤ 7 d, otherwise 1 d, the same rule as `/inbound/summary`.
+- (amended 2026-09-24, NM-4: data-service#23, homelab#134)
 
 **`GET /logins/events?from&to&outcome&ip&limit&cursor`** (NM-4)
 
@@ -873,6 +880,10 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 ```
 
 - Only the first 8 hex characters of the HMAC are exposed, which is enough to group events visually.
+- `limit` defaults to 50 with a max of 500 (§7.1), and `cursor` is opaque.
+- `outcome` must be `success`, `failure` or `locked`, otherwise the answer is 400 `invalid_parameter`.
+- `country` and `blocklisted` are `null`/`false` for a null or private `clientIp`. `/ips/{ip}` answers 404 for private IPs, because they are never enriched.
+- (amended 2026-09-24, NM-4: data-service#23, homelab#134)
 
 ### 7.3 Implementation notes that bind the contract
 
@@ -977,9 +988,22 @@ grant_type=client_credentials&scope=netmon:read
 
 **data-service side.** The `login-events` collector runs every minute.
 
-1. Get a token from `${AUTH_TOKEN_URL}` using `${AUTH_CLIENT_ID}:${AUTH_CLIENT_SECRET}` and `scope=login-events:read`.
-2. Page with `after = collector_state.cursor` while `hasMore` is true, up to 10 pages per run.
-3. Upsert on `event_id`, update the cursor, and enrich the IPs (§4.3).
+1. Get a token from `${AUTH_TOKEN_URL}`. Use HTTP Basic with `${AUTH_CLIENT_ID}` and `${AUTH_CLIENT_SECRET}` form-urlencoded (RFC 6749 §2.3.1) and `grant_type=client_credentials&scope=login-events:read`. Cache the token until 60 s before `expires_in`.
+2. Page with `after = collector_state.cursor` (0 when null) and `limit=500` while `hasMore` is true, up to 10 pages per run.
+   - For each page, first upsert on `event_id`, then enrich the IPs (§4.3), and only then set the cursor to `nextAfter`. A crash therefore replays at most one page, and the replay is absorbed.
+   - Rows violating §3.3 are skipped but covered by `nextAfter`. The run then ends with the warning `partial` (§7.2).
+3. `last_window_end` is set to the run start (data-service clock) minus the producer's 10 s settle, and only by a run that drains the outbox (`hasMore=false`). Completeness follows ingestion order (id cursor plus settle), not `occurredAt`. `max(occurredAt)` would stall on days without logins and make the collector look stale.
+4. Status mapping:
+   - A blank secret fails with `credentials` without calling out, and exports no freshness gauge.
+   - A token 400/401 or an outbox 403 fails with `credentials`.
+   - An outbox 401 is retried once with a fresh token, and fails with `credentials` only if the retry also gets 401. Both 401 and 403 drop the cached token.
+   - 429 fails with `rate_limited`. Other errors fail with `upstream`.
+   - An outbox 503 (feature disabled) succeeds with an `upstream` warning.
+   - For this collector only (a per-collector hook), `credentials` failures use the runner's standard backoff ladder, `min(cadence·2^(n−1), 30 min)`, so a wrong secret does not produce about 1 440 failed client authentications per day in auth-service. The other collectors are unchanged.
+5. If `last_success_at` is older than the 72 h outbox TTL at run start, log one line: `[login-events] last success older than the 72 h outbox TTL; events purged meanwhile are lost`, with no IPs.
+6. After an auth-service DB restore, outbox ids can restart below the cursor. The owner then resets the cursor (owner go, infrastructure `DEPLOYMENT.md` NM-4). The replay is absorbed by `event_id`.
+
+Rotating `LOGIN_EVENT_HMAC_KEY` resets the per-account failure matching (§7.2 `/logins/summary`) for up to the 180 d retention. This is accepted (amended 2026-09-24, NM-4: data-service#23, homelab#134).
 
 ---
 
@@ -1042,7 +1066,7 @@ Secrets are provisioned by the owner. Implementers add only variable **names**, 
 | `data_service_cloudflare_zone_id` | NM-1 | data-service | Not a credential, but kept with the token for one source of config |
 | `data_service_abuseipdb_key` | NM-1 (later) | data-service | Optional. Its assert is skipped when undefined. |
 | `auth_service_data_service_client_secret` | NM-4 | auth-service (`{noop}`-prefixed), data-service (plain) | Follows the `auth_service_<client>_client_secret` pattern. Optional, see below. |
-| `auth_service_login_event_hmac_key` | NM-4 | auth-service only | At least 32 characters, e.g. `openssl rand -base64 48`. Rotating it breaks HMAC continuity for events already stored. Optional, see below. |
+| `auth_service_login_event_hmac_key` | NM-4 | auth-service only | At least 32 characters, e.g. `openssl rand -base64 48`. Rotating it breaks HMAC continuity for events already stored: per-account failure matching resets for up to 180 d (accepted, §7.6). Optional, see below. |
 | *(reused)* `auth_service_furchert_ch_client_secret` | NM-0 | furchert-ch (existing `oidc-client-secret`) | **No new var.** The client-credentials call uses the existing secret. |
 
 **Kubernetes Secrets** (ns `apps`, created by `59_app_services.yml`, `no_log: true`)
@@ -1231,3 +1255,4 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 
 Reviewed 2026-09-23 (plan-reviewer, PASS WITH CHANGES, 32 findings applied); amended 2026-09-23 after data-service PR #18.
 NM-2 amendments (data-service#22, homelab#118): 2026-09-24.
+NM-4 amendments (data-service#23, homelab#134): 2026-09-24.
