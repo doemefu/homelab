@@ -368,40 +368,52 @@ additionalPrometheusRulesMap:
           # rollout (new pod name -> new container_id) would re-report all of a workload's known
           # destinations. Pods that do not match (StatefulSets, systemd units) keep the raw
           # container_id. The destination filter drops pod/service CIDRs, LAN and loopback.
+          # `dest` = actual_destination (ip:port) when coroot reports one, else destination.
+          # coroot v1.35.10 (common/net.go NewDestinationKey) reports an external name that
+          # resolves to several IPs, or ends in .amazonaws.com/.googleapis.com/.pkg.dev/.gcr.io,
+          # as destination="<fqdn>:<port>" with an EMPTY actual_destination; keyed by
+          # actual_destination alone, all such names of a workload would collapse into one "" key
+          # and only the first would ever alert. One alert per (workload, dest).
           # severity info: the chart's InfoInhibitor normally suppresses info alerts in
           # Alertmanager unless a warning/critical fires in the same namespace (here: monitoring),
           # so this normally shows in the Alertmanager and Prometheus UIs without paging Discord
           # (docs/060 §6.4).
           - alert: NetmonNewExternalDestination
             expr: |
-              count by (workload) (
-                group by (workload, actual_destination) (
+              group by (workload, dest) (
                   label_replace(
                     label_replace(
-                      container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"},
-                      "workload", "$1", "container_id", "(.*)"),
-                    "workload", "$1/$2/$3", "container_id",
-                    "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)")
-                )
-                unless on (workload, actual_destination)
-                group by (workload, actual_destination) (
+                      label_replace(
+                        label_replace(
+                          container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"},
+                          "workload", "$1", "container_id", "(.*)"),
+                        "workload", "$1/$2/$3", "container_id",
+                        "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)"),
+                      "dest", "$1", "destination", "(.+)"),
+                    "dest", "$1", "actual_destination", "(.+)")
+              )
+              unless on (workload, dest)
+              group by (workload, dest) (
                   label_replace(
                     label_replace(
-                      last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m),
-                      "workload", "$1", "container_id", "(.*)"),
-                    "workload", "$1/$2/$3", "container_id",
-                    "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)")
-                )
+                      label_replace(
+                        label_replace(
+                          last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m),
+                          "workload", "$1", "container_id", "(.*)"),
+                        "workload", "$1/$2/$3", "container_id",
+                        "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)"),
+                      "dest", "$1", "destination", "(.+)"),
+                    "dest", "$1", "actual_destination", "(.+)")
               )
             for: 0m
             labels:
               severity: info
               namespace: monitoring
             annotations:
-              summary: "{{ $labels.workload }} connected to {{ $value }} new external destination(s)"
+              summary: "{{ $labels.workload }} connected to new external destination {{ $labels.dest }}"
               description: >-
-                {{ $labels.workload }} opened TCP connections to {{ $value }} external ip:port
-                destination(s) not seen in the previous 24 h. Details:
+                {{ $labels.workload }} opened a TCP connection to {{ $labels.dest }}, which it did
+                not connect to in the previous 24 h. Details:
                 container_net_tcp_successful_connects_total in Prometheus or the egress section of
                 /dashboard/network. Expected to be noisy for CDN-rotating destinations.
           # Up/scrape health that the chart does not already cover. Pod crash loops, rollout
