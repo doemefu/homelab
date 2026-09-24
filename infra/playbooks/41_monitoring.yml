@@ -22,12 +22,14 @@
     # homelab.furchert.ch/coroot-node-agent=enabled, every other node loses it, and the
     # DaemonSet schedules only on labelled nodes. Empty = the DaemonSet exists but runs no pod.
     # This list is the source of truth: nodes not listed lose the label on the next run.
-    # raspi5 + mba1 = the owner-approved spike nodes (2026-09-24); mba2 (different t2 kernel)
-    # and raspi4 (4 GB RAM) are later decisions, added by PR. Stop all agents with
+    # raspi5 + mba1 = the owner-approved spike nodes (2026-09-24); mba2 (t2 kernel 6.19, no BTF)
+    # joined on 2026-09-24 after their measurements (owner go, #118). raspi4 (4 GB RAM) follows
+    # after a further 24 h, by its own PR. Stop all agents with
     # -e '{"coroot_node_agent_nodes": []}'. Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
     coroot_node_agent_nodes:
       - raspi5
       - mba1
+      - mba2
     coroot_node_agent_label: homelab.furchert.ch/coroot-node-agent
     coroot_node_agent_dir: "{{ playbook_dir }}/../../cluster/monitoring/coroot-node-agent"
 
