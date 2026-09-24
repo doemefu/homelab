@@ -312,6 +312,42 @@ additionalPrometheusRulesMap:
                 the `default` snapshot group and can repeat the #101 disk-pressure incident.
                 Re-apply infra/playbooks/30_longhorn.yml; runbook in DEPLOYMENT.md
                 "Backup alerting (#92)".
+  # NM-3 node-script alerts (docs/060-network-monitoring.md §5.6, homelab#117, PR #132). The
+  # metrics come from homelab-netmon-collect (role netmon_node) via the node-exporter
+  # textfile collector (PR #109). Same top-level map as the entries above.
+  homelab-netmon-node:
+    groups:
+      - name: homelab-netmon-node
+        rules:
+          # The script runs every minute; 600 s = ten missed runs. A node that has never
+          # written the file has no series and does not fire (it is not "expected", §4.6);
+          # a broken file shows up as the chart's NodeTextFileCollectorScrapeError.
+          - alert: NetmonNodeScriptStale
+            expr: time() - homelab_netmon_last_success_timestamp_seconds > 600
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "homelab-netmon-collect on {{ $labels.node }} has not succeeded for more than 10 minutes"
+              description: >-
+                The LAN metrics file on {{ $labels.node }} is stale, so data-service skips that node
+                for the NM-3 snapshots. Check `systemctl status homelab-netmon.service` and
+                `journalctl -u homelab-netmon -n 20` on the node; runbook in DEPLOYMENT.md
+                "Network monitoring: node LAN metrics (NM-3)".
+          # info: routed like everything else, but the chart's InfoInhibitor suppresses info
+          # alerts in Discord unless a warning fires in the same namespace (monitoring).
+          # It stays visible in Prometheus/Alertmanager.
+          - alert: NetmonSeriesTruncated
+            expr: homelab_netmon_truncated_series > 0
+            for: 30m
+            labels:
+              severity: info
+            annotations:
+              summary: "{{ $labels.metric }} on {{ $labels.node }} exceeds the netmon series cap"
+              description: >-
+                {{ $value }} series of {{ $labels.metric }} on {{ $labels.node }} were summed into
+                src_ip="other" because netmon_node_max_series was exceeded. Usually a scan; raise the
+                cap in infra/roles/netmon_node/defaults/main.yml only if it persists.
 
   # --- Network monitoring: coroot-node-agent egress rules (NM-2, #118) ---
   # Contract: docs/060-network-monitoring.md §6.4. Own map key so the NM-1 (`homelab-netmon`),

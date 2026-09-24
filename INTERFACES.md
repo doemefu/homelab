@@ -493,9 +493,25 @@ as a normal node-exporter series.
 | Producer | File | Metrics |
 |----------|------|---------|
 | `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+| `homelab-netmon-collect` on every node (`infra/roles/netmon_node`) | `homelab_netmon.prom` | see "Node textfile metrics (NM-3)" below |
 
 Write the file atomically (temp file in the same directory, then `mv`); a partially written file
 makes node-exporter discard the whole directory and set `node_textfile_scrape_error=1`.
+
+### Node textfile metrics (NM-3)
+
+`homelab-netmon-collect` (role `netmon_node`, every minute) writes `homelab_netmon.prom` into the node-exporter textfile directory `/var/lib/node_exporter/textfile_collector` (enabled by homelab PR #109). Consumer: data-service's LAN snapshot collector via Prometheus (`docs/060-network-monitoring.md` §4.6). The names and labels are a cross-repo contract — change `docs/060` §5.2 first.
+
+| Metric | Labels | Kind |
+|--------|--------|------|
+| `homelab_lan_connections` | `node`, `dport` (1883, 22, 8123, 6443, 10250), `src_ip`, `state` | point-in-time gauge |
+| `homelab_ufw_blocks_bucket` | `node`, `src_ip`, `dport`, `proto` | last completed 15-min bucket |
+| `homelab_sshd_auth_bucket` | `node`, `src_ip`, `outcome` | last completed 15-min bucket |
+| `homelab_netmon_bucket_end_timestamp_seconds` | `node` | bucket guard |
+| `homelab_netmon_last_success_timestamp_seconds` | `node` | staleness (`NetmonNodeScriptStale`) |
+| `homelab_netmon_truncated_series` | `node`, `metric` | cap overflow (`NetmonSeriesTruncated`) |
+
+`src_ip` is a LAN IP verbatim, the literal `10.42.0.0/16` for pod IPs, a public IP verbatim (UFW/sshd only) or `other`. The `node` label is the Ansible inventory hostname; node-exporter's ServiceMonitor keeps it (`honorLabels: true`).
 
 ---
 

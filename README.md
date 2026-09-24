@@ -100,7 +100,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 
 | Area | Feature | Source of Truth |
 |------|---------|-----------------|
-| **Provisioning** | Idempotent node bootstrap, base hardening, storage setup | `infra/playbooks/00_bootstrap.yml`, `10_base.yml`, `infra/roles/{base,hardening,storage,mac_tweaks}` |
+| **Provisioning** | Idempotent node bootstrap, base hardening, storage setup | `infra/playbooks/00_bootstrap.yml`, `10_base.yml`, `infra/roles/{base,hardening,storage,mac_tweaks,netmon_node}` |
 | **Kubernetes** | k3s install/upgrade, Traefik config, cert-manager, Cloudflare tunnel | `infra/playbooks/20_k3s.yml`, `40_platform.yml` |
 | **Storage** | Longhorn as default StorageClass (RF=2), local-path as non-default fallback | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` |
 | **Observability** | kube-prometheus-stack, ServiceMonitors, Alertmanager→Discord, coroot-node-agent egress metrics (NM-2, spike-gated) | `infra/playbooks/41_monitoring.yml`, `cluster/values/kube-prometheus-stack.yaml`, `cluster/monitoring/coroot-node-agent/` |

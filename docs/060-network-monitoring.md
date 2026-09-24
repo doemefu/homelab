@@ -501,7 +501,7 @@ group by (node, container_id, destination, actual_destination) (last_over_time(c
 - **Script:** `/usr/local/sbin/homelab-netmon-collect`, written in Python 3 with the stdlib only (the Ubuntu base python3; no pip).
 - **Units:** `homelab-netmon.service` (`Type=oneshot`, runs as root because conntrack and the kernel journal need it) and `homelab-netmon.timer` (`OnCalendar=*-*-* *:*:05`, `AccuracySec=1s`, `Persistent=false`).
 - **Output:** one file, `/var/lib/node_exporter/textfile_collector/homelab_netmon.prom`. It is written atomically to `…/.homelab_netmon.prom.tmp` and then renamed.
-- **Prerequisite:** the directory and the node-exporter `--collector.textfile.directory` flag come from `homelab` PR #109, via `prometheus-node-exporter.extraArgs` and a hostPath mount. NM-3 must not duplicate them. If #109 has not merged by then, NM-3 rebases on it.
+- **Prerequisite:** the node-exporter `--collector.textfile.directory` flag comes from `homelab` PR #109, via `prometheus-node-exporter.extraArgs` and a hostPath mount. NM-3 must not duplicate it. The directory is created by both `netmon_node` and #109's storage role, with identical attributes. NM-3's PR targets `main`, and #109 merges first (§12 Q3) (amended 2026-09-23, NM-3: PR #132).
 - **Playbook:** role `netmon_node` added to `10_base.yml`, gated behind tag `netmon_node`, mirroring the `mac_tweaks` precedent (PR #108). **Decision (main session, Phase 3 review, 2026-09-23):** not `41_monitoring.yml`, and not a new playbook — `10_base.yml` already runs with `become: true` for every node, so this role needs no new privilege escalation to justify.
 - **Configuration:** role variables are `netmon_node_lan_cidr` (default from the inventory LAN var, `192.168.1.0/24`), `netmon_node_pod_cidr` (`10.42.0.0/16`), `netmon_node_ports` (`[1883, 22, 8123, 6443, 10250]` — `10250`, the kubelet API, is added beyond the four ports originally discussed with the owner; it is read-only visibility into an existing UFW-allowed port, not a new opening), `netmon_node_max_series` (`200`) and `netmon_node_conntrack_acct` (`false`). The role is idempotent.
 
@@ -514,9 +514,9 @@ homelab_lan_connections{node="raspi5",dport="1883",src_ip="192.168.1.50",state="
 # HELP homelab_ufw_blocks_bucket UFW BLOCK log lines in the last completed 15-minute bucket (see homelab_netmon_bucket_end_timestamp_seconds).
 # TYPE homelab_ufw_blocks_bucket gauge
 homelab_ufw_blocks_bucket{node="raspi5",src_ip="192.168.1.77",dport="23",proto="TCP"} 4
-# HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket.
+# HELP homelab_sshd_auth_bucket sshd authentication results in the last completed 15-minute bucket (failed is a lower bound).
 # TYPE homelab_sshd_auth_bucket gauge
-homelab_sshd_auth_bucket{node="raspi5",src_ip="10.42.0.12",outcome="failed"} 2
+homelab_sshd_auth_bucket{node="raspi5",src_ip="10.42.0.0/16",outcome="failed"} 2
 # HELP homelab_netmon_bucket_end_timestamp_seconds End (exclusive, unix seconds) of the bucket the *_bucket gauges describe.
 # TYPE homelab_netmon_bucket_end_timestamp_seconds gauge
 homelab_netmon_bucket_end_timestamp_seconds{node="raspi5"} 1758620700
@@ -528,9 +528,11 @@ homelab_netmon_last_success_timestamp_seconds{node="raspi5"} 1758620765
 homelab_netmon_truncated_series{node="raspi5",metric="homelab_ufw_blocks_bucket"} 0
 ```
 
-- **`node` label:** written by the script from the Ansible `inventory_hostname`. If the node-exporter scrape config already attaches a `node` label, Prometheus renames the file's label to `exported_node`, and the NM-3 plan must then align the §4.6 queries (unverified).
-- **`src_ip` values:** an IP inside `lan_cidr` is kept verbatim. An IP inside `pod_cidr` becomes the literal `10.42.0.0/16`. Anything else becomes `other`. For `ufw` and `sshd`, public IPs are also kept verbatim, because these are the attack signals. Tunnelled SSH appears as a pod or node IP.
-- **Cardinality bound:** the /24 LAN has 254 sources, times 5 ports and a few states. The hard cap is `netmon_node_max_series` per metric per node. The overflow is summed into `src_ip="other"` and counted in `homelab_netmon_truncated_series`.
+- **`node` label:** written by the script from the Ansible `inventory_hostname` (`raspi5`, `raspi4`, `mba1`, `mba2`). Verified: the node-exporter ServiceMonitor (chart 69.3.1) sets `honorLabels: true` and adds no `node` target label, so the file's label is kept as `node`, not `exported_node`, and the §4.6 queries stand (amended 2026-09-23, NM-3: homelab PR for #117).
+- **`src_ip` values:** an IP inside `lan_cidr` is kept verbatim. An IP inside `pod_cidr` becomes the literal `10.42.0.0/16` (for all three metrics; the sshd example above was corrected accordingly). Anything else becomes `other`. For `ufw` and `sshd`, public (globally routable) IPs are also kept verbatim, because these are the attack signals. Tunnelled SSH appears as a pod or node IP.
+- **sshd outcomes are disjoint:** one connection for a non-existent user counts once as `invalid_user` (the `Invalid user …` line); its follow-up `Failed … for invalid user …` line is **not** counted as `failed`, and `Connection closed by / Disconnected from invalid user …` lines are not counted at all. `failed` therefore means failed authentication for an existing user (amended 2026-09-23, NM-3: PR #132).
+- **Own outbound flows:** `homelab_lan_connections` skips conntrack entries whose original source is one of the node's own addresses (`ip -o addr show`) — the node is then the client (e.g. the API server calling another node's kubelet on :10250), and the receiving node already counts the flow as inbound (amended 2026-09-23, NM-3: homelab PR for #117).
+- **Cardinality bound:** the /24 LAN has 254 sources, times 5 ports and a few states. The hard cap is `netmon_node_max_series` per metric per node. The highest-valued series are kept verbatim; the overflow is summed into `src_ip="other"` (other labels kept) and counted in `homelab_netmon_truncated_series` (number of input series not emitted verbatim). For `homelab_ufw_blocks_bucket` the overflow also collapses `dport` to `0`, because one scanner sweeping ports would otherwise stay unbounded; an overflow row is therefore `{src_ip="other",dport="0",proto=<proto>}` (amended 2026-09-23, NM-3: homelab PR for #117).
 
 ### 5.3 Why gauges and buckets, not counters (decided)
 
@@ -559,7 +561,12 @@ journalctl -u ssh --since "@<S>" --until "@<E>" --no-pager -o cat
 #   "Failed <method> for (invalid user )?<user> from <ip>" -> failed
 #   "Invalid user <user> from <ip>"              -> invalid_user
 #   usernames are parsed only to classify and are NEVER emitted as labels
+#   the username is attacker-controlled and may contain " from <ip> port <n>": the patterns
+#   are greedy and anchored at the end of the line (… from (\S+) port \d+ ssh2(?:: .*)?$ and
+#   … from (\S+) port \d+$), so the peer address sshd appends last always wins
 ```
+
+`conntrack -L` lists the **IPv4** table only (its default family); v1 makes no `-f ipv6` call because the LAN is IPv4. `failed` in `homelab_sshd_auth_bucket` is a **lower bound**: at the default `LogLevel INFO`, sshd logs rejected public keys only once a connection gives up (after `MaxAuthTries`/2 attempts), not per offered key (amended 2026-09-23, NM-3: PR #132).
 
 UFW's logging rules are rate-limited (`-m limit`, which is 3/min burst 10 at the default level; unverified on these nodes). `homelab_ufw_blocks_bucket` is therefore a **lower bound**, and the UI must label it that way.
 
@@ -569,7 +576,7 @@ NM-3 leaves `net.netfilter.nf_conntrack_acct` **unchanged** (default 0), because
 
 ### 5.6 PrometheusRules (NM-3)
 
-NM-3 creates `additionalPrometheusRulesMap.homelab-netmon` — NM-2 **appends** to this same map in §6.4, it does not create it, since the node script ships before coroot in the owner-approved order (NM-0 → NM-1 → NM-3 → NM-2 → NM-4).
+NM-3's rules go under `additionalPrometheusRulesMap.homelab-netmon-node` (group `homelab-netmon-node`). Each producer has its own key, and each key renders its own PrometheusRule: `homelab-netmon` (NM-1, PR #131), `homelab-netmon-node` (NM-3, PR #132) and `homelab-netmon-egress` (NM-2, PR #133; see §6.4). This keeps the PRs independently mergeable (amended 2026-09-23, NM-3: PR #132). `NetmonSeriesTruncated` is `info`, which the chart's `InfoInhibitor` keeps out of Discord unless a warning fires in the same namespace; it stays visible in Prometheus/Alertmanager.
 
 | Alert | Expr | For | Severity |
 |---|---|---|---|
@@ -1114,7 +1121,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 |---|---|---|---|
 | Q1 | Cloudflare token creation, plus whether Firewall Services:Read is needed | **NM-1 (blocker)** | — (owner action) |
 | Q2 | Free-plan availability of `clientIP`, `clientASNDescription` and `userAgent` (§4.2 probe) | **NM-1 (blocker if `clientIP` is missing)** | Drop the optional fields |
-| Q3 | `homelab` PR #109 merged (textfile collector) | **NM-3 (blocker)** | Rebase NM-3 on #109 |
+| Q3 | `homelab` PR #109 merged (textfile collector) | **NM-3 (blocker)** | NM-3's PR does not duplicate #109 and targets `main`; #109 merges first, then NM-3 resolves the `additionalPrometheusRulesMap` conflict (one key, all entries) (amended 2026-09-23, NM-3) |
 | Q4 | Go for the coroot spike, then for the all-node rollout | **NM-2 (blocker)** | — (owner action) |
 | Q5 | data-service dependency set — see the table below. It must be approved before NM-0 implementation starts. | **NM-0 (blocker: approval)** | — |
 | Q6 | Reuse the `furchert-ch` client (chosen) or a dedicated client | non-blocker | Reuse |
@@ -1157,7 +1164,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | Cloudflare `settings` node shape; `count` being sample-adjusted; `clientCountryName` being ISO-2; `maxPageSize` values; analytics ingest delay ≤ 2 min | NM-1 |
 | Spamhaus `drop_v4.json` exact NDJSON shape; FireHOL level1 containing private ranges | NM-1 |
 | coroot-node-agent arm64/amd64 footprint and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
-| Whether the node-exporter scrape already adds a `node` label (possible `exported_node`) | NM-3 |
+| ~~Whether the node-exporter scrape already adds a `node` label (possible `exported_node`)~~ — verified: it does not (`honorLabels: true`, §5.2) | NM-3 |
 | apt package name `conntrack`; sshd unit name `ssh`; UFW log rate limits on these nodes | NM-3 |
 | Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping | NM-4 |
 | `StaticClientSeeder` accepting a client with no redirect URIs | NM-4 |

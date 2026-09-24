@@ -1,0 +1,6 @@
+tcp      6 431999 ESTABLISHED src=192.168.1.50 dst=192.168.1.61 sport=51234 dport=1883 src=10.42.0.31 dst=10.42.0.1 sport=1883 dport=51234 [ASSURED] mark=0 use=1
+tcp      6 431980 ESTABLISHED src=192.168.1.50 dst=192.168.1.61 sport=51240 dport=1883 src=10.42.0.31 dst=10.42.0.1 sport=1883 dport=51240 [ASSURED] mark=0 use=1
+tcp      6 102 TIME_WAIT src=192.168.1.51 dst=192.168.1.61 sport=40001 dport=1883 src=10.42.0.31 dst=10.42.0.1 sport=1883 dport=40001 [ASSURED] mark=0 use=1
+tcp      6 431999 ESTABLISHED src=10.42.1.7 dst=10.43.12.9 sport=33000 dport=1883 src=10.42.0.31 dst=10.42.1.7 sport=1883 dport=33000 [ASSURED] mark=0 use=1
+tcp      6 118 SYN_SENT src=192.168.1.61 dst=8.8.8.8 sport=45000 dport=1883 [UNREPLIED] src=8.8.8.8 dst=192.168.1.61 sport=1883 dport=45000 mark=0 use=1
+tcp      6 60 SYN_RECV src=8.8.4.4 dst=192.168.1.61 sport=45001 dport=1883 src=10.42.0.31 dst=8.8.4.4 sport=1883 dport=45001 mark=0 use=1
