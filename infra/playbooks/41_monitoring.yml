@@ -221,3 +221,33 @@
               matchLabels:
                 app.kubernetes.io/name: traefik
       delegate_to: localhost
+
+    # data-service (docs/060-network-monitoring.md §7.1, NM-1 #116): Spring Boot actuator
+    # metrics on the Service port named `http` (8082), path /actuator/prometheus (served
+    # without auth, no IP labels). Lives here — not in 50_apps_infra.yml — because
+    # data-service is Flux-deployed (like traefik is not deployed by this playbook either)
+    # and because the homelab-netmon alert rules that depend on this scrape (job
+    # "data-service", incl. an absent() branch) are rolled out by the same run.
+    - name: Data-service ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: data-service
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: http
+                path: /actuator/prometheus
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - apps
+            selector:
+              matchLabels:
+                app: data-service
+      delegate_to: localhost
