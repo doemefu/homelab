@@ -679,6 +679,37 @@ then point kubectl at the local end.
 > Keep the `-N -L …` terminal running for the whole playbook run — if the forward drops, the
 > playbook fails the same way.
 
+**Node-level playbooks off-LAN (SSH jump config).** The forward above only serves playbooks whose
+tasks run on localhost. Node-level playbooks (`10_base`, `20_k3s`, `30_longhorn`) SSH to the
+nodes' LAN IPs and fail off-LAN with `UNREACHABLE`. Route them through the Cloudflare Access SSH
+host with an SSH config that lives only in the operator's `~/.ssh` (not in this repo), e.g.
+`~/.ssh/homelab-offlan.conf`:
+
+```
+Host 192.168.1.61
+  HostName ssh.furchert.ch
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  ProxyCommand cloudflared access ssh --hostname %h
+Host 192.168.1.*
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  StrictHostKeyChecking accept-new
+  ProxyCommand ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
+```
+
+```bash
+cloudflared access login https://ssh.furchert.ch   # prerequisite: a valid Access login
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/10_base.yml --tags netmon_node
+```
+
+- raspi5 (`192.168.1.61`) has a direct entry because a jump through raspi5 to its own LAN IP
+  timed out once. The other nodes jump through raspi5.
+- `ANSIBLE_SSH_ARGS` replaces Ansible's default SSH arguments, so the `ControlMaster`/`ControlPersist`
+  flags are passed again explicitly.
+- Verified on all four nodes on 2026-09-24.
+
 #### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
 
 For a single read or a single-manifest apply, run kubectl on the control-plane node through the
@@ -1296,6 +1327,7 @@ Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the ap
 ```bash
 # 1. After #109 (storage role + 41_monitoring.yml) and this PR are merged.
 #    One node first; --diff is safe (no secrets in these templates).
+#    Off-LAN: prefix each command with ANSIBLE_SSH_ARGS=… (see "Off-LAN kubectl / Ansible Access").
 ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node --check --diff
 ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node
 ansible-playbook infra/playbooks/10_base.yml --tags netmon_node          # all nodes
