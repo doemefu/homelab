@@ -455,7 +455,7 @@ After every Cloudflare, LAN (public IPs only), egress (external destinations) or
 
 ### 4.5 AbuseIPDB (NM-1, activated later)
 
-The collector is disabled while `ABUSEIPDB_API_KEY` is absent (the owner will approve the key later).
+The collector is disabled while `ABUSEIPDB_API_KEY` is absent. The owner turns it on with the optional SOPS variable `data_service_abuseipdb_key` (§9), following infrastructure `DEPLOYMENT.md` "NM-1 follow-up: AbuseIPDB key (optional)" (amended 2026-09-24, homelab#116 follow-up).
 
 - **Request:** `GET https://api.abuseipdb.com/api/v2/check?ipAddress=<ip>&maxAgeInDays=90` with headers `Key: ${ABUSEIPDB_API_KEY}` and `Accept: application/json`.
 - **Fields read:** `data.abuseConfidenceScore` and `data.totalReports`. Nothing else is stored.

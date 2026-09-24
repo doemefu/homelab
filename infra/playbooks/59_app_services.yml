@@ -44,6 +44,10 @@
 #   data_service_db_password: <openssl rand -hex 24>     # Postgres password for the data_service role
 #   data_service_cloudflare_analytics_token: <Cloudflare API token, zone furchert.ch, Analytics:Read>  # NM-1
 #   data_service_cloudflare_zone_id: <zone ID of furchert.ch>                                          # NM-1
+#   data_service_abuseipdb_key: <AbuseIPDB API key>  # NM-1 follow-up, optional; free plan key from abuseipdb.com
+#       data-service receives it as data-service-secrets/abuseipdb-api-key (env ABUSEIPDB_API_KEY) and
+#       enables the reputation collector. Unset = key skipped; set but empty = the play fails.
+#       Removing it later does NOT delete the key — see DEPLOYMENT.md "NM-1 follow-up: AbuseIPDB key (optional)".
 #
 # NM-4 login-event variables (docs/060-network-monitoring.md §7.6, §9) — OPTIONAL:
 #   auth_service_data_service_client_secret: <openssl rand -hex 32; plain, no {noop}>
@@ -122,6 +126,25 @@
       when: >-
         auth_service_data_service_client_secret is defined
         or auth_service_login_event_hmac_key is defined
+      delegate_to: localhost
+
+    - name: NM-1 AbuseIPDB — assert that the optional SOPS variable is not empty
+      ansible.builtin.assert:
+        that:
+          - data_service_abuseipdb_key | length > 0
+        fail_msg: >-
+          data_service_abuseipdb_key is set but empty. Set the AbuseIPDB API key or remove the
+          variable — see the header comment in this playbook.
+      when: data_service_abuseipdb_key is defined
+      delegate_to: localhost
+
+    - name: NM-1 AbuseIPDB — report that the optional key is skipped
+      ansible.builtin.debug:
+        msg: >-
+          data_service_abuseipdb_key is not set: skipping data-service-secrets/abuseipdb-api-key.
+          A key created by an earlier run is NOT removed (see DEPLOYMENT.md "NM-1 follow-up: AbuseIPDB key
+          (optional)"); without it, data-service keeps the reputation collector off.
+      when: data_service_abuseipdb_key is not defined
       delegate_to: localhost
 
     - name: NM-4 login events — report that the optional keys are skipped
@@ -557,8 +580,8 @@
             # NM-1 (#116): Cloudflare GraphQL Analytics token + zone ID, read by the
             # inbound collector as CLOUDFLARE_API_TOKEN / CLOUDFLARE_ZONE_ID. Env vars are
             # read at pod start: restart data-service after adding or rotating a key.
-            # Still to come: abuseipdb-api-key (NM-1, once the key is approved).
-            # NM-4's auth-client-secret is added by the next task (optional variables).
+            # The optional abuseipdb-api-key (NM-1 follow-up) and NM-4's auth-client-secret
+            # are added by the next tasks (optional variables).
             db-username: data_service
             db-password: "{{ data_service_db_password }}"
             cloudflare-api-token: "{{ data_service_cloudflare_analytics_token }}"
@@ -582,5 +605,23 @@
             # Read by data-service as AUTH_CLIENT_SECRET (optional secretKeyRef, docs/060 §9).
             auth-client-secret: "{{ auth_service_data_service_client_secret }}"
       when: auth_service_login_events_configured
+      no_log: true
+      delegate_to: localhost
+
+    - name: Data-service — add the optional abuseipdb-api-key key (NM-1 follow-up, reputation collector)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: data-service-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # Read by data-service as ABUSEIPDB_API_KEY (optional secretKeyRef, docs/060 §4.5, §9).
+            # Env vars are read at pod start: delete the data-service pod after adding it.
+            abuseipdb-api-key: "{{ data_service_abuseipdb_key }}"
+      when: data_service_abuseipdb_key is defined
       no_log: true
       delegate_to: localhost
