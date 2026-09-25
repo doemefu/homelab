@@ -247,29 +247,43 @@ sudo k3s kubectl get --raw /healthz --request-timeout=10s
 sudo k3s kubectl get --raw /readyz?verbose --request-timeout=10s
 ```
 
-##### Temporary mitigation: apiserver etcd health-check timeout
+##### Apiserver etcd health-check timeout
 
-If `/readyz`'s etcd check is failing purely because kine queries are momentarily slower than the
-apiserver's default 2s health-check timeouts, a drop-in raising both to 20s buys time for the
-online compactor to catch up (or for offline compaction to be scheduled) without the embedded
-cloud-controller-manager panicking and restart-looping on a failed `/healthz`:
+`/readyz`'s etcd check can fail purely because kine queries are momentarily slower than the
+apiserver's built-in 2s health-check timeouts, without anything else being broken — and once it
+fails, the embedded cloud-controller-manager panics and restart-loops on a failed `/healthz` (see
+"Symptoms" above), which makes an already-degraded cluster worse. Since 2026-09-24 (owner
+decision on homelab#129), both timeouts are raised to 20s permanently by the `k3s` role, not by a
+manual drop-in: `infra/roles/k3s/templates/k3s-server.service.j2`'s `ExecStart` sets
+`--kube-apiserver-arg=etcd-healthcheck-timeout={{ k3s_apiserver_etcd_healthcheck_timeout }}` and
+the matching `etcd-readycheck-timeout` flag (both default `20s`,
+`infra/roles/k3s/defaults/main.yml`), applied only to the control-plane node (the
+`k3s-server.service.j2` template is only rendered for the `k3s_server` group). This buys the
+online compactor — or an offline compaction run — time before the CCM starts restart-looping,
+without anyone having to apply the incident's manual mitigation by hand first.
 
-`/etc/rancher/k3s/config.yaml.d/90-incident-129-etcd-healthcheck.yaml`:
-```yaml
-kube-apiserver-arg:
-  - "etcd-healthcheck-timeout=20s"
-  - "etcd-readycheck-timeout=20s"
-```
+The 2026-09-23 incident applied this as a hand-written config-file drop-in at
+`/etc/rancher/k3s/config.yaml.d/90-incident-129-etcd-healthcheck.yaml` first (mitigation 2, 17:09
+CEST); `infra/roles/k3s/tasks/server.yml` now removes that file on every run — redundant once the
+same timeouts are on the systemd unit's command line — as part of converging the node to the
+templated config.
+
+**Owner step:** apply the role with playbook 20, limited to the control-plane node:
 
 ```bash
-ssh raspi5 "sudo systemctl restart k3s --no-block"
+# on the LAN
+ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
+
+# off-LAN — see "Off-LAN kubectl / Ansible Access" for the SSH jump config prerequisite
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
 ```
 
-**This drop-in is not in this repo and is not applied by any playbook.** It was created by hand
-on raspi5 during the 2026-09-23 incident (mitigation 2, 17:09 CEST) and is still in place as of
-this writing. Whether to codify it into `infra/roles/k3s` (as a template shipped to every server
-node) or remove it now that compaction has caught up is an open decision tracked in
-homelab#129 — do not add it to the k3s role from this section alone.
+The first run restarts k3s on raspi5 (~30-60s control-plane blip while the apiserver picks up the
+new flags; containers and public endpoints are unaffected — `k3s.service` ships with
+`KillMode=process`). Subsequent runs are idempotent: the drop-in is already gone and the
+templated unit is already up to date, so neither task reports `changed` and k3s is not restarted
+again.
 
 ##### Offline compaction
 
@@ -608,8 +622,11 @@ Host raspi5
   HostName ssh.furchert.ch
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   ProxyCommand cloudflared access ssh --hostname %h
 ```
+
+Always pair `~/.ssh/homelab` with `IdentitiesOnly yes` (`-o IdentitiesOnly=yes` on the command line). Otherwise ssh-agent offers its other keys first, the server's `MaxAuthTries` runs out before `~/.ssh/homelab` is tried, and the connection fails with `Received disconnect … Too many authentication failures`.
 
 #### Update Ingress List
 
@@ -632,11 +649,22 @@ When you are **not on the home LAN**, the k3s API (`192.168.1.61:6443`) is unrea
 directly. Open a persistent SSH local port-forward through the Cloudflare Access SSH proxy,
 then point kubectl at the local end.
 
+Recommended shortcut: add this block to `~/.ssh/config`, so the plain forms
+`ssh ssh.furchert.ch '…'` and `ssh -N -L 6443:localhost:6443 ssh.furchert.ch` work:
+
+```sshconfig
+Host ssh.furchert.ch
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+```
+
 1. Open the forward in its own terminal and leave it running (`-N` = no remote shell, just
    hold the tunnel open):
 
    ```bash
-   ssh -i ~/.ssh/homelab \
+   ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes \
      -o ProxyCommand="cloudflared access ssh --hostname %h" \
      -N -L 6443:localhost:6443 \
      ansible@ssh.furchert.ch
@@ -690,12 +718,14 @@ Host 192.168.1.61
   HostName ssh.furchert.ch
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   ProxyCommand cloudflared access ssh --hostname %h
 Host 192.168.1.*
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   StrictHostKeyChecking yes
-  ProxyCommand ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
+  ProxyCommand ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
 ```
 
 ```bash
@@ -718,11 +748,11 @@ For a single read or a single-manifest apply, run kubectl on the control-plane n
 same Cloudflare Access SSH proxy instead of holding a forward open:
 
 ```bash
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl -n apps get pods'
 
 # apply exactly one manifest from the local checkout (used for PR #73 on 2026-09-03):
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl apply -f -' < cluster/apps/<app>/deployment.yaml
 ```
 

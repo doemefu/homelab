@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here (since homelab PR #126). Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
 
-**Status:** NM-0 implemented 2026-09-23; NM-1 in implementation
+**Status:** NM-0…NM-4 live 2026-09-24 (coroot gate on all four nodes pending #167)
 **Epic:** `doemefu/homelab#114` · **ADR:** [`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)
 **Canonical location:** this file (`infrastructure/docs/060-network-monitoring.md`). The parent workspace file `docs/060-network-monitoring.md` is a forwarder (since `homelab#126`), following the `052` precedent.
 **Conventions:** "(assumption)" = a design choice made here that the implementer may revisit in its plan. "(unverified)" = a fact not confirmed against a live system or upstream docs, which the implementing sub-project must confirm in its Phase 1.
