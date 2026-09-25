@@ -622,8 +622,11 @@ Host raspi5
   HostName ssh.furchert.ch
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   ProxyCommand cloudflared access ssh --hostname %h
 ```
+
+Always pair `~/.ssh/homelab` with `IdentitiesOnly yes` (`-o IdentitiesOnly=yes` on the command line). Otherwise ssh-agent offers its other keys first, the server's `MaxAuthTries` runs out before `~/.ssh/homelab` is tried, and the connection fails with `Received disconnect … Too many authentication failures`.
 
 #### Update Ingress List
 
@@ -646,11 +649,22 @@ When you are **not on the home LAN**, the k3s API (`192.168.1.61:6443`) is unrea
 directly. Open a persistent SSH local port-forward through the Cloudflare Access SSH proxy,
 then point kubectl at the local end.
 
+Recommended shortcut: add this block to `~/.ssh/config`, so the plain forms
+`ssh ssh.furchert.ch '…'` and `ssh -N -L 6443:localhost:6443 ssh.furchert.ch` work:
+
+```sshconfig
+Host ssh.furchert.ch
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+```
+
 1. Open the forward in its own terminal and leave it running (`-N` = no remote shell, just
    hold the tunnel open):
 
    ```bash
-   ssh -i ~/.ssh/homelab \
+   ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes \
      -o ProxyCommand="cloudflared access ssh --hostname %h" \
      -N -L 6443:localhost:6443 \
      ansible@ssh.furchert.ch
@@ -704,12 +718,14 @@ Host 192.168.1.61
   HostName ssh.furchert.ch
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   ProxyCommand cloudflared access ssh --hostname %h
 Host 192.168.1.*
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   StrictHostKeyChecking yes
-  ProxyCommand ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
+  ProxyCommand ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
 ```
 
 ```bash
@@ -732,11 +748,11 @@ For a single read or a single-manifest apply, run kubectl on the control-plane n
 same Cloudflare Access SSH proxy instead of holding a forward open:
 
 ```bash
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl -n apps get pods'
 
 # apply exactly one manifest from the local checkout (used for PR #73 on 2026-09-03):
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl apply -f -' < cluster/apps/<app>/deployment.yaml
 ```
 
