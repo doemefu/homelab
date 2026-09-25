@@ -939,9 +939,9 @@ in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgrou
 **The gate.** The DaemonSet only schedules on labelled nodes. `41_monitoring.yml` labels exactly
 the nodes in `coroot_node_agent_nodes` and **removes** the label from every other node, so the
 play variable is the source of truth: nodes missing from the list lose the label on the next run.
-The default covers all four nodes, `[raspi5, mba1, mba2, raspi4]`, since 2026-09-25. raspi5 and mba1
-ran the spike, mba2 joined on 2026-09-24, and raspi4 joined on 2026-09-25. With an empty list (`-e '{"coroot_node_agent_nodes": []}'`) the
-DaemonSet runs 0 pods and neither rule fires.
+The default covers all four nodes, `[raspi5, mba1, mba2, raspi4]`, since 2026-09-25. raspi5 and
+mba1 ran the spike, mba2 joined on 2026-09-24, and raspi4 joined on 2026-09-25. With an empty list
+(`-e '{"coroot_node_agent_nodes": []}'`) the DaemonSet runs 0 pods and neither rule fires.
 
 **Memory options (researched 2026-09-24 against the v1.35.10 source; none applied).** The startup
 peak comes from TLS uprobe setup. For every new process the agent opens its executable, or its
@@ -1052,22 +1052,26 @@ becomes available:
    | Startup peak, under the 1Gi limit | 479 MiB | 544 MiB |
    | Restarts | 0 | 0 |
 
-   Criterion 2's 24 h restart window (docs/060 §6.3) is still running.
+   Criterion 2's 24 h restart window (docs/060 §6.3) started 2026-09-24 11:52 CEST and ends
+   2026-09-25 11:52 CEST; the result is recorded at the 12:07 checkpoint (0 restarts so far on all
+   three nodes).
 
    Expect a startup peak of about 500–700 MiB on mba2's t2 kernel, and watch for OOMKilled during
    the first 5 minutes.
 
    **raspi4 joined on 2026-09-25**, after 12 h of mba2 observation. The gate now covers all four
-   nodes. Evidence from the 2026-09-25 morning check:
+   nodes. The plan's further 24 h of mba2 observation was shortened to 12 h on the lead's
+   recommendation (mba2 flat at 332 MiB steady / 349 MiB peak, 0 restarts). The owner decision is
+   Dominic's merge of PR #167 (2026-09-25). Evidence from the 2026-09-25 morning check:
 
-   | Node | 12 h max working set | Other |
+   | Node | Max working set (12 h window 19:13–07:13 CEST, excludes the startup peak) | Other |
    |---|---|---|
    | mba2 | 349 MiB | steady 332 MiB, RSS 63 MiB, 0 restarts, no OOMKilled |
    | raspi5 | 442 MiB | — |
    | mba1 | 390 MiB | — |
 
    Memory headroom on raspi4 is the tightest in the cluster. It has 3 785 Mi allocatable, of which
-   1 736 Mi (45 %) is used, leaving about 2 GB free. That is enough for the agent's 256Mi request and
+   1 736 Mi (about 46 %) is used, leaving about 2 GB free. That is enough for the agent's 256Mi request and
    an expected startup peak of about 400–500 MiB on the arm64 Pi (raspi5 measured 479 MiB), under
    the 1Gi limit. Watch raspi4's pod for OOMKilled during the first 5 minutes.
 7. **Rollback.**
