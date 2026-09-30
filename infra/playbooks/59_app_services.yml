@@ -1,5 +1,5 @@
 ---
-# App Services — K8s Secrets for device-service, auth-service, LiteLLM, and data-service
+# App Services — K8s Secrets for device-service, auth-service, LiteLLM, data-service and mcp-hub
 # Namespace: apps
 #
 # Prerequisites:
@@ -60,6 +60,27 @@
 #   login-event capture off. With only one, the play fails. Removing both later does NOT
 #   delete keys created by an earlier run — see DEPLOYMENT.md "Turning NM-4 off".
 #
+# mcp-hub variables (docs/080-mcp-hub.md §7.1, §9.5) — first go-live (#170), set all three or none:
+#   With none, the play skips mcp-hub-secrets (an existing Secret is NOT changed); with only some, it fails.
+#   Kill switch = mcp_hub_allowed_subjects: [] — never remove the variables to cut access.
+#   mcp_hub_accounts: <account registry: mapping with version + accounts; no addresses, only *_ref key names>
+#       written as mcp-hub-secrets/accounts.json (see DEPLOYMENT.md "mcp-hub (Flux, #170 onboarding)")
+#   mcp_hub_credentials: <mapping Secret key name -> value, e.g. icloud-username, icloud-app-password; {} is valid>
+#       one mcp-hub-secrets key per entry; key names must not collide with the keys this play writes itself
+#   mcp_hub_allowed_subjects: <list of auth-service usernames, exact case; [] is valid and means "nobody">
+#       written as mcp-hub-secrets/allowed-subjects (one per line) — the hub's kill switch (docs/080 §4.6).
+#       Only "defined" is asserted, so the emergency value [] never blocks this play.
+#   The token-store DB/role and the #171 keys (db-password, token-encryption-key) are added by #171.
+#
+# claude-mcp-hub client in auth-service (docs/080-mcp-hub.md §4.1, §7.1) — OPTIONAL, set both or neither:
+#   auth_service_claude_mcp_hub_client_secret: <'{bcrypt}$2y$10$...' — bcrypt (cost 10) hash of the client secret;
+#       written verbatim to homelab-auth-secrets/claude-mcp-hub-client-secret (no {noop}); the plaintext exists
+#       only in the owner's password manager and in claude.ai>
+#   auth_service_claude_mcp_hub_allowed_users: <comma-separated auth-service usernames, exact case>
+#       written to homelab-auth-secrets/claude-mcp-hub-allowed-users. auth-service reads both at start-up:
+#       delete the auth-service pod after a change. The seeder creates the client once and never updates it —
+#       rotation needs SQL (DEPLOYMENT.md "mcp-hub incident runbook", L5).
+#
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
 #   openssl rsa -in /tmp/auth-rsa.pem -pubout -out /tmp/auth-rsa-pub.pem
@@ -81,6 +102,23 @@
     auth_service_login_events_configured: >-
       {{ auth_service_data_service_client_secret is defined
          and auth_service_login_event_hmac_key is defined }}
+    # claude-mcp-hub: the auth-service keys are created only when both SOPS variables exist (see header).
+    auth_service_claude_mcp_hub_configured: >-
+      {{ auth_service_claude_mcp_hub_client_secret is defined
+         and auth_service_claude_mcp_hub_allowed_users is defined }}
+    # mcp-hub: the block runs only when all three hub variables exist; none = skipped, some = the play fails.
+    mcp_hub_configured: >-
+      {{ mcp_hub_accounts is defined
+         and mcp_hub_credentials is defined
+         and mcp_hub_allowed_subjects is defined }}
+    # Keys of mcp-hub-secrets that this play (or #171) writes itself; credentials must not reuse them.
+    mcp_hub_reserved_secret_keys:
+      - accounts.json
+      - allowed-subjects
+      - db-username
+      - db-password
+      - token-encryption-key
+      - token-encryption-key-previous
 
   tasks:
 
@@ -155,6 +193,35 @@
           skipping the NM-4 login-event Secret keys. Keys created by an earlier run are NOT removed
           (see DEPLOYMENT.md "Turning NM-4 off"); if none exist, auth-service keeps login-event capture off.
       when: not auth_service_login_events_configured
+      delegate_to: localhost
+
+    - name: Claude-mcp-hub client — assert that both optional SOPS variables are set and valid
+      ansible.builtin.assert:
+        that:
+          - auth_service_claude_mcp_hub_client_secret is defined
+          - auth_service_claude_mcp_hub_client_secret is string
+          - auth_service_claude_mcp_hub_client_secret is match('^[{]bcrypt[}][$]2[aby][$]10[$][./A-Za-z0-9]{53}\Z')
+          - auth_service_claude_mcp_hub_allowed_users is defined
+          - auth_service_claude_mcp_hub_allowed_users is string
+          - auth_service_claude_mcp_hub_allowed_users | trim | length > 0
+          - auth_service_claude_mcp_hub_allowed_users is not search('[\r\n]')
+        fail_msg: >-
+          The claude-mcp-hub variables must be set together:
+          auth_service_claude_mcp_hub_client_secret (the '{bcrypt}' hash with cost 10, not the plaintext) and
+          auth_service_claude_mcp_hub_allowed_users (the auth-service username, exactly as stored). Add both or
+          remove both — see the header comment in this playbook and DEPLOYMENT.md "mcp-hub (Flux, #170 onboarding)".
+      when: >-
+        auth_service_claude_mcp_hub_client_secret is defined
+        or auth_service_claude_mcp_hub_allowed_users is defined
+      delegate_to: localhost
+
+    - name: Claude-mcp-hub client — report that the optional keys are skipped
+      ansible.builtin.debug:
+        msg: >-
+          auth_service_claude_mcp_hub_client_secret and auth_service_claude_mcp_hub_allowed_users are not set:
+          skipping the claude-mcp-hub keys in homelab-auth-secrets. Keys created by an earlier run are NOT removed;
+          without them auth-service does not seed the claude-mcp-hub client.
+      when: not auth_service_claude_mcp_hub_configured
       delegate_to: localhost
 
     # --- PostgreSQL: database + user (idempotent) ---
@@ -310,6 +377,27 @@
             data-service-client-secret: "{noop}{{ auth_service_data_service_client_secret }}"
             login-event-hmac-key: "{{ auth_service_login_event_hmac_key }}"
       when: auth_service_login_events_configured
+      no_log: true
+      delegate_to: localhost
+
+    # Optional like the NM-4 keys: a separate task patches the two keys into the existing Secret.
+    - name: Homelab-auth-secrets — add the claude-mcp-hub client keys (client secret hash, allowed users)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: homelab-auth-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # Read by auth-service as CLAUDE_MCP_HUB_CLIENT_SECRET / CLAUDE_MCP_HUB_ALLOWED_USERS
+            # (optional secretKeyRefs, docs/080 §4.1). The client secret is already a {bcrypt} hash and is
+            # written verbatim. Both are read at start-up: delete the auth-service pod after a change.
+            claude-mcp-hub-client-secret: "{{ auth_service_claude_mcp_hub_client_secret }}"
+            claude-mcp-hub-allowed-users: "{{ auth_service_claude_mcp_hub_allowed_users | trim }}"
+      when: auth_service_claude_mcp_hub_configured
       no_log: true
       delegate_to: localhost
 
@@ -624,5 +712,79 @@
             # Env vars are read at pod start: delete the data-service pod after adding it.
             abuseipdb-api-key: "{{ data_service_abuseipdb_key }}"
       when: data_service_abuseipdb_key is defined
+      no_log: true
+      delegate_to: localhost
+
+    # --- mcp-hub: Secret mcp-hub-secrets (docs/080-mcp-hub.md §7.1, §8.1, §9.5) ---
+    # First go-live (#170). The hub mounts the Secret read-only as files. The token-store DB/role and the
+    # #171 keys come with #171. Guarded (all three variables or none), so a missing hub value never
+    # fails the secrets of the other services.
+
+    - name: Mcp-hub — report that the block is skipped
+      ansible.builtin.debug:
+        msg: >-
+          mcp_hub_accounts, mcp_hub_credentials and mcp_hub_allowed_subjects are not set: skipping
+          mcp-hub-secrets. An existing mcp-hub-secrets is NOT changed. To cut access, set
+          mcp_hub_allowed_subjects to [] instead of removing the variables (DEPLOYMENT.md "mcp-hub incident runbook").
+      when: >-
+        mcp_hub_accounts is not defined
+        and mcp_hub_credentials is not defined
+        and mcp_hub_allowed_subjects is not defined
+      delegate_to: localhost
+
+    - name: Mcp-hub — assert that all three SOPS variables are set and valid
+      ansible.builtin.assert:
+        that:
+          - mcp_hub_accounts is defined and mcp_hub_accounts is mapping
+          - mcp_hub_accounts.version is defined
+          - mcp_hub_accounts.accounts is defined
+          - mcp_hub_accounts.accounts is sequence and mcp_hub_accounts.accounts is not string
+          - mcp_hub_credentials is defined and mcp_hub_credentials is mapping
+          - mcp_hub_credentials.keys() | reject('match', '^[a-z0-9][a-z0-9.-]*$') | list | length == 0
+          - mcp_hub_credentials.keys() | list | intersect(mcp_hub_reserved_secret_keys) | length == 0
+          - mcp_hub_credentials.values() | reject('string') | list | length == 0
+          - mcp_hub_credentials.values() | map('trim') | select('equalto', '') | list | length == 0
+          # Kill switch (docs/080 §4.6): "defined" and a list of strings; [] is valid and means "nobody".
+          - mcp_hub_allowed_subjects is defined
+          - mcp_hub_allowed_subjects is iterable
+          - mcp_hub_allowed_subjects is not string and mcp_hub_allowed_subjects is not mapping
+          - mcp_hub_allowed_subjects | reject('string') | list | length == 0
+          - mcp_hub_allowed_subjects | map('trim') | select('equalto', '') | list | length == 0
+          - mcp_hub_allowed_subjects | select('search', '[\r\n]') | list | length == 0
+        fail_msg: >-
+          An mcp-hub SOPS variable is missing or invalid. mcp_hub_accounts must be a mapping with version and
+          accounts; mcp_hub_credentials a mapping of lower-case key names (not accounts.json, allowed-subjects,
+          db-*, token-encryption-key*) to non-empty strings ({} is valid); mcp_hub_allowed_subjects a list of
+          usernames ([] is valid and means "nobody" — never a plain string or an empty value).
+          Set all three or none. See the header comment in this playbook.
+      when: >-
+        mcp_hub_accounts is defined
+        or mcp_hub_credentials is defined
+        or mcp_hub_allowed_subjects is defined
+      delegate_to: localhost
+
+    - name: Mcp-hub — create mcp-hub-secrets (account registry, credentials, subject allowlist)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: mcp-hub-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          # One file per key under /etc/mcp-hub/secrets. allowed-subjects: one username per line; an empty
+          # list writes an empty file, so the hub rejects every token (kill switch, docs/080 §4.6).
+          # sort_keys keeps accounts.json byte-stable, so a second run reports no change.
+          stringData: "{{ mcp_hub_secret_data }}"
+      vars:
+        mcp_hub_secret_data: >-
+          {{ mcp_hub_credentials | combine({
+               'accounts.json': mcp_hub_accounts | to_json(sort_keys=True),
+               'allowed-subjects': mcp_hub_allowed_subjects | map('trim') | join(mcp_hub_newline) }) }}
+        # A real newline from a double-quoted YAML string: ansible-core does not turn '\n' inside a
+        # Jinja literal into a newline, so join('\n') would write a backslash and an n.
+        mcp_hub_newline: "\n"
+      when: mcp_hub_configured
       no_log: true
       delegate_to: localhost
