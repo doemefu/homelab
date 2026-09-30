@@ -683,7 +683,7 @@ ansible-lint infra/
 # Kubernetes schema validation
 brew install kustomize kubeconform
 for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps/mcp-hub cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
     -summary -verbose \
@@ -695,7 +695,7 @@ done
 brew install conftest
 conftest verify --policy policy/kubernetes/
 for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps/mcp-hub cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -
 done
