@@ -6,3 +6,11 @@ k3s_binary_name: "{{ 'k3s-arm64' if ansible_facts['architecture'] == 'aarch64' e
 k3s_kubeconfig_dir: /etc/rancher/k3s
 k3s_data_dir: /var/lib/rancher/k3s
 # k3s_token: muss in infra/inventory/group_vars/secrets.yml gesetzt sein
+
+# Apiserver etcd (kine) health/ready-check timeouts, raised from k3s's built-in 2s default.
+# Codifies the manual mitigation from homelab#129 (2026-09-23): under a stalled kine compaction
+# backlog, SQLite query latency exceeded the 2s default, /readyz's etcd check failed, and the
+# embedded cloud-controller-manager panicked and restart-looped on a failed /healthz. Applied
+# only on the control-plane node — see templates/k3s-server.service.j2.
+k3s_apiserver_etcd_healthcheck_timeout: "20s"
+k3s_apiserver_etcd_readycheck_timeout: "20s"

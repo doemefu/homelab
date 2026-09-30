@@ -23,6 +23,16 @@ storage_restic_repo: "{{ storage_backup_dir }}/restic-repo"
 # Nicht k3s-spezifische Pfade im Default, um Fehler auf Nicht-k3s-Nodes zu vermeiden
 storage_backup_paths: []
 
+# node-exporter textfile collector directory (#92). homelab-backup.sh writes
+# homelab-backup.prom here and the node-exporter DaemonSet mounts the same path
+# read-only — the other half of the contract lives in
+# cluster/values/kube-prometheus-stack.yaml (prometheus-node-exporter.extraArgs +
+# extraHostVolumeMounts). Change both together or the backup metrics disappear.
+# Created on every node, not just on the restic node: the collector flag is
+# fleet-wide and node-exporter reports node_textfile_scrape_error=1 wherever the
+# directory is missing.
+storage_textfile_collector_dir: /var/lib/node_exporter/textfile_collector
+
 # k3s SQLite (kine) datastore — the live file, and where the pre-backup consistent copy is
 # written (#64). k3s runs the embedded SQLite datastore here, not etcd, so there are no
 # etcd snapshots under server/db/snapshots/ to back up directly (see homelab-backup.sh).

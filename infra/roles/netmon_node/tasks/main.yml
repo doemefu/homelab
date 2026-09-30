@@ -1,0 +1,78 @@
+---
+# netmon_node — docs/060-network-monitoring.md §5 (NM-3, homelab#117).
+# Writes homelab_netmon.prom into the node-exporter textfile directory once a minute.
+# The node-exporter flag + hostPath come from homelab PR #109 (kube-prometheus-stack values).
+# IPv4 only: `conntrack -L` lists the IPv4 table (the LAN is IPv4).
+
+- name: Netmon — install conntrack
+  ansible.builtin.apt:
+    name: conntrack
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Same path and attributes as the storage role's task from PR #109 (0755: node-exporter
+# runs as UID 65534), so both roles converge on one directory without fighting.
+- name: Netmon — create the node-exporter textfile collector directory
+  ansible.builtin.file:
+    path: "{{ netmon_node_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Netmon — install the collector script
+  ansible.builtin.copy:
+    src: homelab-netmon-collect.py
+    dest: "{{ netmon_node_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Netmon — install the systemd service unit
+  ansible.builtin.template:
+    src: homelab-netmon.service.j2
+    dest: /etc/systemd/system/homelab-netmon.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd (netmon_node)
+
+- name: Netmon — install the systemd timer unit
+  ansible.builtin.template:
+    src: homelab-netmon.timer.j2
+    dest: /etc/systemd/system/homelab-netmon.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd (netmon_node)
+    - Restart homelab-netmon.timer
+
+# nf_conntrack_acct stays at the kernel default unless the NM-2 fallback enables it
+# (docs/060 §5.5). Removing the file does not reset the running value; that needs a reboot
+# or `sysctl -w net.netfilter.nf_conntrack_acct=0`.
+- name: Netmon — enable nf_conntrack_acct (NM-2 fallback only)
+  ansible.posix.sysctl:
+    name: net.netfilter.nf_conntrack_acct
+    value: "1"
+    sysctl_file: /etc/sysctl.d/60-homelab-netmon.conf
+    state: present
+    reload: true
+  when: netmon_node_conntrack_acct | bool
+
+- name: Netmon — remove the nf_conntrack_acct drop-in
+  ansible.builtin.file:
+    path: /etc/sysctl.d/60-homelab-netmon.conf
+    state: absent
+  when: not (netmon_node_conntrack_acct | bool)
+
+- name: Netmon — flush handlers so the timer unit is loaded before it is started
+  ansible.builtin.meta: flush_handlers
+
+- name: Netmon — enable and start the timer
+  ansible.builtin.systemd:
+    name: homelab-netmon.timer
+    state: started
+    enabled: true
+  ignore_errors: "{{ ansible_check_mode }}"

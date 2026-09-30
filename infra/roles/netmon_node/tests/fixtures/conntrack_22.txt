@@ -1,0 +1,1 @@
+tcp      6 7200 ESTABLISHED src=192.168.1.10 dst=192.168.1.61 sport=50022 dport=22 src=192.168.1.61 dst=192.168.1.10 sport=22 dport=50022 [ASSURED] mark=0 use=1
