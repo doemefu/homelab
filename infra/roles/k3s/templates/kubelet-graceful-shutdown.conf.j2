@@ -1,0 +1,13 @@
+# Managed by Ansible — do not edit manually
+# homelab#102: give pods time to terminate when the scheduled-reboot timer reboots the
+# node. shutdownGracePeriod and shutdownGracePeriodCriticalPods exist only in
+# KubeletConfiguration — the kubelet has no CLI flag for them. Do not move these into
+# --kubelet-arg=config=: k3s strips that flag and copies the file in one-way as
+# 10-cli-config.conf, which a rollback would not revert.
+# The node also needs logind's InhibitDelayMaxSec >= shutdownGracePeriod, otherwise the
+# kubelet logs "Failed to start node shutdown manager" and silently continues without
+# the feature — see the mac_tweaks role's zz-homelab-kubelet.conf.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+shutdownGracePeriod: {{ k3s_graceful_shutdown_period }}
+shutdownGracePeriodCriticalPods: {{ k3s_graceful_shutdown_period_critical_pods }}

@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here (since homelab PR #126). Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
 
-**Status:** NM-0 implemented 2026-09-23; NM-1 in implementation
+**Status:** NM-0…NM-4 live 2026-09-24 (coroot gate on all four nodes pending #167)
 **Epic:** `doemefu/homelab#114` · **ADR:** [`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)
 **Canonical location:** this file (`infrastructure/docs/060-network-monitoring.md`). The parent workspace file `docs/060-network-monitoring.md` is a forwarder (since `homelab#126`), following the `052` precedent.
 **Conventions:** "(assumption)" = a design choice made here that the implementer may revisit in its plan. "(unverified)" = a fact not confirmed against a live system or upstream docs, which the implementing sub-project must confirm in its Phase 1.
@@ -128,7 +128,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | last_attempt_at / last_success_at | timestamptz | yes | |
 | consecutive_failures | int | no | default 0 |
 | last_error | text | yes | Exception class and short message. **Never** a URL with a query string, a header or a token. `last_error` carries a message only for collector-authored `CollectorException`s; for any other exception only the class name is stored (no payload, no IPs) (amended 2026-09-23, NM-0: data-service PR #18). |
-| last_error_code | text | yes | CHECK constraint restricts values to `credentials`, `rate_limited`, `upstream`, `truncated`, `internal` (the §7.2 status error-code enum) (amended 2026-09-23, NM-0: data-service PR #18) |
+| last_error_code | text | yes | CHECK constraint restricts values to `credentials`, `rate_limited`, `upstream`, `truncated`, `partial`, `internal` (the §7.2 status error-code enum; `partial` added by `V5` (amended 2026-09-24, NM-4: data-service#23, homelab#134)) (amended 2026-09-23, NM-0: data-service PR #18) |
 
 **`netmon.inbound_request_groups`** (NM-1). Source: `httpRequestsAdaptiveGroups`. Granularity is 1 h. Write mode: replace per window. Retention: 90 d.
 
@@ -250,20 +250,22 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 |---|---|---|---|
 | window_start, window_end | timestamptz | no | Hour-aligned |
 | node | text | no | From the ServiceMonitor relabel (§6) |
-| container_id | text | no | Raw coroot label |
-| namespace, pod, container | text | yes | Parsed from `/k8s/<ns>/<pod>/<container>` (format unverified). Null for host processes. |
-| workload | text | yes | The pod name with its ReplicaSet/DaemonSet hash suffix removed (assumption: regex `-[a-z0-9]{8,10}-[a-z0-9]{5}$`, else `-[a-z0-9]{5}$`) |
-| destination | text | no | Pre-NAT `ip:port` |
-| actual_destination | text | no | Post-NAT `ip:port` |
-| destination_ip | inet | no | Parsed from `actual_destination` |
+| container_id | text | no | Raw coroot label: `/k8s/<ns>/<pod>/<container>`, `/k8s-cronjob/<ns>/<cronjob>/<container>` (coroot collapses CronJob pods scheduled within ±7 d to their CronJob), or a systemd cgroup path such as `/system.slice/k3s.service` for host processes (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| namespace, pod, container | text | yes | Parsed from the `/k8s…` forms; `pod` is null for CronJob rows. Host processes: `container` = the unit name, `namespace` and `pod` null (amended 2026-09-24, NM-2: data-service#22, homelab#118). |
+| workload | text | yes | The pod name with its ReplicaSet/DaemonSet hash suffix removed, regex `(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}$` (the §6.4 k8s alphabet). StatefulSet pods keep their full name; CronJob rows carry the CronJob name; null for host processes (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| workload_key | text | no | `<ns>/<workload>/<container>` for pods (the §6.4 `<W>` format), else the raw `container_id`. The `is_new` identity (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| destination | text | no | Pre-NAT `ip:port`, or `<fqdn>:<port>` for destinations coroot reports by name only (§4.6). `destination_port` is the port after the last `:`, and the name is `destination` with that `:<port>` stripped |
+| actual_destination | text | no | Post-NAT `ip:port`; `''` for name-only destinations and for unjoined failed-connect rows (§4.6) |
+| destination_ip | inet | yes | From `actual_destination`, else `destination`; NULL for destinations coroot reports by name only (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| destination_host | text | no | Generated: `coalesce(host(destination_ip), fqdn)`. Keys aggregation and `is_new` |
 | destination_port | integer | no | |
 | destination_scope | text | no | `pod` (10.42.0.0/16), `service` (10.43.0.0/16), `lan` (192.168.1.0/24), `loopback`, or `external`. The CIDRs come from config. |
-| fqdn | text | yes | From `ip_to_fqdn` |
+| fqdn | text | yes | From `ip_to_fqdn`; for name-only destinations, the name from `destination` |
 | bytes_sent, bytes_received, connects, failed_connects | bigint | no | `increase()` over the window, rounded |
-| is_new | boolean | no | True if `(coalesce(workload,container_id), destination_ip, destination_port)` does not occur in the previous 30 d |
+| is_new | boolean | no | True if `(workload_key, destination_host, destination_port)` does not occur in the previous 30 d. `workload_key` = `<ns>/<workload>/<container>` (the §6.4 `<W>` format), else the raw `container_id`; a bare `coalesce(workload, container_id)` would merge equal owner names across namespaces (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
 
 - UNIQUE `(window_start, node, container_id, destination, actual_destination)`
-- Indexes: `(window_start)`, `(workload, window_start)`, `(destination_ip)`
+- Indexes (as shipped in data-service `V4__netmon_egress.sql`): `(window_start)`, `(workload, window_start)`, `(destination_ip)`, and `(workload_key, destination_host, destination_port, window_start)` for `is_new` and the read API (amended 2026-09-24, NM-2: data-service#22, homelab#118)
 
 **`netmon.login_events`** (NM-4). Source: the auth-service outbox. Write mode: upsert, do nothing on `event_id`. Retention: 180 d.
 
@@ -289,7 +291,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | `V2__netmon_inbound.sql` | NM-1 | `inbound_request_groups`, `firewall_events`, `ip_enrichment`, `blocklist_snapshots` and `blocklist_entries` |
 | `V3__netmon_lan.sql` | NM-3 | `lan_connection_snapshots`, `ufw_block_snapshots`, `ssh_auth_snapshots` |
 | `V4__netmon_egress.sql` | NM-2 | `egress_flow_snapshots` |
-| `V5__netmon_login_events.sql` | NM-4 | `login_events` |
+| `V5__netmon_login_events.sql` | NM-4 | `login_events`; `partial` added to the `collector_state.last_error_code` CHECK |
 
 The NM-1 tables moved out of `V1` (an earlier draft bundled them in): the Cloudflare field probe (§4.2) that fixes their NOT NULL columns runs only in NM-1's own Phase 1, after `V1` is already merged and immutable, and the `CLOUDFLARE_API_TOKEN` this needs may not exist at NM-0 time. **Rule:** the version number is the next free number at PR time; migrations are never merged out of order (`outOfOrder=false`), and a migration is never edited after it is merged to main. Flyway settings are `table=flyway_schema_history_data`, `default-schema=public` and `schemas=public,netmon`. Use `ddl-auto=validate` if JPA is used (§12 Q5).
 
@@ -453,13 +455,13 @@ After every Cloudflare, LAN (public IPs only), egress (external destinations) or
 
 ### 4.5 AbuseIPDB (NM-1, activated later)
 
-The collector is disabled while `ABUSEIPDB_API_KEY` is absent (the owner will approve the key later).
+The collector is disabled while `ABUSEIPDB_API_KEY` is absent. The owner turns it on with the optional SOPS variable `data_service_abuseipdb_key` (§9), following infrastructure `DEPLOYMENT.md` "NM-1 follow-up: AbuseIPDB key (optional)" (amended 2026-09-24, homelab#116 follow-up).
 
 - **Request:** `GET https://api.abuseipdb.com/api/v2/check?ipAddress=<ip>&maxAgeInDays=90` with headers `Key: ${ABUSEIPDB_API_KEY}` and `Accept: application/json`.
 - **Fields read:** `data.abuseConfidenceScore` and `data.totalReports`. Nothing else is stored.
 - **Budget:** at most `netmon.abuseipdb.daily-budget` = **200** checks per UTC day, well under the free 1 000, and `per-run` = 10. The counter lives in memory plus `collector_state.cursor`, formatted as `date:count`.
 - **Candidates:** public IPs that are not blocklisted and have `abuseipdb_checked_at` null or older than 7 d. Only IPs meeting **one** of these conditions (the threshold) are checked, in this priority order:
-  1. ≥ 1 `login_events` failure or locked outcome in the last 24 h.
+  1. ≥ 1 `login_events` failure or locked outcome in the last 24 h (implemented (amended 2026-09-24, NM-4: data-service#23, homelab#134)).
   2. ≥ 1 `firewall_events` row with an action other than `skip`/`log` in the last 24 h.
   3. ≥ 50 requests in the last 24 h with ≥ 50 % of them `status >= 400`.
   4. Top 5 IPs by request count in the last 24 h.
@@ -499,9 +501,11 @@ max by (ip, fqdn) (last_over_time(ip_to_fqdn[1h]))
 group by (node, container_id, destination, actual_destination) (last_over_time(container_net_tcp_successful_connects_total[1h]))
 ```
 
-- **Row set:** the union of the keys from the first four queries **plus the sixth**, capped at 2 000 rows per window by bytes_sent then connects. Missing values are 0. The sixth query exists because a counter series that first appears inside the window has exactly one sample, so `increase()` returns nothing for it — without this query, a brand-new single-connect destination would be entirely missing from the row set for its first hour. **First-window counts for such a destination are a lower bound**, since `increase()` cannot see accumulation before the counter's first sample.
+- **Row set:** the union of the keys from the first four queries **plus the sixth**, capped at 2 000 rows per window by bytes_sent then connects. Hitting that cap, or the `topk(500)` bound of the bytes-sent query, completes the run with the `truncated` warning in `/status` (a success, §7.2) (amended 2026-09-24, NM-2: data-service#22, homelab#118). Missing values are 0. The sixth query exists because a counter series that first appears inside the window has exactly one sample, so `increase()` returns nothing for it — without this query, a brand-new single-connect destination would be entirely missing from the row set for its first hour. **First-window counts for such a destination are a lower bound**, since `increase()` cannot see accumulation before the counter's first sample.
 - **FQDN:** joined on `destination_ip = ip`. If an IP maps to several FQDNs, the lexicographically first one is used.
-- **Metric names:** verified against the v1.35.10 source (`metrics/metrics.go`). Every container metric also carries `container_id` and `app_id`; the agent's registry adds `machine_id` and `system_uuid` to **every** series (including `ip_to_fqdn`), and the ServiceMonitor drops both with `labeldrop` because they are constant per node and `node` (added by the ServiceMonitor) already identifies it (amended 2026-09-23, NM-2 prep review). `container_net_tcp_failed_connects_total` has **no** `actual_destination` label (only `destination`), so the fourth query's `actual_destination` group is always empty and failed connects join on `destination` only. `container_id` for pods is `/k8s/<namespace>/<pod>/<container>` (`containers/registry.go`). The spike confirms these against live data and records any difference here (amended 2026-09-23, NM-2 prep: homelab PR for #118).
+- **Name-only destinations:** coroot v1.35.10 (`common/net.go` `NewDestinationKey`) reports an external name that resolves to more than one external IP, or ends in `.amazonaws.com`, `.googleapis.com`, `.pkg.dev` or `.gcr.io`, as `destination="<fqdn>:<port>"` with an **empty** `actual_destination`. Such rows have `destination_ip` NULL and take `fqdn` from `destination` (amended 2026-09-24, NM-2: data-service#22, homelab#118).
+- **Idle destinations:** coroot drops a destination's series 10 min after its last connection attempt (`gcInterval`), so the `[1h]` presence query returns recently active destinations only (amended 2026-09-24, NM-2: data-service#22, homelab#118).
+- **Metric names:** verified against the v1.35.10 source (`metrics/metrics.go`). Every container metric also carries `container_id` and `app_id`; the agent's registry adds `machine_id` and `system_uuid` to **every** series (including `ip_to_fqdn`), and the ServiceMonitor drops both with `labeldrop` because they are constant per node and `node` (added by the ServiceMonitor) already identifies it (amended 2026-09-23, NM-2 prep review). `container_net_tcp_failed_connects_total` has **no** `actual_destination` label (only `destination`), so the fourth query's `actual_destination` group is always empty. Failed connects join a row on `(node, container_id, destination)` only when exactly one row matches; otherwise (e.g. a Service with several backends) they form their own row with `actual_destination = ''`, which avoids double counting (amended 2026-09-24, NM-2: data-service#22, homelab#118). `container_id` for pods is `/k8s/<namespace>/<pod>/<container>` (`containers/registry.go`). The spike confirms these against live data and records any difference here (amended 2026-09-23, NM-2 prep: homelab PR for #118).
 
 ---
 
@@ -608,10 +612,10 @@ NM-3's rules go under `additionalPrometheusRulesMap.homelab-netmon-node` (group 
 | Pod security | `hostPID: true`, container `securityContext.privileged: true`. No `hostNetwork` (unverified; confirm against upstream). |
 | Host mounts (verified against coroot-operator v1.10.2 `controller/node_agent.go`) | `/sys/fs/cgroup` → `/host/sys/fs/cgroup` (ro), `/sys/kernel/tracing` → `/sys/kernel/tracing`, `/sys/kernel/debug` → `/sys/kernel/debug`, plus an `emptyDir` at `/tmp` (default `--wal-dir`). The containerd socket is reached through `/proc/1/root` (hostPID); `/run/k3s/containerd/containerd.sock` is in the agent's built-in probe list. No `hostNetwork` (the operator does not set it either). |
 | Args (verified in `flags/flags.go`, `flags/flags_linux.go` at v1.35.10) | `--cgroupfs-root=/host/sys/fs/cgroup`, `--listen=0.0.0.0:80`, `--disable-log-parsing`, `--disable-pinger`, `--disable-gpu-monitoring`; no `--collector-endpoint`/`--metrics-endpoint` (either one moves the listener to `127.0.0.1:10300` and pushes data out). **L7 tracing stays on:** `ip_to_fqdn` is filled from DNS responses seen by the L7 tracer, so `--disable-l7-tracing` would empty the FQDN mapping. The agent never calls the Kubernetes API, so `automountServiceAccountToken: false`. |
-| Tolerations and gate | `operator: Exists`. Scheduling is gated by `nodeSelector` `homelab.furchert.ch/coroot-node-agent: "enabled"`; `41_monitoring.yml` sets that label on the nodes in `coroot_node_agent_nodes` (default `[]` until the spike; `[raspi5, mba1]` since 2026-09-24) and removes it elsewhere, so the spike and the all-node rollout are playbook runs, not manifest edits |
+| Tolerations and gate | `operator: Exists`. Scheduling is gated by `nodeSelector` `homelab.furchert.ch/coroot-node-agent: "enabled"`; `41_monitoring.yml` sets that label on the nodes in `coroot_node_agent_nodes` (default `[]` until the spike; `[raspi5, mba1]` after it; `[raspi5, mba1, mba2]` from 2026-09-24; all four nodes since 2026-09-25) and removes it elsewhere, so the spike and the all-node rollout are playbook runs, not manifest edits |
 | Resources (sized by the spike, §6.3) | requests `cpu: 50m`, `memory: 256Mi`; limits `cpu: 300m`, `memory: 1Gi`. 384Mi OOMKilled both spike agents during the startup scan (peaks 410 / 702 MiB); 1Gi leaves margin above that peak (amended 2026-09-24, NM-2 spike). |
 | Labels | `app.kubernetes.io/name: coroot-node-agent` |
-| NetworkPolicy | `networkpolicy.yaml`: ingress to the agent pods only from the kube-prometheus-stack Prometheus pods (`app.kubernetes.io/name: prometheus`, `operator.prometheus.io/name: kube-prometheus-stack-prometheus`, verified live) on TCP 80. The agent serves `/metrics` and Go's `/debug/pprof/*` unauthenticated from a privileged hostPID pod; pprof shares the default mux and has no disable flag at v1.35.10. Node-local traffic is always admitted by Kubernetes, so host processes and hostNetwork pods on an agent node (Home Assistant has no node pin) still reach pprof. Accepting that, or adding a `/metrics`-only proxy sidecar (a new pinned image, needs owner approval), is an owner decision before the all-node rollout (amended 2026-09-24, PR #133 review). Egress is not restricted (amended 2026-09-23, NM-2 prep review). |
+| NetworkPolicy | `networkpolicy.yaml`: ingress to the agent pods only from the kube-prometheus-stack Prometheus pods (`app.kubernetes.io/name: prometheus`, `operator.prometheus.io/name: kube-prometheus-stack-prometheus`, verified live) on TCP 80. The agent serves `/metrics` and Go's `/debug/pprof/*` unauthenticated from a privileged hostPID pod; pprof shares the default mux and has no disable flag at v1.35.10. Node-local traffic is always admitted by Kubernetes, so host processes and hostNetwork pods on an agent node (Home Assistant has no node pin) still reach pprof. The owner **accepted** this residual risk on 2026-09-24: it is homelab-only, with no external exposure. Revisit it if a `/metrics`-only proxy sidecar or an upstream disable flag becomes available (amended 2026-09-24, owner decision, homelab#118). Egress is not restricted (amended 2026-09-23, NM-2 prep review). |
 
 ### 6.2 Scrape
 
@@ -677,6 +681,10 @@ Every criterion must hold on **both** raspi5 and mba1:
 
 eBPF loads on mba1's BTF-less t2 kernel. No alerts fired. Metrics flow (285 connect series, 12 `ip_to_fqdn` series). Criteria 1, 4 and 5 hold. Still to record: criterion 2's full 24 h window, and criteria 3, 6 and 7. Rollout order after the go: mba2 (different t2 kernel), then raspi4 (4 GB RAM).
 
+**mba2 joins the gate on 2026-09-24** (amended 2026-09-24, owner decision, homelab#118). It runs t2 kernel 6.19.10 without BTF. It joins after the raspi5 and mba1 measurements of the 1Gi run (requests 256Mi, limits 1Gi, 2026-09-24 15:09–17:15 CEST, 2 h): working set 318 / 350 MiB steady, RSS 68 / 98 MiB, startup peak 479 / 544 MiB, 0 restarts. That run is later than the 768Mi table above, not a contradiction of it. Criterion 2's 24 h restart window started 2026-09-24 11:52 CEST and ends 2026-09-25 11:52 CEST; the result is recorded at the 12:07 checkpoint (0 restarts so far on all three nodes). raspi4 follows after a further 24 h of observation, as a separate change.
+
+**raspi4 joins the gate on 2026-09-25** (amended 2026-09-25, owner decision (merge), homelab#118), so the gate now covers all four nodes. It joins after 12 h of mba2 observation (12 h window 19:13–07:13 CEST, excludes the startup peak): mba2 had a max working set of 349 MiB (steady 332 MiB, RSS 63 MiB), 0 restarts and no OOMKilled; raspi5 peaked at 442 MiB and mba1 at 390 MiB. The plan's further 24 h of mba2 observation was shortened to 12 h on the lead's recommendation (mba2 flat at 332 MiB steady / 349 MiB peak, 0 restarts); the owner decision is Dominic's merge of PR #167 (2026-09-25). raspi4 has the least headroom (3 785 Mi allocatable, 1 736 Mi or about 46 % used, about 2 GB free). Its expected startup peak on the arm64 Pi is about 400–500 MiB (raspi5 measured 479 MiB), under the 1Gi limit.
+
 **If criteria 1–3 fail on mba1/mba2**, run the agent on arm64 only (`nodeSelector: kubernetes.io/arch: arm64`) and use the §6.6 fallback on the Macs. **If they fail on the Pis too**, use the full fallback.
 
 ### 6.4 PrometheusRules
@@ -691,24 +699,26 @@ These go in `additionalPrometheusRulesMap.homelab-netmon-egress` (NM-2's own key
 `NetmonNodeScriptStale` and `NetmonSeriesTruncated` cover the NM-3 node script, not coroot, and are defined in §5.6.
 
 ```promql
-count by (workload) (
-  group by (workload, actual_destination) (<W>(container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"}))
-  unless on (workload, actual_destination)
-  group by (workload, actual_destination) (<W>(last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m)))
-)
+group by (workload, dest) (<D>(<W>(container_net_tcp_successful_connects_total{actual_destination!~"(10\\.4[23]\\.|192\\.168\\.|127\\.).*"})))
+unless on (workload, dest)
+group by (workload, dest) (<D>(<W>(last_over_time(container_net_tcp_successful_connects_total[1d] offset 15m))))
+# <D>(v) = label_replace(label_replace(v, "dest", "$1", "destination", "(.+)"),
+#            "dest", "$1", "actual_destination", "(.+)")
 # <W>(v) = label_replace(label_replace(v, "workload", "$1", "container_id", "(.*)"),
 #            "workload", "$1/$2/$3", "container_id",
 #            "/k8s/([^/]+)/(.+?)(?:-[bcdfghjklmnpqrstvwxz2456789]{6,10})?-[bcdfghjklmnpqrstvwxz2456789]{5}/(.+)")
 ```
 
-**Why `workload`, not `container_id`** (amended 2026-09-23, NM-2 prep): `container_id` contains the pod name, which changes on every Deployment rollout. Grouped by `container_id`, every Flux image update would re-report all of a workload's known destinations. `<W>` strips the ReplicaSet hash and pod suffix (`/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm` → `apps/litellm/litellm`), the same rollout-stable identity as the `coalesce(workload, container_id)` that `is_new` uses in §3.3, in a different string format (`<ns>/<owner>/<container>` here, the bare owner name in §3.3) (amended 2026-09-23, NM-2 prep review). Pods whose names do not match (StatefulSets, systemd units) keep the raw `container_id`. The exact expression, with promtool unit tests for the rollout case, is in `cluster/values/kube-prometheus-stack.yaml`.
+**Why `dest`** (amended 2026-09-24, NM-2: data-service#22, homelab#118): `dest` is `actual_destination` where coroot reports one, else `destination`. Name-only destinations (§4.6) have an empty `actual_destination`; keyed by it, all of a workload's name-only destinations collapsed into one `""` key and only the first ever alerted. An empty `actual_destination` passes the private-range filter, which is intended for these external names. The alert fires once per `(workload, dest)`.
+
+**Why `workload`, not `container_id`** (amended 2026-09-23, NM-2 prep): `container_id` contains the pod name, which changes on every Deployment rollout. Grouped by `container_id`, every Flux image update would re-report all of a workload's known destinations. `<W>` strips the ReplicaSet hash and pod suffix (`/k8s/apps/litellm-5d8f7c9b6-x2k9p/litellm` → `apps/litellm/litellm`), the same rollout-stable identity and string format as the `workload_key` that `is_new` uses in §3.3 (amended 2026-09-24, NM-2: data-service#22, homelab#118). Pods whose names do not match (StatefulSets, systemd units) keep the raw `container_id`, and so do CronJob rows, because `<W>` only matches `/k8s/` ids. The exact expression is in `cluster/values/kube-prometheus-stack.yaml`; its promtool unit tests are in `cluster/values/tests/netmon-egress.test.yml`, run by `scripts/promtool-test-rules.sh` (amended 2026-09-24, NM-2: data-service#22, homelab#118).
 
 **Why this `CorootNodeAgentDown` form** (amended 2026-09-23, NM-2 prep): the original `absent(up{…})` fires permanently while the spike gate is closed (DaemonSet present, 0 pods, 0 targets). The new form fires when the DaemonSet is missing, or when fewer agents are scraped successfully than are available (Service/ServiceMonitor missing, selector drift, `sampleLimit` exceeded). Crash loops, stuck rollouts and plain scrape failures are already covered by the chart's `KubePodCrashLooping`, `KubeDaemonSetRolloutStuck` and `TargetDown`, following PR #109's no-duplicate-alert rule.
 
 The expression alerts on **series presence**, not on `increase() > 0`: a brand-new destination's counter has only one sample inside a 15 m window, so `increase()` over that window would return nothing and the alert would never fire for exactly the case it exists to catch. `group by (...) (metric)` turns the raw series into a 1-valued presence indicator regardless of its counter value, and the `unless` compares that against the same presence check over the prior day.
 
-- **Labels and routing:** the alert is labelled `workload`, with the value = the number of new destinations. It is `severity: info` and carries `namespace: monitoring`. The chart's `InfoInhibitor` normally suppresses `info` alerts unless a warning/critical alert fires in the same namespace, so it normally shows in Alertmanager and Prometheus without reaching Discord. The rule group is evaluated every `5m` instead of the global 30 s, because its 1-day `last_over_time` is the most expensive query of the group (amended 2026-09-23, NM-2 prep review). Raising it to `warning` is an owner decision after the spike and the noise tuning below (amended 2026-09-23, NM-2 prep).
-- **Noise:** it is expected to be noisy for CDN-rotating destinations. Tuning, such as grouping by /24 or an FQDN suffix, is an NM-2 Phase-5 follow-up. It is not an allowlist.
+- **Labels and routing:** the alert is labelled `workload` and `dest`, one alert per new destination (amended 2026-09-24, NM-2: data-service#22, homelab#118). It is `severity: info` and carries `namespace: monitoring`. The chart's `InfoInhibitor` normally suppresses `info` alerts unless a warning/critical alert fires in the same namespace, so it normally shows in Alertmanager and Prometheus without reaching Discord. The rule group is evaluated every `5m` instead of the global 30 s, because its 1-day `last_over_time` is the most expensive query of the group (amended 2026-09-23, NM-2 prep review). Raising it to `warning` is an owner decision after the spike and the noise tuning below (amended 2026-09-23, NM-2 prep).
+- **Noise:** it is expected to be noisy for CDN-rotating destinations. A name that flips between one and several IPs across DNS refreshes changes its key between `ip:port` and `fqdn:port`, which yields one extra `info` alert per flip (amended 2026-09-24, NM-2: data-service#22, homelab#118). Tuning, such as grouping by /24 or an FQDN suffix, is an NM-2 Phase-5 follow-up. It is not an allowlist.
 
 ### 6.5 Docs
 
@@ -760,9 +770,10 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 ```
 
 - `stale` = `lastSuccessAt` is older than 3 × the cadence.
-- `lastErrorCode` is `null`, `credentials`, `rate_limited`, `upstream`, `truncated` or `internal`. It is never a message.
+- `lastErrorCode` is `null`, `credentials`, `rate_limited`, `upstream`, `truncated`, `partial` or `internal`. It is never a message.
 - Before a collector's first success, staleness is measured from the service start time (amended 2026-09-23, NM-0: data-service PR #18).
 - A collector run that completes with a warning (e.g. `upstream` when no node exposes the NM-3 metrics yet, or `truncated`) is recorded as a success: `lastSuccessAt` advances, `consecutiveFailures` stays 0 and `lastErrorCode` carries the warning code. Consumers must treat `lastErrorCode = upstream` with `consecutiveFailures = 0` as "no data yet", not as an outage (amended 2026-09-24, data-service `INTERFACES.md`).
+- `partial` means a run that stored what it could but skipped upstream rows violating the table contract (§3.3). The message carries only the skipped count, never the payload. Like `upstream` and `truncated`, it is recorded as a success. The UI shows it as a warning, not as "no data yet". Consumers show unknown codes as a generic warning (amended 2026-09-24, NM-4: data-service#23, homelab#134).
 
 **`GET /inbound/summary?from&to&host&limit`** (NM-1)
 
@@ -809,9 +820,9 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 
 - `abuseIpDb` is `null` if the IP was never checked.
 - `firewallEvents` holds the last 20 items, in the same shape as the firewall-events list.
-- `logins` is `null` before NM-4 and `lan` is `null` before NM-3.
+- `logins` is always an object `{success, failure, locked}` counted in the window; it is zeros when the IP never logged in (amended 2026-09-24, NM-4: data-service#23, homelab#134). `lan` is `null` before NM-3.
 
-**`GET /egress/top?from&to&namespace&scope&limit`** (NM-2). `scope` is `external` (the default) or `all`.
+**`GET /egress/top?from&to&namespace&workload&scope&limit`** (NM-2). `scope` is `external` (the default) or `all`. `workload` is an optional filter (amended 2026-09-24, NM-2: data-service#22, homelab#118).
 
 ```json
 { "items": [ {"namespace": "apps", "workload": "litellm", "container": "litellm", "node": "mba1",
@@ -820,7 +831,8 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
               "firstSeenInWindow": "…Z", "isNew": true} ] }
 ```
 
-- Rows are aggregated by `(namespace, workload, container, destination_ip, destination_port)`.
+- Rows are aggregated by `(namespace, workload, container, destination_host, destination_port)`.
+- For name-only destinations `destinationIp` carries the name (as does `fqdn`). This is a documented deviation from the field name; furchert-ch renders non-IP text as is (amended 2026-09-24, NM-2: data-service#22, homelab#118).
 - `node` is the most frequent node for the row.
 - Items are ordered by `bytesSent + bytesReceived` descending.
 
@@ -854,6 +866,12 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 ```
 
 - `failureSameHmac` counts failures whose `usernameHmac` equals the HMAC seen on that subject's successes. That links failed attempts to known accounts without storing the attempted usernames.
+- The window filter is `occurred_at ∈ [from, to)`. The default window is 24 h. `limit` is the top-N limit of `byIp` and `bySubject`: default 10, max 50.
+- `byIp` lists only events with a non-null `client_ip`. It is ordered by `failure + locked` descending, then total descending, then IP. `country`, `blocklisted` and `abuseScore` come from `ip_enrichment`; for a private IP they are `null`/`false`/`null`, never omitted.
+- `bySubject` has one row per subject that has a `success` in the window, or is the target of `failure` events in the window whose `usernameHmac` equals an HMAC seen on **any retained** `success` of that subject. The known pairs are the `DISTINCT (subject, username_hmac)` over all `success` rows, so repeated successes never multiply the count. `failureSameHmac` counts `failure` only; `locked` is excluded from the match. Rows are ordered by `failureSameHmac` descending, then `success` descending, then `subject`.
+- Rotating `LOGIN_EVENT_HMAC_KEY` resets the per-account failure matching for up to the 180 d retention: failures after a rotation match only successes after it. This is accepted.
+- `timeline` has buckets with data only, in UTC: 1 h when `to − from` ≤ 7 d, otherwise 1 d, the same rule as `/inbound/summary`.
+- (amended 2026-09-24, NM-4: data-service#23, homelab#134)
 
 **`GET /logins/events?from&to&outcome&ip&limit&cursor`** (NM-4)
 
@@ -864,6 +882,10 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 ```
 
 - Only the first 8 hex characters of the HMAC are exposed, which is enough to group events visually.
+- `limit` defaults to 50 with a max of 500 (§7.1), and `cursor` is opaque.
+- `outcome` must be `success`, `failure` or `locked`, otherwise the answer is 400 `invalid_parameter`.
+- `country` and `blocklisted` are `null`/`false` for a null or private `clientIp`. `/ips/{ip}` answers 404 for private IPs, because they are never enriched.
+- (amended 2026-09-24, NM-4: data-service#23, homelab#134)
 
 ### 7.3 Implementation notes that bind the contract
 
@@ -968,9 +990,22 @@ grant_type=client_credentials&scope=netmon:read
 
 **data-service side.** The `login-events` collector runs every minute.
 
-1. Get a token from `${AUTH_TOKEN_URL}` using `${AUTH_CLIENT_ID}:${AUTH_CLIENT_SECRET}` and `scope=login-events:read`.
-2. Page with `after = collector_state.cursor` while `hasMore` is true, up to 10 pages per run.
-3. Upsert on `event_id`, update the cursor, and enrich the IPs (§4.3).
+1. Get a token from `${AUTH_TOKEN_URL}`. Use HTTP Basic with `${AUTH_CLIENT_ID}` and `${AUTH_CLIENT_SECRET}` form-urlencoded (RFC 6749 §2.3.1) and `grant_type=client_credentials&scope=login-events:read`. Cache the token until 60 s before `expires_in`.
+2. Page with `after = collector_state.cursor` (0 when null) and `limit=500` while `hasMore` is true, up to 10 pages per run.
+   - For each page, first upsert on `event_id`, then enrich the IPs (§4.3), and only then set the cursor to `nextAfter`. A crash therefore replays at most one page, and the replay is absorbed.
+   - Rows violating §3.3 are skipped but covered by `nextAfter`. The run then ends with the warning `partial` (§7.2).
+3. `last_window_end` is set to the run start (data-service clock) minus the producer's 10 s settle, and only by a run that drains the outbox (`hasMore=false`). Completeness follows ingestion order (id cursor plus settle), not `occurredAt`. `max(occurredAt)` would stall on days without logins and make the collector look stale.
+4. Status mapping:
+   - A blank secret fails with `credentials` without calling out, and exports no freshness gauge.
+   - A token 400/401 or an outbox 403 fails with `credentials`.
+   - An outbox 401 is retried once with a fresh token, and fails with `credentials` only if the retry also gets 401. Both 401 and 403 drop the cached token.
+   - 429 fails with `rate_limited`. Other errors fail with `upstream`.
+   - An outbox 503 (feature disabled) succeeds with an `upstream` warning.
+   - For this collector only (a per-collector hook), `credentials` failures use the runner's standard backoff ladder, `min(cadence·2^(n−1), 30 min)`, so a wrong secret does not produce about 1 440 failed client authentications per day in auth-service. The other collectors are unchanged.
+5. If `last_success_at` is older than the 72 h outbox TTL at run start, log one line: `[login-events] last success older than the 72 h outbox TTL; events purged meanwhile are lost`, with no IPs.
+6. After an auth-service DB restore, outbox ids can restart below the cursor. The owner then resets the cursor (owner go, infrastructure `DEPLOYMENT.md` NM-4). The replay is absorbed by `event_id`.
+
+Rotating `LOGIN_EVENT_HMAC_KEY` resets the per-account failure matching (§7.2 `/logins/summary`) for up to the 180 d retention. This is accepted (amended 2026-09-24, NM-4: data-service#23, homelab#134).
 
 ---
 
@@ -1033,7 +1068,7 @@ Secrets are provisioned by the owner. Implementers add only variable **names**, 
 | `data_service_cloudflare_zone_id` | NM-1 | data-service | Not a credential, but kept with the token for one source of config |
 | `data_service_abuseipdb_key` | NM-1 (later) | data-service | Optional. Its assert is skipped when undefined. |
 | `auth_service_data_service_client_secret` | NM-4 | auth-service (`{noop}`-prefixed), data-service (plain) | Follows the `auth_service_<client>_client_secret` pattern. Optional, see below. |
-| `auth_service_login_event_hmac_key` | NM-4 | auth-service only | At least 32 characters, e.g. `openssl rand -base64 48`. Rotating it breaks HMAC continuity for events already stored. Optional, see below. |
+| `auth_service_login_event_hmac_key` | NM-4 | auth-service only | At least 32 characters, e.g. `openssl rand -base64 48`. Rotating it breaks HMAC continuity for events already stored: per-account failure matching resets for up to 180 d (accepted, §7.6). Optional, see below. |
 | *(reused)* `auth_service_furchert_ch_client_secret` | NM-0 | furchert-ch (existing `oidc-client-secret`) | **No new var.** The client-credentials call uses the existing secret. |
 
 **Kubernetes Secrets** (ns `apps`, created by `59_app_services.yml`, `no_log: true`)
@@ -1120,7 +1155,7 @@ auth-service is Flux-auto-deployed on every merge to `main`, and it is the sole 
   - the cluster-internal auth-service, Prometheus and PostgreSQL.
 
   Blocklists are fetched **only** by data-service.
-- **Privileged DaemonSet.** coroot-node-agent runs privileged with hostPID in `monitoring`. It was explicitly approved by the owner, and the rollout needs a go after the spike. A NetworkPolicy limits pod-network ingress to its unauthenticated `:80` (`/metrics`, `/debug/pprof/*`) to Prometheus; node-local sources, including hostNetwork pods such as Home Assistant, stay able to reach pprof (§6.1) (amended 2026-09-24, PR #133 review); cluster-wide NetworkPolicies remain the follow-up `homelab#127` (amended 2026-09-23, NM-2 prep review).
+- **Privileged DaemonSet.** coroot-node-agent runs privileged with hostPID in `monitoring`. It was explicitly approved by the owner, and the rollout needs a go after the spike. A NetworkPolicy limits pod-network ingress to its unauthenticated `:80` (`/metrics`, `/debug/pprof/*`) to Prometheus; node-local sources, including hostNetwork pods such as Home Assistant, stay able to reach pprof (§6.1) (amended 2026-09-24, PR #133 review). The owner accepted that residual risk on 2026-09-24 (§6.1) (amended 2026-09-24, owner decision, homelab#118); cluster-wide NetworkPolicies remain the follow-up `homelab#127` (amended 2026-09-23, NM-2 prep review).
 - **HMAC key.** The key lives in auth-service only. data-service stores only HMACs, and the API exposes only an 8-hex-character prefix.
 
 ---
@@ -1159,7 +1194,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 | Q1 | Cloudflare token creation, plus whether Firewall Services:Read is needed | resolved 2026-09-24: token created, Analytics:Read is enough (§4.2) | — |
 | Q2 | Free-plan availability of `clientIP`, `clientASNDescription` and `userAgent` (§4.2 probe) | resolved 2026-09-24: all available except `clientAsn`/`clientASNDescription` on request groups, which were dropped (§4.2) | — |
 | Q3 | `homelab` PR #109 merged (textfile collector) | **NM-3 (blocker)** | NM-3's PR does not duplicate #109 and targets `main`; #109 merges first, then NM-3 resolves the `additionalPrometheusRulesMap` conflict (one key, all entries) (amended 2026-09-23, NM-3) |
-| Q4 | Go for the coroot spike, then for the all-node rollout | **NM-2 (blocker)** | — (owner action) |
+| Q4 | ~~Go for the coroot spike, then for the all-node rollout~~ | **NM-2 (blocker)** | Resolved 2026-09-25: spike + mba2 go 2026-09-24, raspi4 joined 2026-09-25 (merge = go) |
 | Q5 | data-service dependency set — see the table below. It must be approved before NM-0 implementation starts. | **NM-0 (blocker: approval)** | — |
 | Q6 | Reuse the `furchert-ch` client (chosen) or a dedicated client | non-blocker | Reuse |
 | Q7 | Retention defaults (90/180/30 d) | non-blocker | As in §3.3 |
@@ -1200,7 +1235,7 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 |---|---|
 | ~~Cloudflare `settings` node shape; `maxPageSize` values~~ — verified by the 2026-09-24 probe (§4.2). Still open: `count` being sample-adjusted; `clientCountryName` being ISO-2; analytics ingest delay ≤ 2 min | NM-1 |
 | Spamhaus `drop_v4.json` exact NDJSON shape; FireHOL level1 containing private ranges | NM-1 |
-| coroot-node-agent footprint measured on raspi5 + mba1 (§6.3 spike result: RSS 69 / 105 MiB, working set 320 / 399 MiB, startup peak 410 / 702 MiB); still open: mba2, raspi4, and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
+| coroot-node-agent footprint measured on raspi5 + mba1 (§6.3 spike result: RSS 69 / 105 MiB, working set 320 / 399 MiB, startup peak 410 / 702 MiB; for the 1Gi run figures see §6.3); measured on raspi5 + mba1 + mba2 (see §6.3); still open: raspi4 post-rollout footprint, and the live `container_id`/label shape (flags, mounts, port 80 and metric/label names verified in the v1.35.10 source on 2026-09-23) | NM-2 spike |
 | ~~Whether the node-exporter scrape already adds a `node` label (possible `exported_node`)~~ — verified: it does not (`honorLabels: true`, §5.2) | NM-3 |
 | apt package name `conntrack`; sshd unit name `ssh`; UFW log rate limits on these nodes | NM-3 |
 | ~~Spring Security authentication events firing for auth-service's form-login chain; `users.status` → Locked/Disabled exception mapping~~ — verified in auth-service PR #96: one event per form-login attempt, `DisabledException` → `locked` (§7.6) | NM-4 |
@@ -1221,3 +1256,5 @@ The order is **NM-0 → NM-1 → NM-3 → NM-2 → NM-4**. Within each sub-proje
 ---
 
 Reviewed 2026-09-23 (plan-reviewer, PASS WITH CHANGES, 32 findings applied); amended 2026-09-23 after data-service PR #18.
+NM-2 amendments (data-service#22, homelab#118): 2026-09-24.
+NM-4 amendments (data-service#23, homelab#134): 2026-09-24.

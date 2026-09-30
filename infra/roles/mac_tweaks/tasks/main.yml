@@ -111,3 +111,84 @@
     path: /etc/modules-load.d/watchdog.conf
     state: absent
   when: not mac_tweaks_watchdog_enabled
+
+# --- Kubelet graceful node shutdown: logind inhibitor delay (homelab#102) ---
+# Ordering matters at rollout: this playbook must run BEFORE 20_k3s.yml, otherwise the
+# kubelet restarts while the delay is still Ubuntu's 30 s and disables the feature until
+# its next restart.
+- name: Raise the logind inhibitor delay for the kubelet
+  ansible.builtin.template:
+    src: logind-kubelet.conf.j2
+    dest: /etc/systemd/logind.conf.d/zz-homelab-kubelet.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: mac_tweaks_kubelet_inhibit_delay_enabled
+  notify: Restart systemd-logind
+
+- name: Remove the logind inhibitor delay drop-in
+  ansible.builtin.file:
+    path: /etc/systemd/logind.conf.d/zz-homelab-kubelet.conf
+    state: absent
+  when: not mac_tweaks_kubelet_inhibit_delay_enabled
+  notify: Restart systemd-logind
+
+# --- Scheduled preventive reboot (homelab#102) ---
+- name: Scheduled reboot — install the uptime-guard script
+  ansible.builtin.template:
+    src: homelab-scheduled-reboot.sh.j2
+    dest: "{{ mac_tweaks_reboot_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: mac_tweaks_reboot_enabled
+
+- name: Scheduled reboot — install the systemd service unit
+  ansible.builtin.template:
+    src: homelab-scheduled-reboot.service.j2
+    dest: /etc/systemd/system/homelab-scheduled-reboot.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: mac_tweaks_reboot_enabled
+  notify: Reload systemd (mac_tweaks)
+
+- name: Scheduled reboot — install the systemd timer unit
+  ansible.builtin.template:
+    src: homelab-scheduled-reboot.timer.j2
+    dest: /etc/systemd/system/homelab-scheduled-reboot.timer
+    owner: root
+    group: root
+    mode: "0644"
+  when: mac_tweaks_reboot_enabled
+  notify: Reload systemd (mac_tweaks)
+
+- name: Scheduled reboot — flush handlers so the timer unit exists before it is started
+  ansible.builtin.meta: flush_handlers
+
+- name: Scheduled reboot — enable and start the timer
+  ansible.builtin.service:
+    name: homelab-scheduled-reboot.timer
+    state: started
+    enabled: true
+  when: mac_tweaks_reboot_enabled
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Scheduled reboot — stop and disable the timer
+  ansible.builtin.service:
+    name: homelab-scheduled-reboot.timer
+    state: stopped
+    enabled: false
+  when: not mac_tweaks_reboot_enabled
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Scheduled reboot — remove the units and the script
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/homelab-scheduled-reboot.timer
+    - /etc/systemd/system/homelab-scheduled-reboot.service
+    - "{{ mac_tweaks_reboot_script }}"
+  when: not mac_tweaks_reboot_enabled
+  notify: Reload systemd (mac_tweaks)

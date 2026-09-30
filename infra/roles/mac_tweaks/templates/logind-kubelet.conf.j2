@@ -1,0 +1,12 @@
+# Managed by Ansible — do not edit manually
+# homelab#102: the kubelet only raises logind's inhibitor delay when the requested
+# shutdownGracePeriod exceeds the current one, and if that request fails it logs
+# "Failed to start node shutdown manager" and carries on with the feature disabled.
+# Ubuntu caps the delay at 30s in
+# /usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf, so the
+# kubelet's 60s would degrade silently. logind merges /etc/systemd/logind.conf.d over
+# /usr/lib/systemd/logind.conf.d in lexical order, so "zz-" wins. Ubuntu's own file is
+# deliberately left in place (not masked, not symlinked). Verify the merge order with:
+#   systemd-analyze cat-config systemd/logind.conf
+[Login]
+InhibitDelayMaxSec={{ mac_tweaks_kubelet_inhibit_delay_seconds }}

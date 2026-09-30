@@ -247,29 +247,43 @@ sudo k3s kubectl get --raw /healthz --request-timeout=10s
 sudo k3s kubectl get --raw /readyz?verbose --request-timeout=10s
 ```
 
-##### Temporary mitigation: apiserver etcd health-check timeout
+##### Apiserver etcd health-check timeout
 
-If `/readyz`'s etcd check is failing purely because kine queries are momentarily slower than the
-apiserver's default 2s health-check timeouts, a drop-in raising both to 20s buys time for the
-online compactor to catch up (or for offline compaction to be scheduled) without the embedded
-cloud-controller-manager panicking and restart-looping on a failed `/healthz`:
+`/readyz`'s etcd check can fail purely because kine queries are momentarily slower than the
+apiserver's built-in 2s health-check timeouts, without anything else being broken — and once it
+fails, the embedded cloud-controller-manager panics and restart-loops on a failed `/healthz` (see
+"Symptoms" above), which makes an already-degraded cluster worse. Since 2026-09-24 (owner
+decision on homelab#129), both timeouts are raised to 20s permanently by the `k3s` role, not by a
+manual drop-in: `infra/roles/k3s/templates/k3s-server.service.j2`'s `ExecStart` sets
+`--kube-apiserver-arg=etcd-healthcheck-timeout={{ k3s_apiserver_etcd_healthcheck_timeout }}` and
+the matching `etcd-readycheck-timeout` flag (both default `20s`,
+`infra/roles/k3s/defaults/main.yml`), applied only to the control-plane node (the
+`k3s-server.service.j2` template is only rendered for the `k3s_server` group). This buys the
+online compactor — or an offline compaction run — time before the CCM starts restart-looping,
+without anyone having to apply the incident's manual mitigation by hand first.
 
-`/etc/rancher/k3s/config.yaml.d/90-incident-129-etcd-healthcheck.yaml`:
-```yaml
-kube-apiserver-arg:
-  - "etcd-healthcheck-timeout=20s"
-  - "etcd-readycheck-timeout=20s"
-```
+The 2026-09-23 incident applied this as a hand-written config-file drop-in at
+`/etc/rancher/k3s/config.yaml.d/90-incident-129-etcd-healthcheck.yaml` first (mitigation 2, 17:09
+CEST); `infra/roles/k3s/tasks/server.yml` now removes that file on every run — redundant once the
+same timeouts are on the systemd unit's command line — as part of converging the node to the
+templated config.
+
+**Owner step:** apply the role with playbook 20, limited to the control-plane node:
 
 ```bash
-ssh raspi5 "sudo systemctl restart k3s --no-block"
+# on the LAN
+ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
+
+# off-LAN — see "Off-LAN kubectl / Ansible Access" for the SSH jump config prerequisite
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
 ```
 
-**This drop-in is not in this repo and is not applied by any playbook.** It was created by hand
-on raspi5 during the 2026-09-23 incident (mitigation 2, 17:09 CEST) and is still in place as of
-this writing. Whether to codify it into `infra/roles/k3s` (as a template shipped to every server
-node) or remove it now that compaction has caught up is an open decision tracked in
-homelab#129 — do not add it to the k3s role from this section alone.
+The first run restarts k3s on raspi5 (~30-60s control-plane blip while the apiserver picks up the
+new flags; containers and public endpoints are unaffected — `k3s.service` ships with
+`KillMode=process`). Subsequent runs are idempotent: the drop-in is already gone and the
+templated unit is already up to date, so neither task reports `changed` and k3s is not restarted
+again.
 
 ##### Offline compaction
 
@@ -467,6 +481,36 @@ snapshot protection needed.
   0, concurrency 1) — purges removed/system snapshots (e.g. replica rebuilds) and keeps the
   group's labels backed by a real job. 04:00 is clear of the 02:00 snapshot window and the 03:00
   restic cron on raspi5.
+- **Filesystem trim job (#106):** group `metrics` carries a second `RecurringJob`,
+  `metrics-filesystem-trim` (`infra/playbooks/30_longhorn.yml`, task `filesystem-trim`, cron
+  `0 5 * * *` node-local, retain 0, concurrency 1). It exists because an excluded volume keeps a
+  frozen base forever: Longhorn never deletes a volume's *newest* snapshot, it only marks it
+  removed and merges it once a newer snapshot appears — and with no snapshot job on the volume,
+  no newer snapshot ever appears. After the #101 cleanup the Prometheus volume went from 21.3 G
+  back to 22.0 G within a day, on its way to ~40 G (2 x the 20 Gi volume). A trim reclaims the
+  blocks the filesystem no longer uses, both in the volume head **and** in the continuous chain
+  of already-removed snapshots below it, so the frozen base shrinks too; valid (not removed)
+  snapshots are immutable and are never trimmed, which is why the `default`-group volumes keep
+  their chains. 05:00 is simply clear of the 02:00, 03:00 and 04:00 windows — the cleanup job
+  is not a precondition for the trim. The job ends with a snapshot purge, which is a no-op
+  unless a replica rebuild left a system snapshot behind.
+  - Prerequisites: a trimmable filesystem (ext4 or XFS — the `longhorn` StorageClass formats
+    ext4, check with `kubectl get sc longhorn -o jsonpath='{.parameters.fsType}'`) and the volume
+    **attached and mounted**. The workload keeps running; no `discard` mount option is needed.
+  - Every failure mode is silent: a detached volume (workload scaled to 0, node down) is skipped
+    with a log warning only, and a trim does nothing while a replica is rebuilding. The line
+    `Finished recurring filesystem trim` in the job pod's log is the only proof that a run did
+    something — see the weekly maintenance checklist.
+  - ⚠️ Do **not** enable the global setting `remove-snapshots-during-filesystem-trim` to "help"
+    this job. It is unnecessary here (the leftover snapshot is already marked removed) and it is
+    cluster-wide: it would mark the newest snapshot of *every* volume as removed during a trim,
+    including the app volumes that rely on `daily-snapshot` for rollback.
+  - ext4 remembers which blocks it has already discarded. A snapshot that is marked removed
+    *after* a trim may therefore keep its blocks until the filesystem is remounted — restart the
+    Prometheus pod and let the next trim run if a removed snapshot refuses to shrink.
+  - Cost: the trim runs as `fstrim` in the host mount namespace with a one-hour timeout. The first
+    run discards the whole accumulated free space at once and loads the replica nodes noticeably;
+    steady-state runs discard only one day of churn.
 - **Excluding another volume:** label its PVC the same way —
   `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
   — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
@@ -487,19 +531,36 @@ snapshot protection needed.
     `kubectl -n longhorn-system get engines.longhorn.io -l longhornvolume=<volume-name> -o jsonpath='{.items[0].status.purgeStatus}'`
     — after a successful purge `actualSize` decreases substantially but can stay above the
     nominal size (the volume head keeps every block the filesystem ever wrote until a filesystem
-    trim). This is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
+    trim — for `metrics`-group volumes that is what `metrics-filesystem-trim` does nightly). This
+    is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
 - **Verify:**
   ```bash
-  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
+  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup + metrics-filesystem-trim
   kubectl -n monitoring get pvc <name> --show-labels
   kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume-name>")] | length'
+
+  # Did the nightly trim actually run? (a skipped volume logs a warning and nothing else)
+  kubectl -n longhorn-system get pods --sort-by=.metadata.creationTimestamp | grep metrics-filesystem-trim
+  kubectl -n longhorn-system logs <that pod> | grep 'Finished recurring filesystem trim'
+
+  # Volume attached and running the expected engine image (a detached volume is skipped silently)
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.state}{"  "}{.status.currentImage}'
+
+  # Did it free anything? Compare before and after a run; actualSize should approach "Used".
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.actualSize}'
+  kubectl -n monitoring exec prometheus-kube-prometheus-stack-prometheus-0 -c prometheus -- df -h /prometheus
+
+  # On-disk proof on each replica node — this is the number that filled raspi4's SD card
+  ssh raspi5 'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
+  ssh mba1   'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
   ```
 - **Warnings:**
   - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
     explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
-  - Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
-    returning the volume to `default`; recover by re-running `30_longhorn.yml` and
-    `41_monitoring.yml`.
+  - Deleting the *last* `RecurringJob` of the group strips the labels from PVC and Volume,
+    silently returning the volume to `default`; recover by re-running `30_longhorn.yml` and
+    `41_monitoring.yml`. With both `metrics-snapshot-cleanup` and `metrics-filesystem-trim` in
+    place, deleting one of the two is safe — deleting both is not.
   - Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC (restore,
     `volumeClaimTemplate` change) — labels don't survive it.
   - `--check` of `41_monitoring.yml` on a fresh cluster stops at the PVC wait for about 10
@@ -608,8 +669,11 @@ Host raspi5
   HostName ssh.furchert.ch
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   ProxyCommand cloudflared access ssh --hostname %h
 ```
+
+Always pair `~/.ssh/homelab` with `IdentitiesOnly yes` (`-o IdentitiesOnly=yes` on the command line). Otherwise ssh-agent offers its other keys first, the server's `MaxAuthTries` runs out before `~/.ssh/homelab` is tried, and the connection fails with `Received disconnect … Too many authentication failures`.
 
 #### Update Ingress List
 
@@ -632,11 +696,22 @@ When you are **not on the home LAN**, the k3s API (`192.168.1.61:6443`) is unrea
 directly. Open a persistent SSH local port-forward through the Cloudflare Access SSH proxy,
 then point kubectl at the local end.
 
+Recommended shortcut: add this block to `~/.ssh/config`, so the plain forms
+`ssh ssh.furchert.ch '…'` and `ssh -N -L 6443:localhost:6443 ssh.furchert.ch` work:
+
+```sshconfig
+Host ssh.furchert.ch
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+```
+
 1. Open the forward in its own terminal and leave it running (`-N` = no remote shell, just
    hold the tunnel open):
 
    ```bash
-   ssh -i ~/.ssh/homelab \
+   ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes \
      -o ProxyCommand="cloudflared access ssh --hostname %h" \
      -N -L 6443:localhost:6443 \
      ansible@ssh.furchert.ch
@@ -690,12 +765,14 @@ Host 192.168.1.61
   HostName ssh.furchert.ch
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   ProxyCommand cloudflared access ssh --hostname %h
 Host 192.168.1.*
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   StrictHostKeyChecking yes
-  ProxyCommand ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
+  ProxyCommand ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
 ```
 
 ```bash
@@ -718,11 +795,11 @@ For a single read or a single-manifest apply, run kubectl on the control-plane n
 same Cloudflare Access SSH proxy instead of holding a forward open:
 
 ```bash
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl -n apps get pods'
 
 # apply exactly one manifest from the local checkout (used for PR #73 on 2026-09-03):
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl apply -f -' < cluster/apps/<app>/deployment.yaml
 ```
 
@@ -934,12 +1011,13 @@ in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgrou
 | DaemonSet, headless Service, ServiceMonitor, NetworkPolicy (ingress only from Prometheus on TCP 80) | `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml` (no Helm chart; the chart is stale) |
 | Alert rules `NetmonNewExternalDestination`, `CorootNodeAgentDown` | `cluster/values/kube-prometheus-stack.yaml` → `additionalPrometheusRulesMap.homelab-netmon-egress` |
 | Image | `ghcr.io/coroot/coroot-node-agent:1.35.10@sha256:…` (index digest in the manifest comment; bumped by hand) |
-| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default `[raspi5, mba1]` since the 2026-09-24 spike) |
+| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default: all four nodes `[raspi5, mba1, mba2, raspi4]` since 2026-09-25) |
 
 **The gate.** The DaemonSet only schedules on labelled nodes. `41_monitoring.yml` labels exactly
 the nodes in `coroot_node_agent_nodes` and **removes** the label from every other node, so the
 play variable is the source of truth: nodes missing from the list lose the label on the next run.
-Since the 2026-09-24 spike the default is `[raspi5, mba1]`. With an empty list
+The default covers all four nodes, `[raspi5, mba1, mba2, raspi4]`, since 2026-09-25. raspi5 and
+mba1 ran the spike, mba2 joined on 2026-09-24, and raspi4 joined on 2026-09-25. With an empty list
 (`-e '{"coroot_node_agent_nodes": []}'`) the DaemonSet runs 0 pods and neither rule fires.
 
 **Memory options (researched 2026-09-24 against the v1.35.10 source; none applied).** The startup
@@ -971,10 +1049,11 @@ required; the spike on mba1 is what proves that.
 only Prometheus from the pod network, but Kubernetes always admits traffic from the pod's own node.
 Host processes and hostNetwork pods on an agent node can therefore still fetch profiles and heap
 dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Assistant, which has
-`hostNetwork: true` and no node pin. Before the all-node rollout the owner decides between:
-- accepting this for the homelab, since those sources already share the node;
+`hostNetwork: true` and no node pin. **The owner accepted this residual risk on 2026-09-24 (#118).**
+It is homelab-only, and the agent has no external exposure. Revisit it if either alternative
+becomes available:
 - a `/metrics`-only reverse-proxy sidecar with the agent bound to `127.0.0.1`, which adds a new pinned image and needs approval;
-- an upstream request for a disable flag.
+- an upstream flag that disables pprof.
 
 #### Spike runbook (needs the owner's go — docs/060 §12 Q4)
 
@@ -1017,7 +1096,7 @@ dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Ass
 5. **Add mba1** (no BTF): repeat steps 2–4 with `-e '{"coroot_node_agent_nodes": ["raspi5", "mba1"]}'`
    (or `kubectl label node mba1 …`). Every criterion must hold on both nodes.
 
-   **Result (2026-09-24, from 11:52):** raspi5 and mba1 are now the playbook default.
+   **Result (2026-09-24, from 11:52):** raspi5 and mba1 were the playbook default after the spike; mba2 joined later (step 6).
 
    | Measure | raspi5 | mba1 |
    |---|---|---|
@@ -1037,6 +1116,41 @@ dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Ass
    node to `coroot_node_agent_nodes` in `41_monitoring.yml`, a `41_monitoring.yml` run, and steps 3–4:
    first **mba2**, whose t2 kernel (6.19) differs from mba1's (6.12), then **raspi4**, which has
    only 4 GB RAM and about 2 GB available.
+
+   **mba2 joined on 2026-09-24** (t2 kernel 6.19.10, no BTF), with the owner's go on #118. It
+   followed the raspi5 and mba1 measurements of the 1Gi run: requests 256Mi and limits 1Gi,
+   2026-09-24 15:09–17:15 CEST (2 h). These are a later run than the 768Mi spike table in step 5
+   (320 / 399 MiB, band up to 420, peak 702 MiB), not a contradiction of it:
+
+   | Measure (1Gi run, 2 h) | raspi5 | mba1 |
+   |---|---|---|
+   | Working set, steady | 318 MiB | 350 MiB |
+   | RSS, steady | 68 MiB | 98 MiB |
+   | Startup peak, under the 1Gi limit | 479 MiB | 544 MiB |
+   | Restarts | 0 | 0 |
+
+   Criterion 2's 24 h restart window (docs/060 §6.3) started 2026-09-24 11:52 CEST and ends
+   2026-09-25 11:52 CEST; the result is recorded at the 12:07 checkpoint (0 restarts so far on all
+   three nodes).
+
+   Expect a startup peak of about 500–700 MiB on mba2's t2 kernel, and watch for OOMKilled during
+   the first 5 minutes.
+
+   **raspi4 joined on 2026-09-25**, after 12 h of mba2 observation. The gate now covers all four
+   nodes. The plan's further 24 h of mba2 observation was shortened to 12 h on the lead's
+   recommendation (mba2 flat at 332 MiB steady / 349 MiB peak, 0 restarts). The owner decision is
+   Dominic's merge of PR #167 (2026-09-25). Evidence from the 2026-09-25 morning check:
+
+   | Node | Max working set (12 h window 19:13–07:13 CEST, excludes the startup peak) | Other |
+   |---|---|---|
+   | mba2 | 349 MiB | steady 332 MiB, RSS 63 MiB, 0 restarts, no OOMKilled |
+   | raspi5 | 442 MiB | — |
+   | mba1 | 390 MiB | — |
+
+   Memory headroom on raspi4 is the tightest in the cluster. It has 3 785 Mi allocatable, of which
+   1 736 Mi (about 46 %) is used, leaving about 2 GB free. That is enough for the agent's 256Mi request and
+   an expected startup peak of about 400–500 MiB on the arm64 Pi (raspi5 measured 479 MiB), under
+   the 1Gi limit. Watch raspi4's pod for OOMKilled during the first 5 minutes.
 7. **Rollback.**
    - *Stop the agent, keep everything else:* run `41_monitoring.yml` with
      `-e '{"coroot_node_agent_nodes": []}'` (the gate closes and the pods terminate), or
@@ -1359,7 +1473,60 @@ kubectl -n apps delete pod -l app=data-service
 
 auth-service then logs the "disabled" WARN and answers 503. The seeded `data-service` row in `oauth2_registered_client` stays until it is deleted there.
 
+**After an auth-service DB restore.** Outbox ids can restart below data-service's cursor, so new login events would be skipped. With the owner's go, reset the cursor. The replay is absorbed by `event_id`:
+
+```bash
+kubectl -n apps exec postgresql-0 -- psql -U postgres -d data_service \
+  -c "UPDATE netmon.collector_state SET cursor = NULL WHERE collector = 'login-events'"
+```
+
 **Rotation.** `auth_service_login_event_hmac_key`: rotating it breaks HMAC continuity for login events already stored in data-service, so avoid it. `auth_service_data_service_client_secret`: auth-service seeds a client only once and never updates it, so a new SOPS value plus playbook 59 is not enough. Also update the `data-service` row in `oauth2_registered_client` (see homelab-auth-service `INTERFACES.md` §6), then restart auth-service and data-service.
+
+### NM-1 follow-up: AbuseIPDB key (optional)
+
+The `reputation` collector in data-service checks suspicious public IPs against AbuseIPDB (`docs/060-network-monitoring.md` §4.5). It stays off until the key exists. With the key, it runs every 30 min at :00 and :30. It checks at most 10 IPs per run and 200 per UTC day, which is well under the free plan's 1 000 checks per day.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variable (owner, optional) | `infra/inventory/group_vars/all.sops.yml` | `data_service_abuseipdb_key` |
+| data-service key | `59_app_services.yml` → `apps/data-service-secrets` | `abuseipdb-api-key` (env `ABUSEIPDB_API_KEY`) |
+
+Without the variable, playbook 59 skips the key and prints a note. If the variable is set but empty, the playbook fails.
+
+#### Enable order
+
+1. Owner: create a free account at abuseipdb.com, then create an API key (Account → API).
+2. Owner: `sops infra/inventory/group_vars/all.sops.yml` and add `data_service_abuseipdb_key: "<key>"`.
+3. Commit the encrypted file on a branch, open a PR and merge it.
+4. Run playbook 59 **twice**. The first run adds the key. The second run must report no change for the Secret tasks.
+5. Restart data-service by deleting its pod (see the Flux note in "Enable order (NM-4)"). `ABUSEIPDB_API_KEY` is read at pod start, and `rollout restart` is reverted by Flux.
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret tasks
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect abuseipdb-api-key next to the existing keys
+kubectl -n apps delete pod -l app=data-service
+kubectl -n apps get pods -l app=data-service          # the pod age must be new
+```
+
+#### Verify
+
+After the next :00 or :30 run:
+- The Prometheus series `netmon_collector_last_success_timestamp_seconds{collector="reputation"}` exists. data-service registers it only when the key is set, so it is NaN until the first success.
+- `GET /api/netmon/status` lists `reputation` with `enabled: true` and without a `credentials` error. You can see this in furchert-ch `/dashboard/network`.
+
+A run with no candidate IPs also counts as a success. A `credentials` error means AbuseIPDB rejected the key.
+
+**Turning it off.** Removing the SOPS variable does not remove the key, because playbook 59 then only skips it. Remove the key by hand and restart data-service:
+
+```bash
+kubectl -n apps patch secret data-service-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/abuseipdb-api-key"}]'
+kubectl -n apps delete pod -l app=data-service
+```
+
+The new pod exports no `reputation` gauge, so `NetmonCollectorStale` does not fire for it.
 
 ---
 
@@ -2012,24 +2179,177 @@ ansible <node> -m reboot --become
 kubectl uncordon <node>
 ```
 
-### MacBook Watchdog
+### MacBook nodes: controlled reboots (#102)
 
-MacBook Air workers (mba1, mba2) run a kernel watchdog (`softdog`) that auto-reboots on kernel freeze/panic.
+Both MacBook Air workers are power-cycled by their T2 chip at monotonic **432 000 s (5 d) ± 10 s
+after every host boot**. The journal of every crashed boot ends with the apple-bce driver tearing
+down the T2's virtual USB host controller (`bce_vhci_free_device`), there is no oops, no panic, no
+thermal event, and `/sys/fs/pstore/` is empty — the reset is initiated by the firmware, below
+Linux. mba2 has done this on an unbroken 5-day cycle since 2026-04-13, mba1 since 2026-07-02.
+
+The mitigation is a schedule, not a fix: keep every boot shorter than five days. Two pieces run on
+the nodes.
+
+**1. A daily timer with an uptime guard** (`mac_tweaks` role). `homelab-scheduled-reboot.timer`
+fires once a day and runs a script that reboots **only** when `/proc/uptime` is at least
+`mac_tweaks_reboot_min_uptime_seconds` (3.5 d), otherwise it logs `no reboot needed` and exits 0.
+Worst case is therefore 3.5 d + 1 d = 4.5 d, twelve hours before the deadline, and the schedule
+re-derives itself from actual uptime after any unplanned reboot. The script uses
+`systemctl --no-block reboot`: only the logind path honours the kubelet's shutdown inhibitor, and
+`--no-block` keeps the oneshot unit out of its own shutdown transaction.
+
+| Node | Slot | Why |
+|------|------|-----|
+| `mba2` | `*-*-* 06:10:00` | after the 05:00 `metrics-filesystem-trim` window |
+| `mba1` | `*-*-* 07:40:00` | 90 min after mba2, so a Longhorn rebuild finishes first |
+
+Slots and threshold are role defaults (`infra/roles/mac_tweaks/defaults/main.yml`), so the role
+works without inventory edits. Override a single host from the untracked inventory
+(`host_vars/<node>.yml`) or with `-e mac_tweaks_reboot_on_calendar="*-*-* 08:00:00"`.
+
+**2. Kubelet graceful node shutdown** (`k3s` role, `mac` group only). The kubelet gets
+`shutdownGracePeriod: 60s` / `shutdownGracePeriodCriticalPods: 20s` through
+`/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/50-graceful-shutdown.conf`. k3s passes
+`--config-dir` for that directory and merges every `*.conf` at start; the `00-`/`10-`/`20-`
+prefixes are k3s' own (it rewrites `00-k3s-defaults.conf` at every start), which is why ours is
+`50-`. Do **not** switch this to `--kubelet-arg=config=`: k3s strips that flag and copies the file
+in one-way as `10-cli-config.conf`, which a rollback would not revert.
+
+On a **fresh** node the drop-in directory does not exist until k3s-agent has started once, so the
+role installs and starts the agent first and only then waits (up to 150 s) for
+`00-k3s-defaults.conf`, fails loudly if it never appears, and writes the drop-in.
+
+This only works if logind's inhibitor delay is at least as long as the grace period. Ubuntu caps it
+at 30 s (`/usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf`), and when the
+kubelet cannot raise it, it logs `Failed to start node shutdown manager` **and carries on with the
+feature disabled** — a silent degradation. The `mac_tweaks` role therefore ships
+`/etc/systemd/logind.conf.d/zz-homelab-kubelet.conf` with `InhibitDelayMaxSec=60`; the `zz-` prefix
+wins logind's lexical merge and Ubuntu's file is left untouched.
+
+**Rollout order matters**: `10_base.yml` (logind delay) before `20_k3s.yml` (kubelet), and one node
+at a time — mba2 first, mba1 at least 60 minutes later.
 
 ```bash
-# Verify watchdog health
-ssh ansible@<mba-ip> "systemctl is-active watchdog && lsmod | grep softdog"
+# mba2 first. --diff is safe here.
+ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks
 
-# Temporarily disable for maintenance
-ansible-playbook infra/playbooks/10_base.yml -l <node> -e "mac_tweaks_watchdog_enabled=false"
+# 20_k3s.yml: --check only, NEVER --diff. k3s-agent.service.j2 embeds K3S_TOKEN, so a
+# diff of that template prints the token to the terminal and into any log.
+ansible-playbook infra/playbooks/20_k3s.yml -l mba2 --check
+ansible-playbook infra/playbooks/20_k3s.yml -l mba2
 
-# Re-enable
-ansible-playbook infra/playbooks/10_base.yml -l <node>
-
-# Check unexpected reboots
-ssh ansible@<mba-ip> "sudo journalctl -b -1 --no-pager | tail -50"
-ssh ansible@<mba-ip> "sudo last -x reboot | head -5"
+# Then repeat both for mba1, >= 60 min later.
 ```
+
+**Verify** (before the first scheduled fire; safe while uptime is below the threshold):
+
+```bash
+ssh ansible@<mba-ip> "systemctl list-timers homelab-scheduled-reboot.timer --all"
+ssh ansible@<mba-ip> "sudo systemd-analyze verify /etc/systemd/system/homelab-scheduled-reboot.timer"
+ssh ansible@<mba-ip> "systemd-analyze calendar '*-*-* 06:10:00' --iterations=3"
+
+# Functional test — this is not a passive check: below the threshold it prints "no reboot
+# needed" and exits 0, but once uptime >= mac_tweaks_reboot_min_uptime_seconds (3.5 d) this
+# command IS the reboot. That makes it the recommended, attended end-to-end test: run it
+# deliberately once a node's uptime crosses 3.5 d (mba2 first, mba1 >= 60 min later) and
+# watch the graceful shutdown end to end — kubectl -n apps logs postgresql-0 --previous |
+# tail -5 for "database system is shut down" and journalctl -u k3s-agent -f for the
+# shutdown-manager handoff — instead of waiting for the unattended timer slot.
+ssh ansible@<mba-ip> "cat /proc/uptime; sudo systemctl start homelab-scheduled-reboot.service && \
+  journalctl -u homelab-scheduled-reboot -n 5 --no-pager"
+
+# logind delay: 30 s before the rollout, 60 s after
+ssh ansible@<mba-ip> "busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager InhibitDelayMaxUSec"
+ssh ansible@<mba-ip> "systemd-analyze cat-config systemd/logind.conf | grep -n -B2 -A2 InhibitDelayMaxSec"
+
+# Inhibitor lock: expect a kubelet "delay" lock for shutdown here. The role's
+# flush_handlers restarts systemd-logind mid-role, which drops any held inhibitor locks;
+# whether kubelet 1.32 re-acquires one without its own restart is unverified — check this
+# explicitly rather than assuming the busctl delay above means a lock is actually held.
+ssh ansible@<mba-ip> "systemd-inhibit --list"
+
+# Kubelet: the drop-in is in place and the shutdown manager did NOT give up
+ssh ansible@<mba-ip> "sudo ls -l /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/"
+ssh ansible@<mba-ip> "sudo journalctl -u k3s-agent -b --no-pager | grep -i 'shutdown manager'"
+```
+
+**Mandatory gate — did the scheduled reboot actually complete?** Before treating any given
+night as a test of the T2 hypothesis, confirm on the morning after the first expected slot
+(e.g. 2026-09-20 at 08:30 CEST or later) that each node picked up a new boot at its slot time:
+
+```bash
+ssh ansible@<mba-ip> "sudo journalctl --list-boots"                 # new boot ≈ 06:10 (mba2) / ≈ 07:40 (mba1)
+ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"            # a shutdown entry, not a bare crash
+ssh ansible@<mba-ip> "systemctl list-timers homelab-scheduled-reboot.timer --all"   # timer activation, not just the service outcome
+ssh ansible@<mba-ip> "sudo journalctl -u homelab-scheduled-reboot -b -1 --no-pager"
+  # expect: "uptime <n>s >= <min_uptime>s — rebooting before the T2 5-day reset"; read the
+  # full unit journal, not just the tail — "no reboot needed" here would itself be unexpected
+  # once uptime has passed the 3.5 d threshold, and is a different failure mode from the timer
+  # never having activated at all
+```
+
+If there is no boot at the expected slot time, no shutdown entry, or no matching "rebooting
+before the T2 5-day reset" line, the scheduled reboot did not complete — but that alone does
+not prove the timer never fired. Check timer activation (`systemctl list-timers`) and the
+service's own journal separately: the timer can activate and the service can still exit
+without rebooting (e.g. a stale uptime read) or fail mid-run. Diagnose which of the three
+failed (see Troubleshooting) and re-run before drawing any conclusion about the T2 hypothesis.
+
+After the first scheduled reboot, the fuller verification:
+
+```bash
+ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"          # a shutdown entry, not a bare crash
+ssh ansible@<mba-ip> "uptime -s; journalctl --list-boots | tail -3"
+ssh ansible@<mba-ip> "journalctl -u homelab-scheduled-reboot -b -1 --no-pager | tail -3"
+ssh ansible@<mba-ip> "sudo journalctl -b -1 -u k3s-agent --no-pager | grep -i shutdown"
+kubectl -n apps logs postgresql-0 --previous | tail -5            # "database system is shut down"
+kubectl get nodes -o wide
+kubectl -n longhorn-system get volumes.longhorn.io                # all robustness=healthy
+```
+
+**How to read 2026-09-20/21**
+
+| Observation | Meaning |
+|---|---|
+| 09-20 ≥ 08:30: new boot ≈ 06:10/07:40, shutdown entry in `last -x`, service journal line present | Scheduled reboot completed — the night is a valid test of the T2 hypothesis. |
+| 09-20 ≥ 08:30: no such boot | Scheduled reboot did not complete — the night proves nothing. Check timer activation and the service journal separately before assuming it's a timer bug; fix and re-run. |
+| 09-21: `uptime -s` still shows the 09-20 morning boot, no later boot | Hypothesis TRUE (the countdown restarts at host boot) — keep the mitigation as-is. |
+| 09-21: a boot ≈ 09-20 21:39 CEST (mba2) / ≈ 22:50 CEST (mba1), previous journal ending at monotonic ≈ 55 700 s / ≈ 54 600 s, no shutdown record | Hypothesis FALSE (phase-locked to the T2, not to host-boot age) — a five-figure end-of-journal instead of ≈ 432 000 s is the cleanest proof; apply the fallback section below or the rollback. |
+| 09-21: boot at any other time, or journal ending at a third monotonic value | Unrelated failure — investigate separately, do not attribute it to the T2 cycle. |
+
+**Rollback**, one variable each, both idempotent. Trigger: a node still resets at its 5-day
+mark on 2026-09-20 evening even though its scheduled reboot completed that morning (per the
+mandatory gate above) — that means the reboot does not reset the T2 countdown, so run this on
+2026-09-21, or apply the fallback section below instead; otherwise the timer just adds one
+pointless reboot per cycle without preventing the reset:
+
+```bash
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
+ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e k3s_graceful_shutdown_enabled=false
+```
+
+**If a warm reboot does not reset the T2 countdown**, the timer cannot prevent the reset — it can
+only make sure the node is drained and cleanly stopped when it fires. In that case keep the
+plumbing and replace the uptime guard with a phase guard derived from a pinned per-node
+reference. Re-pinned from the 2026-09-15 boots — mba2 `2026-09-15 21:39:09`, mba1
+`2026-09-15 22:50:46` — +5 d per cycle, drifting +54 s / +62 s (measured boot-to-boot deltas
+432 054 s / 432 062 s, 2026-09-10 → 2026-09-15); fire the timer every 15 minutes, and escalate:
+move the stateful workloads off the MacBooks and take the root cause upstream to t2linux. That
+reference has to be re-pinned every few months. Each crashed boot's journal still ends at
+monotonic ≈ 431 940–431 975 s (the reset itself lands ≈ 432 000–432 018 s in), but the
+`bce_vhci_free_device` teardown line that used to mark the cut was absent on the 2026-09-15
+cycle — do not rely on it as the reset's signature; the monotonic-time window above is the only
+signal confirmed so far.
+
+**The `softdog` watchdog was removed** (`mac_tweaks_watchdog_enabled: false`). It never worked on
+the t2 kernels — there is no `/dev/watchdog`, `softdog` does not load, and `watchdog.service` sat
+in `failed` state on both nodes — and a software watchdog cannot stop a firmware power cut anyway.
+Leaving it enabled also made `10_base.yml` fail on the Macs, because the service task runs with
+`state: started` and the `modprobe` task is unguarded (a `--check` run passes, a real run does
+not). The role's cleanup branch removes `/etc/watchdog.conf` and
+`/etc/modules-load.d/watchdog.conf` on the next run.
 
 ---
 
@@ -2154,7 +2474,8 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Check backup status | Daily | Primarily automatic since #92 — `ResticBackupFailed` / `ResticBackupStale` / `LonghornRecurringJob*` alert to Discord. Manual cross-check: `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
-| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup metrics-filesystem-trim` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify the metrics-group trim is still working | Weekly | `kubectl -n longhorn-system get volumes.longhorn.io <prometheus-volume> -o jsonpath='{.status.actualSize}'` (flat, not trending towards 40 G) + `kubectl -n longhorn-system logs <latest metrics-filesystem-trim pod>` showing `Finished recurring filesystem trim` — every failure mode of the trim is silent; alerting is tracked in #92 |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
@@ -2171,6 +2492,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Playbook | Purpose | Runtime | Idempotent |
 |----------|---------|---------|------------|
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
+| `10_base.yml` | Base packages, hardening, UFW, fail2ban, MacBook scheduled reboot (#102) | 3-5 min | Yes |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |

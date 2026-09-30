@@ -3,3 +3,9 @@
   ansible.builtin.service:
     name: systemd-logind
     state: restarted
+
+# The k3s role owns a handler called "Reload systemd"; this one carries the role marker
+# so the two never get confused.
+- name: Reload systemd (mac_tweaks)
+  ansible.builtin.systemd:
+    daemon_reload: true
