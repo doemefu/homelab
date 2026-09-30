@@ -1883,7 +1883,7 @@ Then press "Connect" (or add the connector) again in claude.ai.
 
 **Disable and remove the `claude-mcp-hub` client** (required before any auth-service rollback). Once the client has been seeded in production, reverting the auth-service change that added it, deploying an older auth-service image, or removing or renaming its configuration entry is allowed only **after** the client has been disabled and removed with this procedure: a registered-client row without the code and configuration that shape its tokens keeps claude.ai's refresh token working and issues tokens without the audience binding and the owner-only check. Emptying or removing the client secret alone does **not** disable a client that has already been seeded. Every step needs the owner's go. Before the client was ever seeded (the check query at the end already returns `0`), no step is needed.
 
-Order: (1) cut the hub off with L2 step 1; (2) remove both SOPS variables of the client and run playbook 59; (3) remove the two keys from `homelab-auth-secrets` by hand — playbook 59 only skips them once the variables are gone and never deletes a key; (4) run the client-removal SQL; (5) check that the row is gone; (6) only then merge the auth-service revert or configuration change (in `homelab-auth-service`, not in this repository). The keys are removed **before** the SQL on purpose: auth-service seeds the client only at start-up and only while the secret is set, so a restart of auth-service between the two steps cannot create the client again. `mcp-hub-secrets` and the hub deployment are independent of this procedure; they can stay or be removed separately (L3).
+Order: (1) cut the hub off with L2 step 1; (2) remove both SOPS variables of the client and run playbook 59; (3) remove the two keys from `homelab-auth-secrets` by hand, one JSON patch per key — playbook 59 only skips them once the variables are gone and never deletes a key; (4) run the client-removal SQL; (5) check that the row is gone; (6) only then merge the auth-service revert or configuration change (in `homelab-auth-service`, not in this repository). The keys are removed **before** the SQL on purpose: auth-service seeds the client only at start-up and only while the secret is set, so a restart of auth-service between the two steps cannot create the client again. `mcp-hub-secrets` and the hub deployment are independent of this procedure; they can stay or be removed separately (L3).
 
 ```bash
 # 1. L2 step 1 (LAN): empty the hub allowlist and restart the hub.
@@ -1896,8 +1896,16 @@ sops infra/inventory/group_vars/all.sops.yml
 ansible-playbook infra/playbooks/59_app_services.yml
 # expect the message "skipping the claude-mcp-hub keys in homelab-auth-secrets"
 
-# 3. Remove both keys from the Secret (JSON patch; the playbook leaves existing keys in place), then list the key names only.
-kubectl -n apps patch secret homelab-auth-secrets --type json -p '[{"op":"remove","path":"/data/claude-mcp-hub-client-secret"},{"op":"remove","path":"/data/claude-mcp-hub-allowed-users"}]'
+# 3. Remove each key with its own JSON patch, only if it still exists (the playbook leaves existing keys in place),
+#    then list the key names only. jq exit 0 = key present, 1 = already gone, anything else = the Secret could not be read.
+for k in claude-mcp-hub-client-secret claude-mcp-hub-allowed-users; do
+  kubectl -n apps get secret homelab-auth-secrets --request-timeout=10s -o json | jq -e --arg k "$k" '.data[$k]' >/dev/null
+  case $? in
+    0) kubectl -n apps patch secret homelab-auth-secrets --type json -p "[{\"op\":\"remove\",\"path\":\"/data/$k\"}]" ;;
+    1) echo "$k is already gone - skipped" ;;
+    *) echo "could not read homelab-auth-secrets - stop and check cluster access before going on"; break ;;
+  esac
+done
 kubectl -n apps get secret homelab-auth-secrets --request-timeout=10s -o json | jq '.data | keys'
 # expect: neither claude-mcp-hub-client-secret nor claude-mcp-hub-allowed-users in the list
 
@@ -1926,9 +1934,17 @@ Off-LAN, run steps 1 and 3–5 over SSH; step 2 (SOPS edit and playbook 59) runs
 # 1. L2 step 1
 ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl -n apps patch secret mcp-hub-secrets --type merge -p "{\"stringData\":{\"allowed-subjects\":\"\"}}" && sudo k3s kubectl -n apps delete pod -l app=mcp-hub'
-# 3. Remove both keys, then list the key names only (values are not printed)
-ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
-  'sudo k3s kubectl -n apps patch secret homelab-auth-secrets --type json -p "[{\"op\":\"remove\",\"path\":\"/data/claude-mcp-hub-client-secret\"},{\"op\":\"remove\",\"path\":\"/data/claude-mcp-hub-allowed-users\"}]"'
+# 3. Remove each key with its own JSON patch, only if it still exists; then list the key names only (values are not printed)
+for k in claude-mcp-hub-client-secret claude-mcp-hub-allowed-users; do
+  ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+    'sudo k3s kubectl -n apps get secret homelab-auth-secrets -o json' | jq -e --arg k "$k" '.data[$k]' >/dev/null
+  case $? in
+    0) ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+         "sudo k3s kubectl -n apps patch secret homelab-auth-secrets --type json -p '[{\"op\":\"remove\",\"path\":\"/data/$k\"}]'" ;;
+    1) echo "$k is already gone - skipped" ;;
+    *) echo "could not read homelab-auth-secrets - stop and check the SSH access before going on"; break ;;
+  esac
+done
 ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl -n apps get secret homelab-auth-secrets -o json' | jq '.data | keys'
 # 4. Client-removal SQL (same block, read from stdin)
@@ -1948,7 +1964,7 @@ ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access 
   'sudo k3s kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -tAc "SELECT count(*) FROM oauth2_registered_client WHERE client_id = '\''claude-mcp-hub'\''"'
 ```
 
-If step 3 answers that a path does not exist, that key was already gone: patch the remaining key alone (one `remove` entry) and repeat the key-name check. The SQL block is the binding client-removal block of the auth-service plan, copied verbatim (gate test `McpHubConsentPersistenceGateTest`, homelab-auth-service#107); do not reword or reflow it.
+Step 3 checks each key before its patch and skips a key that is already gone, so a partly removed Secret does not stop the procedure; if the Secret cannot be read, the loop stops with a message instead of skipping. The SQL block is the binding client-removal block of the auth-service plan, copied verbatim (gate test `McpHubConsentPersistenceGateTest`, homelab-auth-service#107); do not reword or reflow it.
 
 **Scoping an incident:** hub log lines carry `sub`, `client_id`, `jti` and the tool name per call (`kubectl -n apps logs deploy/mcp-hub --since=24h --request-timeout=10s`); auth-service logins are in data-service's `netmon.login_events`.
 
