@@ -13,7 +13,7 @@ This document defines all **integration interfaces** this infrastructure platfor
 |-----------|----------|----------|-----------------|
 | **Public URL Interface** | External clients, end users | Public hostnames routed via Cloudflare Tunnel | `infra/playbooks/40_platform.yml` |
 | **Internal Service Discovery** | In-cluster workloads | Kubernetes DNS: `<service>.<namespace>.svc.cluster.local` | Kubernetes Service objects |
-| **GitOps Interface (Flux)** | App repositories (auth-service, device-service, furchert-ch) | Flux reconciliation from `cluster/apps/<app>/` | `cluster/apps/`, `cluster/flux-system/apps-sync.yaml` |
+| **GitOps Interface (Flux)** | App repositories (auth-service, device-service, furchert-ch, data-service) | Flux reconciliation from `cluster/apps/<app>/` | `cluster/apps/`, `cluster/flux-system/apps-sync.yaml` |
 | **Ansible App Interface** | Ansible-managed apps (n8n, LiteLLM, Open WebUI, Home Assistant) | Playbook-applied manifests from `cluster/apps/<app>/` (n8n, LiteLLM, Open WebUI) or Helm values from `cluster/values/` (Home Assistant) | `infra/playbooks/52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml`, `51_homeassistant.yml`, `59_app_services.yml` |
 | **Storage Interface** | Stateful workloads | Longhorn default StorageClass (RF=2), local-path for ephemeral | `infra/playbooks/30_longhorn.yml` |
 | **Secrets Interface** | Workloads needing credentials | SOPS-encrypted vars → Kubernetes Secrets | `infra/inventory/group_vars/all.sops.yml`, `infra/playbooks/59_app_services.yml` |
@@ -28,7 +28,7 @@ This document defines all **integration interfaces** this infrastructure platfor
 |-----------|-------|---------------------|------------|
 | `platform` | Ansible | cert-manager, cloudflared, Traefik | Any app workloads |
 | `longhorn-system` | Helm (k3s) | Longhorn components only | Any non-Longhorn workloads |
-| `monitoring` | Ansible/Helm | Prometheus, Grafana, Alertmanager, **ServiceMonitors for all namespaces** | App workloads, non-observability resources |
+| `monitoring` | Ansible/Helm | Prometheus, Grafana, Alertmanager, **ServiceMonitors for all namespaces**, coroot-node-agent (approved privileged + hostPID DaemonSet, NM-2) | App workloads, non-observability resources, other privileged workloads without approval |
 | `apps` | Mixed | Application workloads, shared infrastructure (PostgreSQL, InfluxDB, Mosquitto, n8n, LiteLLM) | Cluster-admin ServiceAccounts, workloads without resource limits |
 | `homeassistant` | Ansible/Helm | Home Assistant only | Any non-HA workloads |
 | `flux-system` | Flux CD | Flux controllers only | Any application workloads |
@@ -104,7 +104,7 @@ All services are discoverable via Kubernetes internal DNS.
 
 | Service | FQDN | Port | Metrics Port | Authentication | Notes |
 |---------|------|------|---------------|----------------|-------|
-| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar |
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`) |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |
@@ -118,6 +118,9 @@ All services are discoverable via Kubernetes internal DNS.
 | auth-service | `auth-service.apps.svc.cluster.local` | 8080 | JWT auth, OIDC provider |
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | IoT device management |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Public site (Next.js) + OIDC-gated /dashboard |
+| data-service | `data-service.apps.svc.cluster.local` | 8082 | Analytical data plane (ADR 0002): network-telemetry read API `/api/netmon/*` (JWT with `SCOPE_netmon:read` **and** `sub` in `netmon.api.allowed-clients`, default `furchert-ch`; `ROLE_ADMIN` not accepted in v1 — 060 §7.5), cluster-internal only — no tunnel route; contract `docs/060-network-monitoring.md` |
+
+**data-service outbound destinations** (`docs/060-network-monitoring.md` §10): `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`, plus cluster-internal auth-service (:8080), Prometheus (`kube-prometheus-stack-prometheus.monitoring`:9090) and PostgreSQL (:5432). Blocklists are fetched only by data-service.
 
 ### Platform Services
 
@@ -176,6 +179,8 @@ All services are discoverable via Kubernetes internal DNS.
 - `grafana` — for Grafana SSO
 - `homeassistant` — for Home Assistant SSO
 - `device-service` — for device-service authentication
+- `furchert-ch` — for the furchert-ch `/dashboard` SSO; also `client_credentials` with scope `netmon:read` for server-side calls to data-service (auth-service migration V6)
+- `data-service` — `client_credentials` only, scope `login-events:read`, no redirect URIs; data-service pulls auth-service's login-event outbox (`GET /api/v1/login-events`, NM-4, `docs/060-network-monitoring.md` §7.6). Seeded only once `data-service-client-secret` exists (optional NM-4 keys below)
 
 > **Full API contract**: See [homelab-auth-service repository](https://github.com/doemefu/homelab-auth-service)
 
@@ -195,7 +200,7 @@ Real-time IoT device management service.
 
 ### Flux-Managed Applications
 
-**Applications**: `auth-service`, `device-service`, `furchert-ch`
+**Applications**: `auth-service`, `device-service`, `furchert-ch`, `data-service`
 
 **Reconciliation Flow**:
 1. App repository contains `k8s/` directory with Kubernetes manifests
@@ -284,9 +289,10 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 
 | Secret | Namespace | Contains | Used By | Rotation Notes |
 |--------|-----------|---------|---------|-----------------|
-| `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention) |
+| `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service, furchert-ch); optional NM-4 keys `data-service-client-secret` (`{noop}`-prefixed, env `DATA_SERVICE_CLIENT_SECRET`) and `login-event-hmac-key` (≥ 32 chars, env `LOGIN_EVENT_HMAC_KEY`), created only when both NM-4 SOPS variables are set (`docs/060-network-monitoring.md` §9) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention). Restart auth-service after adding the NM-4 keys. Rotating `data-service-client-secret` also needs the `oauth2_registered_client` row updated (the seeder never updates an existing client); rotating `login-event-hmac-key` breaks HMAC continuity of stored login events |
 | `n8n-secrets` | `apps` | n8n encryption key | n8n | Rotate via `59_app_services.yml`, restart n8n deployment |
 | `litellm-secrets` | `apps` | LiteLLM master key, salt key, DB password, Mistral API keys | LiteLLM | **`litellm_salt_key` MUST NEVER rotate** — invalidates all virtual keys in DB |
+| `data-service-secrets` | `apps` | Postgres credentials for DB `data_service` (`db-username` = literal `data_service`, `db-password`); Cloudflare GraphQL Analytics access `cloudflare-api-token`, `cloudflare-zone-id` (NM-1, #116; env `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`); optional `auth-client-secret` (NM-4, plain value of `auth_service_data_service_client_secret`, env `AUTH_CLIENT_SECRET`, created only when both NM-4 SOPS variables are set); optional `abuseipdb-api-key` (NM-1 follow-up, from SOPS `data_service_abuseipdb_key`, env `ABUSEIPDB_API_KEY`, created only when the variable is set) (`docs/060-network-monitoring.md` §9) | data-service | Rotate via `59_app_services.yml` (re-sets the role password and the Secret), then `kubectl -n apps delete pod -l app=data-service` — env vars are read at pod start, and Flux reverts `rollout restart` |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), SMTP password (`smtp-password`, contact-form delivery, furchert-ch#46) | furchert-ch | Rotate via `59_app_services.yml`; `smtp-password` is an Infomaniak application password, independently revocable from the mailbox login password |
@@ -312,6 +318,12 @@ From `59_app_services.yml` (app secrets):
 - `litellm_db_password`
 - `mistral_api_key`, `mistral_codestral_api_key`
 - `litellm_client_secret`
+- `data_service_db_password` (Postgres password for role `data_service`, e.g. `openssl rand -hex 24`)
+- `data_service_cloudflare_analytics_token` (Cloudflare API token, zone `furchert.ch`, Analytics:Read — NM-1), `data_service_cloudflare_zone_id` (zone ID, not a credential — NM-1)
+
+**Optional** in `59_app_services.yml` (set both or neither; one alone fails the play):
+- `auth_service_data_service_client_secret` (plain, no `{noop}`; e.g. `openssl rand -hex 32` — NM-4 login events)
+- `auth_service_login_event_hmac_key` (at least 32 characters, e.g. `openssl rand -base64 48` — NM-4 login events)
 
 From `50_apps_infra.yml` (shared infrastructure):
 - `postgresql_password`
@@ -337,7 +349,7 @@ From `40_platform.yml` (platform):
 - **Default**: Yes — PVCs without `storageClassName` use Longhorn automatically
 - **Access Modes**: ReadWriteOnce (RWO), ReadWriteMany (RWX via RWX storage class)
 - **Survives**: Node failures, k3s restarts
-- **Recurring snapshots**: every Longhorn volume without a more specific recurring-job assignment is automatically covered by the daily `default`-group `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7) — local-only, does not survive PVC/Volume deletion; the Prometheus TSDB PVC opts out into the `metrics` group instead, which carries only a snapshot-cleanup job (#101). See DEPLOYMENT.md "Recurring Snapshots (#63)".
+- **Recurring snapshots**: every Longhorn volume without a more specific recurring-job assignment is automatically covered by the daily `default`-group `RecurringJob` (`daily-snapshot`, 02:00 node-local time, retain 7) — local-only, does not survive PVC/Volume deletion; the Prometheus TSDB PVC opts out into the `metrics` group instead, which carries a snapshot-cleanup and a nightly filesystem-trim job but no snapshot job (#101, #106). See DEPLOYMENT.md "Recurring Snapshots (#63)".
 - **Off-cluster backups**: there is no Longhorn `BackupTarget`. The off-cluster copy of the application data is made by hand with `scripts/backup-app-data.sh`, which dumps PostgreSQL, InfluxDB, n8n, Open WebUI, mosquitto and Grafana into a timestamped directory on the operator's Mac. See DEPLOYMENT.md "App-data backups to the operator's Mac (#64)".
 
 **Source of Truth**: `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml`
@@ -451,6 +463,60 @@ To integrate your app with Prometheus monitoring:
 | node-exporter | Node metrics | 9100 | `monitoring` | kube-prometheus-stack subchart |
 | postgres-exporter | PostgreSQL metrics | 9187 | `apps` | Sidecar in `50_apps_infra.yml` |
 | mosquitto-exporter | MQTT broker metrics | 9234 | `apps` | Separate Deployment in `50_apps_infra.yml` |
+| coroot-node-agent | eBPF per-container TCP egress/east-west metrics | 80 (pod) | `monitoring` | DaemonSet in `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml`; runs only on nodes in the spike gate (`coroot_node_agent_nodes`) |
+
+**coroot-node-agent metrics contract** (NM-2, `docs/060-network-monitoring.md` §6.2). The ServiceMonitor keeps only these
+series and adds a `node` label (from the pod's node); everything else the agent exposes is dropped at scrape time:
+
+| Metric | Labels (besides `container_id`, `app_id`, `node`) | Meaning |
+|--------|------------------------|---------|
+| `container_net_tcp_successful_connects_total` | `destination`, `actual_destination` | Outbound TCP connects |
+| `container_net_tcp_failed_connects_total` | `destination` | Failed outbound connects (no `actual_destination`) |
+| `container_net_tcp_active_connections` | `destination`, `actual_destination` | Open outbound connections |
+| `container_net_tcp_bytes_sent_total` / `_bytes_received_total` | `destination`, `actual_destination` | Bytes per peer |
+| `ip_to_fqdn` | `ip`, `fqdn` (no `container_id`) | IP-to-name mapping from DNS answers the containers received |
+
+The agent also adds `machine_id` and `system_uuid` to every series; the ServiceMonitor drops both (`labeldrop`), since `node` identifies the host. `container_id` is `/k8s/<namespace>/<pod>/<container>` for pods. `destination` is the `ip:port` the container dialled
+(e.g. a ClusterIP); `actual_destination` is the peer after NAT. Scrape `sampleLimit` is 10 000 series per agent. A NetworkPolicy admits only the Prometheus pods to the agent's port 80. Consumer:
+data-service's egress collector (`docs/060` §4.6). Alerts: `NetmonNewExternalDestination` and `CorootNodeAgentDown` in
+`additionalPrometheusRulesMap.homelab-netmon-egress` — see `DEPLOYMENT.md` "coroot-node-agent (NM-2)".
+
+**App ServiceMonitors and alert rules**
+
+| Target | ServiceMonitor | Port / path | Alert rules | Source |
+|--------|----------------|-------------|-------------|--------|
+| data-service (`apps`) | `monitoring/data-service` (job `data-service`) | `http` (8082) `/actuator/prometheus`, 30 s, no auth | `homelab-netmon` group: `NetmonCollectorStale` (per collector on `netmon_collector_last_success_timestamp_seconds{collector}`; thresholds 26h daily / 3h hourly / 90m lan+reputation / 15m all others; NaN = never succeeded once the pod is older than the threshold), `NetmonDataServiceDown` (`up == 0` or absent, 10 min) | ServiceMonitor in `41_monitoring.yml`; rules in `cluster/values/kube-prometheus-stack.yaml` `additionalPrometheusRulesMap.homelab-netmon` (NM-1 only; NM-3 uses `homelab-netmon-node` (PR #132), NM-2 uses `homelab-netmon-egress` (PR #133), backups use `homelab-backups` (PR #109)) — `docs/060-network-monitoring.md` §4.1, §7.1 |
+
+**node-exporter textfile collector (#92)**
+
+node-exporter reads `*.prom` files from the host directory `/var/lib/node_exporter/textfile_collector`
+on every node (`--collector.textfile.directory`, configured in
+`cluster/values/kube-prometheus-stack.yaml`; the directory is created by the `storage` role and by
+the DaemonSet's `hostPath: DirectoryOrCreate`). Anything a node-local job writes there is scraped
+as a normal node-exporter series.
+
+| Producer | File | Metrics |
+|----------|------|---------|
+| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+| `homelab-netmon-collect` on every node (`infra/roles/netmon_node`) | `homelab_netmon.prom` | see "Node textfile metrics (NM-3)" below |
+
+Write the file atomically (temp file in the same directory, then `mv`); a partially written file
+makes node-exporter discard the whole directory and set `node_textfile_scrape_error=1`.
+
+### Node textfile metrics (NM-3)
+
+`homelab-netmon-collect` (role `netmon_node`, every minute) writes `homelab_netmon.prom` into the node-exporter textfile directory `/var/lib/node_exporter/textfile_collector` (enabled by homelab PR #109). Consumer: data-service's LAN snapshot collector via Prometheus (`docs/060-network-monitoring.md` §4.6). The names and labels are a cross-repo contract — change `docs/060` §5.2 first.
+
+| Metric | Labels | Kind |
+|--------|--------|------|
+| `homelab_lan_connections` | `node`, `dport` (1883, 22, 8123, 6443, 10250), `src_ip`, `state` | point-in-time gauge |
+| `homelab_ufw_blocks_bucket` | `node`, `src_ip`, `dport`, `proto` | last completed 15-min bucket |
+| `homelab_sshd_auth_bucket` | `node`, `src_ip`, `outcome` | last completed 15-min bucket |
+| `homelab_netmon_bucket_end_timestamp_seconds` | `node` | bucket guard |
+| `homelab_netmon_last_success_timestamp_seconds` | `node` | staleness (`NetmonNodeScriptStale`) |
+| `homelab_netmon_truncated_series` | `node`, `metric` | cap overflow (`NetmonSeriesTruncated`) |
+
+`src_ip` is a LAN IP verbatim, the literal `10.42.0.0/16` for pod IPs, a public IP verbatim (UFW/sshd only) or `other`. The `node` label is the Ansible inventory hostname; node-exporter's ServiceMonitor keeps it (`honorLabels: true`).
 
 ---
 

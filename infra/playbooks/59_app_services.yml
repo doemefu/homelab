@@ -1,5 +1,5 @@
 ---
-# App Services — K8s Secrets for device-service, auth-service, and LiteLLM
+# App Services — K8s Secrets for device-service, auth-service, LiteLLM, and data-service
 # Namespace: apps
 #
 # Prerequisites:
@@ -40,6 +40,26 @@
 #   mistral_codestral_api_key: <from console.mistral.ai> # dedicated key for codestral route
 #   litellm_client_secret:  <openssl rand -hex 32>       # OIDC client secret for SSO UI login
 #
+# data-service variables (docs/060-network-monitoring.md §9):
+#   data_service_db_password: <openssl rand -hex 24>     # Postgres password for the data_service role
+#   data_service_cloudflare_analytics_token: <Cloudflare API token, zone furchert.ch, Analytics:Read>  # NM-1
+#   data_service_cloudflare_zone_id: <zone ID of furchert.ch>                                          # NM-1
+#   data_service_abuseipdb_key: <AbuseIPDB API key>  # NM-1 follow-up, optional; free plan key from abuseipdb.com
+#       data-service receives it as data-service-secrets/abuseipdb-api-key (env ABUSEIPDB_API_KEY) and
+#       enables the reputation collector. Unset = key skipped; set but empty or whitespace-only = the play fails.
+#       Removing it later does NOT delete the key — see DEPLOYMENT.md "NM-1 follow-up: AbuseIPDB key (optional)".
+#
+# NM-4 login-event variables (docs/060-network-monitoring.md §7.6, §9) — OPTIONAL:
+#   auth_service_data_service_client_secret: <openssl rand -hex 32; plain, no {noop}>
+#       auth-service receives "{noop}<value>" (homelab-auth-secrets/data-service-client-secret),
+#       data-service receives "<value>" (data-service-secrets/auth-client-secret)
+#   auth_service_login_event_hmac_key: <openssl rand -base64 48; at least 32 characters>
+#       auth-service only (homelab-auth-secrets/login-event-hmac-key). Rotating it breaks
+#       HMAC continuity for events already stored in data-service.
+#   Set both or neither. With neither, the play skips these keys and auth-service keeps
+#   login-event capture off. With only one, the play fails. Removing both later does NOT
+#   delete keys created by an earlier run — see DEPLOYMENT.md "Turning NM-4 off".
+#
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
 #   openssl rsa -in /tmp/auth-rsa.pem -pubout -out /tmp/auth-rsa-pub.pem
@@ -57,6 +77,10 @@
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
     apps_namespace: apps
     postgresql_pod: postgresql-0
+    # NM-4: the login-event keys are created only when both SOPS variables exist (see header).
+    auth_service_login_events_configured: >-
+      {{ auth_service_data_service_client_secret is defined
+         and auth_service_login_event_hmac_key is defined }}
 
   tasks:
 
@@ -84,6 +108,53 @@
         fail_msg: >-
           One or more required SOPS variables are missing.
           Add them to infra/inventory/group_vars/all.sops.yml — see the header comment in this playbook.
+      delegate_to: localhost
+
+    - name: NM-4 login events — assert that both optional SOPS variables are set and valid
+      ansible.builtin.assert:
+        that:
+          - auth_service_data_service_client_secret is defined
+          - auth_service_data_service_client_secret | length > 0
+          - auth_service_data_service_client_secret is not match('^[{]')
+          - auth_service_login_event_hmac_key is defined
+          - auth_service_login_event_hmac_key | length >= 32
+        fail_msg: >-
+          The NM-4 login-event variables must be set together:
+          auth_service_data_service_client_secret (plain, without a {noop} prefix) and
+          auth_service_login_event_hmac_key (at least 32 characters). Add both or remove both —
+          see the header comment in this playbook.
+      when: >-
+        auth_service_data_service_client_secret is defined
+        or auth_service_login_event_hmac_key is defined
+      delegate_to: localhost
+
+    - name: NM-1 AbuseIPDB — assert that the optional SOPS variable is not empty
+      ansible.builtin.assert:
+        that:
+          - data_service_abuseipdb_key is string
+          - data_service_abuseipdb_key | trim | length > 0
+        fail_msg: >-
+          data_service_abuseipdb_key is set but empty, whitespace-only or not a string (e.g. YAML null).
+          Set the AbuseIPDB API key or remove the variable — see the header comment in this playbook.
+      when: data_service_abuseipdb_key is defined
+      delegate_to: localhost
+
+    - name: NM-1 AbuseIPDB — report that the optional key is skipped
+      ansible.builtin.debug:
+        msg: >-
+          data_service_abuseipdb_key is not set: skipping data-service-secrets/abuseipdb-api-key.
+          A key created by an earlier run is NOT removed (see DEPLOYMENT.md "NM-1 follow-up: AbuseIPDB key
+          (optional)"); without it, data-service keeps the reputation collector off.
+      when: data_service_abuseipdb_key is not defined
+      delegate_to: localhost
+
+    - name: NM-4 login events — report that the optional keys are skipped
+      ansible.builtin.debug:
+        msg: >-
+          auth_service_data_service_client_secret and auth_service_login_event_hmac_key are not set:
+          skipping the NM-4 login-event Secret keys. Keys created by an earlier run are NOT removed
+          (see DEPLOYMENT.md "Turning NM-4 off"); if none exist, auth-service keeps login-event capture off.
+      when: not auth_service_login_events_configured
       delegate_to: localhost
 
     # --- PostgreSQL: database + user (idempotent) ---
@@ -217,6 +288,28 @@
             n8n-client-secret: "{{ auth_service_n8n_client_secret }}"
             litellm-client-secret-authservice: "{noop}{{ litellm_client_secret }}"
             furchert-ch-client-secret: "{noop}{{ auth_service_furchert_ch_client_secret }}"
+      no_log: true
+      delegate_to: localhost
+
+    # A second task instead of extra keys above, because the NM-4 variables are optional.
+    # kubernetes.core.k8s patches an existing Secret (no force), so both tasks keep each
+    # other's keys, and a second run reports no change.
+    - name: Homelab-auth-secrets — add the NM-4 login-event keys (data-service client, HMAC key)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: homelab-auth-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # Read by auth-service as DATA_SERVICE_CLIENT_SECRET / LOGIN_EVENT_HMAC_KEY
+            # (optional secretKeyRefs, docs/060 §9). Restart auth-service after adding them.
+            data-service-client-secret: "{noop}{{ auth_service_data_service_client_secret }}"
+            login-event-hmac-key: "{{ auth_service_login_event_hmac_key }}"
+      when: auth_service_login_events_configured
       no_log: true
       delegate_to: localhost
 
@@ -383,5 +476,153 @@
             ANTHROPIC_API_KEY: "{{ litellm_anthropic_api_key }}"
             MISTRAL_VIBE_API_KEY: "{{ mistral_vibe_api_key }}"
             LITELLM_OIDC_CLIENT_SECRET: "{{ litellm_client_secret }}"
+      no_log: true
+      delegate_to: localhost
+
+    # --- data-service: PostgreSQL database + secrets (docs/060-network-monitoring.md §3.1, §9) ---
+    # DB name = role name = data_service, like litellm. Flyway (data-service) creates the schema netmon.
+
+    - name: Data-service — assert that the required SOPS variables are set
+      ansible.builtin.assert:
+        that:
+          - data_service_db_password is defined and data_service_db_password | length > 0
+          - data_service_cloudflare_analytics_token is defined and data_service_cloudflare_analytics_token | length > 0
+          - data_service_cloudflare_zone_id is defined and data_service_cloudflare_zone_id | length > 0
+        fail_msg: >-
+          A data-service SOPS variable is missing (data_service_db_password,
+          data_service_cloudflare_analytics_token or data_service_cloudflare_zone_id).
+          Add it to infra/inventory/group_vars/all.sops.yml — see all.sops.yml.example for the command.
+      delegate_to: localhost
+
+    - name: Data-service — create PostgreSQL role (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='data_service'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE data_service WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_data_service_create_user
+      changed_when: "'CREATE ROLE' in pg_data_service_create_user.stdout"
+
+    - name: Data-service — set/update PostgreSQL role password
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - psql
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ 'data_service' | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ data_service_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      # Password rotation is intentionally always enforced; SQL output is not a reliable change signal here.
+      changed_when: false
+
+    - name: Data-service — create PostgreSQL database (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='data_service'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE data_service OWNER data_service"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_data_service_create_db
+      changed_when: "'CREATE DATABASE' in pg_data_service_create_db.stdout"
+
+    - name: Data-service — create data-service-secrets (DB credentials, Cloudflare API)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: data-service-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # Keys per docs/060-network-monitoring.md §9. NM-0: DB credentials.
+            # NM-1 (#116): Cloudflare GraphQL Analytics token + zone ID, read by the
+            # inbound collector as CLOUDFLARE_API_TOKEN / CLOUDFLARE_ZONE_ID. Env vars are
+            # read at pod start: restart data-service after adding or rotating a key.
+            # The optional abuseipdb-api-key (NM-1 follow-up) and NM-4's auth-client-secret
+            # are added by the next tasks (optional variables).
+            db-username: data_service
+            db-password: "{{ data_service_db_password }}"
+            cloudflare-api-token: "{{ data_service_cloudflare_analytics_token }}"
+            cloudflare-zone-id: "{{ data_service_cloudflare_zone_id }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: Data-service — add the NM-4 auth-client-secret key (login-event pull)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: data-service-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # Plain client secret — must equal the plaintext stored "{noop}"-prefixed for the
+            # data-service client in homelab-auth-secrets, so they match by construction.
+            # Read by data-service as AUTH_CLIENT_SECRET (optional secretKeyRef, docs/060 §9).
+            auth-client-secret: "{{ auth_service_data_service_client_secret }}"
+      when: auth_service_login_events_configured
+      no_log: true
+      delegate_to: localhost
+
+    - name: Data-service — add the optional abuseipdb-api-key key (NM-1 follow-up, reputation collector)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: data-service-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # Read by data-service as ABUSEIPDB_API_KEY (optional secretKeyRef, docs/060 §4.5, §9).
+            # Env vars are read at pod start: delete the data-service pod after adding it.
+            abuseipdb-api-key: "{{ data_service_abuseipdb_key }}"
+      when: data_service_abuseipdb_key is defined
       no_log: true
       delegate_to: localhost

@@ -47,7 +47,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 ### Provisioning & Configuration
 - **Provisioning**: Ansible (idempotent, self-discovering playbooks)
 - **Secrets Management**: SOPS + age (no plaintext secrets in git)
-- **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch)
+- **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch, data-service)
 
 ### Kubernetes Platform
 - **Distribution**: k3s v1.32.2+k3s1 (lightweight, embedded SQLite datastore on the single control plane, ServiceLB)
@@ -59,19 +59,25 @@ directly to the backing Service per the rules in 40_platform.yml.
 - **Primary**: Longhorn v1.7.2 (distributed block storage, RF=2, default StorageClass)
 - **Fallback**: local-path (non-default, for node-local/ephemeral storage)
 - **Backup**: Restic (daily at 03:00 on raspi5, repository on root filesystem; covers `/etc/rancher/k3s`, the k3s server token, and a consistent copy of the k3s SQLite datastore)
-- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui plus grafana; the Prometheus TSDB volume is excluded into a separate `metrics` group, see DEPLOYMENT.md "Excluded volumes: the metrics group (#101)"); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
+- **Snapshots**: Longhorn RecurringJob `daily-snapshot` (daily at 02:00 node-local time, retain 7, `groups: [default]` — auto-covers postgresql/influxdb2/mosquitto/n8n/open-webui plus grafana; the Prometheus TSDB volume is excluded into a separate `metrics` group, which takes no snapshots and instead runs a nightly filesystem trim (`metrics-filesystem-trim`, 05:00), see DEPLOYMENT.md "Excluded volumes: the metrics group (#101)"); local-only, not an off-cluster backup — see DEPLOYMENT.md "Recurring Snapshots (#63)"
 - **Off-cluster app data**: manual dumps to the operator's Mac via `scripts/backup-app-data.sh` (pg_dumpall + per-database dumps, `influx backup`, n8n exports, PVC archives for n8n/open-webui/grafana, mosquitto.db) into `backups/<run>/`; there is no Longhorn `BackupTarget`, and the dumps are LAN-local, not off-site — see DEPLOYMENT.md "App-data backups to the operator's Mac (#64)"
 
 ### Observability
 - **Metrics**: kube-prometheus-stack v69.3.1 (Prometheus operator)
 - **Dashboards**: Grafana (public at `https://grafana.furchert.ch`)
 - **Alerting**: Alertmanager with Discord webhook receiver
-- **Exporters**: Node Exporter (DaemonSet), postgres-exporter, mosquitto-exporter
+- **Exporters**: Node Exporter (DaemonSet, incl. textfile collector), postgres-exporter, mosquitto-exporter
+- **Backup alerting**: restic and the Longhorn recurring jobs alert to Discord on failure or
+  staleness (#92) — see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions);
+  the Mac-side app-data dumps are a manual monthly check
 - **Not monitored**: kube-controller-manager, kube-scheduler, kube-proxy — k3s runs these
   embedded in the server/agent process bound to `127.0.0.1` with no exposed scrape endpoints;
   their chart scrape configs and alert rule groups are disabled in
   `cluster/values/kube-prometheus-stack.yaml` (see
   [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions))
+- **Network-monitoring alerting**: data-service is scraped via a ServiceMonitor; `NetmonCollectorStale`
+  and `NetmonDataServiceDown` (rule group `homelab-netmon`) alert to Discord — see
+  [DEPLOYMENT.md § data-service NM-1](DEPLOYMENT.md#data-service-nm-1-cloudflare-keys-scrape-and-alerts)
 
 ### External Access
 - **Tunnel Provider**: Cloudflare Tunnel (cloudflared v0.1.2 helm chart)
@@ -94,14 +100,16 @@ directly to the backing Service per the rules in 40_platform.yml.
 
 | Area | Feature | Source of Truth |
 |------|---------|-----------------|
-| **Provisioning** | Idempotent node bootstrap, base hardening, storage setup | `infra/playbooks/00_bootstrap.yml`, `10_base.yml`, `infra/roles/{base,hardening,storage,mac_tweaks}` |
+| **Provisioning** | Idempotent node bootstrap, base hardening, storage setup | `infra/playbooks/00_bootstrap.yml`, `10_base.yml`, `infra/roles/{base,hardening,storage,mac_tweaks,netmon_node}` |
 | **Kubernetes** | k3s install/upgrade, Traefik config, cert-manager, Cloudflare tunnel | `infra/playbooks/20_k3s.yml`, `40_platform.yml` |
 | **Storage** | Longhorn as default StorageClass (RF=2), local-path as non-default fallback | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` |
-| **Observability** | kube-prometheus-stack, ServiceMonitors, Alertmanager→Discord | `infra/playbooks/41_monitoring.yml`, `cluster/values/kube-prometheus-stack.yaml` |
+| **Observability** | kube-prometheus-stack, ServiceMonitors, Alertmanager→Discord, coroot-node-agent egress metrics (NM-2, spike-gated) | `infra/playbooks/41_monitoring.yml`, `cluster/values/kube-prometheus-stack.yaml`, `cluster/monitoring/coroot-node-agent/` |
 | **Shared Infrastructure** | PostgreSQL 17, InfluxDB 2, Mosquitto 2 (+ exporters) | `infra/playbooks/50_apps_infra.yml`, `cluster/values/{postgresql,influxdb2}.yaml` |
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
 | **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch}` |
+| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`, Prometheus TSDB excluded into the `metrics` group, trimmed nightly instead — #101, #106) + manual app-data dumps to the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `scripts/backup-app-data.sh` |
+| **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch/data-service | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch,data-service}` |
 | **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`, Prometheus TSDB excluded — #101) + manual app-data dumps to the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `scripts/backup-app-data.sh` |
 
 ---
@@ -170,6 +178,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | auth-service | `auth-service.apps.svc.cluster.local` | 8080 | Deployed, Flux-managed |
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | Deployed, Flux-managed |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Deployed, Flux-managed |
+| data-service | `data-service.apps.svc.cluster.local` | 8082 | Deployed, Flux-managed (no tunnel route) |
 
 ### Home Assistant
 
@@ -201,6 +210,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | raspi4 SSH tunnel | Cloudflare Tunnel ingress not yet configured for raspi4 | ⚠️ Open (see below) |
 | Off-cluster app-data backups + restore tests | Manual app-data dumps to the operator's Mac + restic datastore fix implemented via #64 — see [DEPLOYMENT.md](DEPLOYMENT.md) "App-data backups to the operator's Mac (#64)" | ✅ Resolved (#64) — first run 2026-09-08, restore tests (a) PostgreSQL + (b) PVC archive PASS (DEPLOYMENT.md restore test log) |
 | `KubeControllerManagerDown` / `KubeSchedulerDown` / `KubeProxyDown` | Fired as permanent critical false positives since install (2026-05-16) — k3s embeds these 3 components with zero exposed scrape targets | ✅ Resolved (#68) — scrape configs + alert rule groups disabled, see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions) |
+| k3s kine/SQLite compaction stall | Datastore grew to 5 GB on raspi5 (2026-09-23) after kine's online compactor stalled for ~5 days, degrading the API server | ⚠️ Mitigated, follow-ups open (#129) — offline compaction runbook + script added, see [DEPLOYMENT.md § k3s datastore (kine/SQLite) maintenance](DEPLOYMENT.md#k3s-datastore-kinesqlite-maintenance) |
 
 > **Note on raspi4 SSH**: The SSH tunnel for raspi4 (`ssh-raspi4.furchert.ch → 192.168.1.163:22`) is not yet configured in `40_platform.yml`. To add: include `- hostname: ssh-raspi4.furchert.ch, service: ssh://192.168.1.163:22` in the ingress list, then re-run `ansible-playbook infra/playbooks/40_platform.yml`.
 
@@ -272,6 +282,7 @@ cluster/
       imageupdate.yaml         # ImageUpdateAutomation for write-back
     device-service/            # Same structure as auth-service
     furchert-ch/               # Same structure as auth-service
+    data-service/              # Same structure as auth-service
     n8n/                       # Ansible-managed manifests
       deployment.yaml
       service.yaml
@@ -287,6 +298,8 @@ cluster/
       deployment.yaml
       service.yaml
       kustomization.yaml
+  monitoring/                 # Plain monitoring manifests
+    coroot-node-agent/         # Ansible-managed (41_monitoring.yml): DaemonSet, Service, ServiceMonitor
   platform/                   # Helm chart references (remote charts)
   values/                     # Pinned Helm values
     kube-prometheus-stack.yaml # Prometheus/Grafana/Alertmanager config
@@ -314,6 +327,8 @@ docs/                        # Architecture and planning documents
 scripts/                     # Utility scripts
   smoke-test-litellm.sh       # LiteLLM health and endpoint verification
   check-helm-chart-versions.py # Weekly Helm chart freshness check (invoked by .github/workflows/helm-chart-freshness.yml)
+  kine-offline-compact.sh     # k3s kine/SQLite offline compaction runbook (#129) — see DEPLOYMENT.md
+  kine-offline-compact.py     # Offline compaction SQL, invoked by kine-offline-compact.sh
 
 .claude/                      # Claude agent configuration (workflow rules, agents, worklogs, memory)
 .github/                      # GitHub workflows
@@ -330,7 +345,7 @@ This repository provides the **platform infrastructure**. Application services t
 | [homelab-auth-service](https://github.com/doemefu/homelab-auth-service) | JWT authentication service — user CRUD, token issuance, JWKS endpoint | Deployed | Flux-managed |
 | [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | Deployed | Flux-managed |
 | [furchert-ch](https://github.com/doemefu/furchert-ch) | Public site (Next.js, DE/EN) + OIDC-gated `/dashboard` | Deployed | Flux-managed |
-| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Historical sensor data (InfluxDB) — README-only skeleton; schedules live in device-service (ADR 0001) | Planned, not deployed | - |
+| [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Analytical data plane (ADR 0002): network telemetry in Postgres DB `data_service` (schema `netmon`) + historical sensor data (InfluxDB); schedules live in device-service (ADR 0001) — contract `docs/060-network-monitoring.md` | Deployed | Flux-managed |
 
 Architecture and migration planning documents are in `docs/`.
 

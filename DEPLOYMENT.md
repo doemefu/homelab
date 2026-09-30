@@ -24,6 +24,7 @@ Before starting any deployment or upgrade, verify:
 - [ ] `ansible-lint` installed
 - [ ] `kubectl` installed and configured (`export KUBECONFIG=~/.kube/homelab.yaml`)
 - [ ] `helm@3` installed (NOT Helm 4 — see [CONTRIBUTING.md](CONTRIBUTING.md))
+- [ ] helm-diff plugin installed, pinned: `helm plugin install https://github.com/databus23/helm-diff --version v3.15.13`. Without it, `kubernetes.core.helm` warns and falls back to a values comparison. That fallback compares the release only with the values file, so the InfluxDB task in `50_apps_infra.yml` (values file plus inline SOPS values) reports `changed` on every run (homelab#66).
 - [ ] `sops` installed
 - [ ] `age` installed
 - [ ] `flux` installed
@@ -86,7 +87,8 @@ ansible-playbook infra/playbooks/40_platform.yml
 ### Post-Deployment Setup
 
 ```bash
-# Enable Flux GitOps for auth-service, device-service and furchert-ch
+# Enable Flux GitOps for auth-service, device-service, furchert-ch and data-service
+# (data-service first needs its deploy key + DB/Secret — see "data-service (Flux, NM-0 onboarding)")
 kubectl apply -f cluster/flux-system/apps-sync.yaml
 
 # Verify cluster health
@@ -124,8 +126,8 @@ kubectl get ns
 | `kube-system` | traefik, coredns, metrics-server, svclb-* | Running |
 | `platform` | cert-manager (3x), cloudflared | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
-| `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-* | Running |
-| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, n8n-*, litellm-*, open-webui-* | Running |
+| `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-*, coroot-node-agent-* (only on gated nodes — see "coroot-node-agent (NM-2)") | Running |
+| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, data-service-*, n8n-*, litellm-*, open-webui-* | Running |
 | `homeassistant` | home-assistant-0 | Running |
 | `flux-system` | source-controller, kustomize-controller, helm-controller, notification-controller, image-reflector-controller, image-automation-controller | Running |
 
@@ -178,6 +180,167 @@ ansible all -m command -a "k3s --version"
 After major k3s upgrades, verify service templates against current k3s documentation:
 - `infra/roles/k3s/templates/k3s-server.service.j2` (control-plane)
 - `infra/roles/k3s/templates/k3s-agent.service.j2` (workers)
+
+#### k3s datastore (kine/SQLite) maintenance
+
+k3s's embedded datastore is [kine](https://github.com/k3s-io/kine) on SQLite
+(`/var/lib/rancher/k3s/server/db/state.db`, control-plane node only — raspi5). kine's online
+compactor runs every 5 minutes, with a 5 second per-batch `DELETE` timeout and a 1,000-row batch
+size (`compactInterval`, `compactTimeout`, `compactBatchSize` in
+`pkg/logstructured/sqllog/sql.go`, kine v0.13.9 — none of these are tunable via k3s flags). On a
+large enough backlog, a batch can exceed the 5 second timeout; Go's `database/sql` rolls that
+transaction back, and the compactor stalls permanently instead of retrying — the datastore keeps
+growing and query latency keeps degrading until someone intervenes by hand. This happened on
+raspi5 on 2026-09-23 (homelab#129): compaction had silently stalled for ~5 days, `state.db` grew
+to 5.02 GB / 1.49M rows, and the cluster degraded. Details, full timeline and root-cause analysis
+are in the issue; this section is the reusable runbook that came out of it.
+
+##### Symptoms
+
+- `journalctl -u k3s` full of `Slow SQL` lines (kine, queries >1s) — hundreds per hour instead of
+  the normal 30-90/hour baseline.
+- `kubectl get --raw /readyz` (or `/readyz?verbose`) reports `[-]etcd failed` /
+  `etcd-readiness failed` — the storage health check is exceeding the apiserver's default 2s
+  `--etcd-healthcheck-timeout`/`--etcd-readycheck-timeout`.
+- `raspi5` load average climbing into the double digits with `k3s-server` pinned near 300% CPU
+  and 0% iowait — SQLite lock contention, not disk-bound.
+- `flux-system` controllers and Longhorn CSI sidecars in `CrashLoopBackOff` from failed
+  leader-election lease renewals (HTTP 504 on lease `PUT`s).
+- If the apiserver etcd health-check timeout has already been raised (drop-in below) and the
+  embedded cloud-controller-manager still restarts every few minutes with `error building
+  controller context: failed to wait for apiserver being healthy` / `cloud-controller-manager
+  panic` in the journal, `/healthz` itself (not just `/readyz`) is now failing too — the backlog
+  is far enough behind that the raised timeout isn't enough on its own; go straight to offline
+  compaction below.
+
+##### Read-only diagnostics (safe any time — k3s keeps running)
+
+```bash
+ssh raspi5
+```
+
+```bash
+# state.db row count and compaction lag — mode=ro, does not lock the live datastore
+python3 -c "
+import sqlite3
+c = sqlite3.connect('file:/var/lib/rancher/k3s/server/db/state.db?mode=ro', uri=True, timeout=30)
+print('rows', c.execute('SELECT COUNT(*) FROM kine').fetchone()[0])
+print('max_id', c.execute('SELECT MAX(id) FROM kine').fetchone()[0])
+print('compact_rev', c.execute(\"SELECT MAX(prev_revision) FROM kine WHERE name='compact_rev_key'\").fetchone()[0])
+"
+
+# datastore + WAL file sizes on disk
+sudo ls -la /var/lib/rancher/k3s/server/db/
+
+# Slow SQL rate in the last hour — compare against the ~30-90/hour baseline
+journalctl -u k3s --since '1 hour ago' --no-pager | grep -c 'Slow SQL'
+
+# has the online compactor made progress recently? silence across several 5-min windows
+# means it has stalled
+journalctl -u k3s --since '30 min ago' --no-pager | grep -E 'COMPACT compacted|Compact failed'
+
+# k3s restart count and current state
+systemctl show k3s -p ActiveState,NRestarts
+
+# apiserver health directly
+sudo k3s kubectl get --raw /healthz --request-timeout=10s
+sudo k3s kubectl get --raw /readyz?verbose --request-timeout=10s
+```
+
+##### Apiserver etcd health-check timeout
+
+`/readyz`'s etcd check can fail purely because kine queries are momentarily slower than the
+apiserver's built-in 2s health-check timeouts, without anything else being broken — and once it
+fails, the embedded cloud-controller-manager panics and restart-loops on a failed `/healthz` (see
+"Symptoms" above), which makes an already-degraded cluster worse. Since 2026-09-24 (owner
+decision on homelab#129), both timeouts are raised to 20s permanently by the `k3s` role, not by a
+manual drop-in: `infra/roles/k3s/templates/k3s-server.service.j2`'s `ExecStart` sets
+`--kube-apiserver-arg=etcd-healthcheck-timeout={{ k3s_apiserver_etcd_healthcheck_timeout }}` and
+the matching `etcd-readycheck-timeout` flag (both default `20s`,
+`infra/roles/k3s/defaults/main.yml`), applied only to the control-plane node (the
+`k3s-server.service.j2` template is only rendered for the `k3s_server` group). This buys the
+online compactor — or an offline compaction run — time before the CCM starts restart-looping,
+without anyone having to apply the incident's manual mitigation by hand first.
+
+The 2026-09-23 incident applied this as a hand-written config-file drop-in at
+`/etc/rancher/k3s/config.yaml.d/90-incident-129-etcd-healthcheck.yaml` first (mitigation 2, 17:09
+CEST); `infra/roles/k3s/tasks/server.yml` now removes that file on every run — redundant once the
+same timeouts are on the systemd unit's command line — as part of converging the node to the
+templated config.
+
+**Owner step:** apply the role with playbook 20, limited to the control-plane node:
+
+```bash
+# on the LAN
+ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
+
+# off-LAN — see "Off-LAN kubectl / Ansible Access" for the SSH jump config prerequisite
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
+```
+
+The first run restarts k3s on raspi5 (~30-60s control-plane blip while the apiserver picks up the
+new flags; containers and public endpoints are unaffected — `k3s.service` ships with
+`KillMode=process`). Subsequent runs are idempotent: the drop-in is already gone and the
+templated unit is already up to date, so neither task reports `changed` and k3s is not restarted
+again.
+
+##### Offline compaction
+
+When the online compactor cannot catch up on its own — stalled for days, or the backlog is large
+enough that every 5-minute window's worth of batches still can't clear the 5s-timeout budget —
+compact offline with k3s stopped, using `scripts/kine-offline-compact.sh` and
+`scripts/kine-offline-compact.py`:
+
+```bash
+scp scripts/kine-offline-compact.py scripts/kine-offline-compact.sh raspi5:/tmp/
+ssh raspi5
+sudo /tmp/kine-offline-compact.sh --dry-run   # read-only preview first — k3s stays up
+sudo /tmp/kine-offline-compact.sh             # full run: stop / backup / compact / start,
+                                               # confirms before each stage
+```
+
+`kine-offline-compact.sh` stops k3s, checkpoints the WAL, takes a `cp -a` backup of `state.db`,
+runs `kine-offline-compact.py` — the same `DELETE`/`UPDATE` kine's own compactor runs
+(`pkg/drivers/sqlite/sqlite.go` `CompactSQL` + `pkg/drivers/generic/generic.go`
+`UpdateCompactSQL`/`SetCompactRevision`), just in 50,000-row batches instead of kine's
+1,000-row/5s-timeout online batches — followed by `VACUUM`, then starts k3s back up and waits for
+`/healthz`. This is deliberately a from-scratch reimplementation of kine's compaction SQL
+(verified against the kine v0.13.9 source, see the script's own header comment for the exact
+file/field references and the verification-query semantics), not a call into kine itself —
+kine only compacts through its own running process, which is exactly what's stopped here.
+
+**API downtime:** the Kubernetes API is unavailable for the whole stop-to-start window.
+Containers keep running throughout (`k3s.service` ships with `KillMode=process`) and public
+endpoints (Traefik, Cloudflare Tunnel) stay up — only `kubectl`, controllers, and Flux
+reconciliation are affected.
+
+**Measured on 2026-09-23** (raspi5, 21:54-22:16 CEST): `state.db` 5.02 GB / 1,488,774 rows →
+29.5 MB / 2,334 rows. The compaction step itself took 11 minutes (661s, 30 batches); total API
+downtime was 22 minutes including the WAL checkpoint, backup copy, `VACUUM`, and the
+restart/healthz wait. Post-run `PRAGMA integrity_check` was clean and all 4 nodes came back
+`Ready`.
+
+##### Rollback
+
+The backup taken in the "backup" stage (`state.db.bak-<timestamp>`, written next to the live
+`state.db`) is the only way back — the compaction step's `DELETE`s are not otherwise reversible.
+If post-compaction verification looks wrong, or the cluster doesn't come back healthy, restore it
+with k3s stopped:
+
+```bash
+ssh raspi5
+sudo systemctl stop k3s
+sudo cp -a /var/lib/rancher/k3s/server/db/state.db.bak-<timestamp> \
+           /var/lib/rancher/k3s/server/db/state.db
+sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal \
+           /var/lib/rancher/k3s/server/db/state.db-shm
+sudo systemctl start k3s --no-block
+```
+
+Keep the backup for at least 24 hours of stable operation after a successful run, then remove it
+(`sudo rm /var/lib/rancher/k3s/server/db/state.db.bak-<timestamp>`) — like every kine/etcd
+datastore copy, it contains every cluster Secret in plaintext.
 
 ---
 
@@ -318,6 +481,36 @@ snapshot protection needed.
   0, concurrency 1) — purges removed/system snapshots (e.g. replica rebuilds) and keeps the
   group's labels backed by a real job. 04:00 is clear of the 02:00 snapshot window and the 03:00
   restic cron on raspi5.
+- **Filesystem trim job (#106):** group `metrics` carries a second `RecurringJob`,
+  `metrics-filesystem-trim` (`infra/playbooks/30_longhorn.yml`, task `filesystem-trim`, cron
+  `0 5 * * *` node-local, retain 0, concurrency 1). It exists because an excluded volume keeps a
+  frozen base forever: Longhorn never deletes a volume's *newest* snapshot, it only marks it
+  removed and merges it once a newer snapshot appears — and with no snapshot job on the volume,
+  no newer snapshot ever appears. After the #101 cleanup the Prometheus volume went from 21.3 G
+  back to 22.0 G within a day, on its way to ~40 G (2 x the 20 Gi volume). A trim reclaims the
+  blocks the filesystem no longer uses, both in the volume head **and** in the continuous chain
+  of already-removed snapshots below it, so the frozen base shrinks too; valid (not removed)
+  snapshots are immutable and are never trimmed, which is why the `default`-group volumes keep
+  their chains. 05:00 is simply clear of the 02:00, 03:00 and 04:00 windows — the cleanup job
+  is not a precondition for the trim. The job ends with a snapshot purge, which is a no-op
+  unless a replica rebuild left a system snapshot behind.
+  - Prerequisites: a trimmable filesystem (ext4 or XFS — the `longhorn` StorageClass formats
+    ext4, check with `kubectl get sc longhorn -o jsonpath='{.parameters.fsType}'`) and the volume
+    **attached and mounted**. The workload keeps running; no `discard` mount option is needed.
+  - Every failure mode is silent: a detached volume (workload scaled to 0, node down) is skipped
+    with a log warning only, and a trim does nothing while a replica is rebuilding. The line
+    `Finished recurring filesystem trim` in the job pod's log is the only proof that a run did
+    something — see the weekly maintenance checklist.
+  - ⚠️ Do **not** enable the global setting `remove-snapshots-during-filesystem-trim` to "help"
+    this job. It is unnecessary here (the leftover snapshot is already marked removed) and it is
+    cluster-wide: it would mark the newest snapshot of *every* volume as removed during a trim,
+    including the app volumes that rely on `daily-snapshot` for rollback.
+  - ext4 remembers which blocks it has already discarded. A snapshot that is marked removed
+    *after* a trim may therefore keep its blocks until the filesystem is remounted — restart the
+    Prometheus pod and let the next trim run if a removed snapshot refuses to shrink.
+  - Cost: the trim runs as `fstrim` in the host mount namespace with a one-hour timeout. The first
+    run discards the whole accumulated free space at once and loads the replica nodes noticeably;
+    steady-state runs discard only one day of churn.
 - **Excluding another volume:** label its PVC the same way —
   `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
   — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
@@ -338,19 +531,36 @@ snapshot protection needed.
     `kubectl -n longhorn-system get engines.longhorn.io -l longhornvolume=<volume-name> -o jsonpath='{.items[0].status.purgeStatus}'`
     — after a successful purge `actualSize` decreases substantially but can stay above the
     nominal size (the volume head keeps every block the filesystem ever wrote until a filesystem
-    trim). This is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
+    trim — for `metrics`-group volumes that is what `metrics-filesystem-trim` does nightly). This
+    is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
 - **Verify:**
   ```bash
-  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
+  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup + metrics-filesystem-trim
   kubectl -n monitoring get pvc <name> --show-labels
   kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume-name>")] | length'
+
+  # Did the nightly trim actually run? (a skipped volume logs a warning and nothing else)
+  kubectl -n longhorn-system get pods --sort-by=.metadata.creationTimestamp | grep metrics-filesystem-trim
+  kubectl -n longhorn-system logs <that pod> | grep 'Finished recurring filesystem trim'
+
+  # Volume attached and running the expected engine image (a detached volume is skipped silently)
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.state}{"  "}{.status.currentImage}'
+
+  # Did it free anything? Compare before and after a run; actualSize should approach "Used".
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.actualSize}'
+  kubectl -n monitoring exec prometheus-kube-prometheus-stack-prometheus-0 -c prometheus -- df -h /prometheus
+
+  # On-disk proof on each replica node — this is the number that filled raspi4's SD card
+  ssh raspi5 'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
+  ssh mba1   'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
   ```
 - **Warnings:**
   - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
     explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
-  - Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
-    returning the volume to `default`; recover by re-running `30_longhorn.yml` and
-    `41_monitoring.yml`.
+  - Deleting the *last* `RecurringJob` of the group strips the labels from PVC and Volume,
+    silently returning the volume to `default`; recover by re-running `30_longhorn.yml` and
+    `41_monitoring.yml`. With both `metrics-snapshot-cleanup` and `metrics-filesystem-trim` in
+    place, deleting one of the two is safe — deleting both is not.
   - Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC (restore,
     `volumeClaimTemplate` change) — labels don't survive it.
   - `--check` of `41_monitoring.yml` on a fresh cluster stops at the PVC wait for about 10
@@ -459,8 +669,11 @@ Host raspi5
   HostName ssh.furchert.ch
   User ansible
   IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
   ProxyCommand cloudflared access ssh --hostname %h
 ```
+
+Always pair `~/.ssh/homelab` with `IdentitiesOnly yes` (`-o IdentitiesOnly=yes` on the command line). Otherwise ssh-agent offers its other keys first, the server's `MaxAuthTries` runs out before `~/.ssh/homelab` is tried, and the connection fails with `Received disconnect … Too many authentication failures`.
 
 #### Update Ingress List
 
@@ -483,11 +696,22 @@ When you are **not on the home LAN**, the k3s API (`192.168.1.61:6443`) is unrea
 directly. Open a persistent SSH local port-forward through the Cloudflare Access SSH proxy,
 then point kubectl at the local end.
 
+Recommended shortcut: add this block to `~/.ssh/config`, so the plain forms
+`ssh ssh.furchert.ch '…'` and `ssh -N -L 6443:localhost:6443 ssh.furchert.ch` work:
+
+```sshconfig
+Host ssh.furchert.ch
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+```
+
 1. Open the forward in its own terminal and leave it running (`-N` = no remote shell, just
    hold the tunnel open):
 
    ```bash
-   ssh -i ~/.ssh/homelab \
+   ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes \
      -o ProxyCommand="cloudflared access ssh --hostname %h" \
      -N -L 6443:localhost:6443 \
      ansible@ssh.furchert.ch
@@ -530,17 +754,52 @@ then point kubectl at the local end.
 > Keep the `-N -L …` terminal running for the whole playbook run — if the forward drops, the
 > playbook fails the same way.
 
+**Node-level playbooks off-LAN (SSH jump config).** The forward above only serves playbooks whose
+tasks run on localhost. Node-level playbooks (`10_base`, `20_k3s`, `30_longhorn`) SSH to the
+nodes' LAN IPs and fail off-LAN with `UNREACHABLE`. Route them through the Cloudflare Access SSH
+host with an SSH config that lives only in the operator's `~/.ssh` (not in this repo), e.g.
+`~/.ssh/homelab-offlan.conf`:
+
+```
+Host 192.168.1.61
+  HostName ssh.furchert.ch
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+Host 192.168.1.*
+  User ansible
+  IdentityFile ~/.ssh/homelab
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+  ProxyCommand ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch" -W %h:%p ansible@ssh.furchert.ch
+```
+
+```bash
+cloudflared access login https://ssh.furchert.ch   # prerequisite: a valid Access login
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/10_base.yml --tags netmon_node
+```
+
+- raspi5 (`192.168.1.61`) has a direct entry because a jump through raspi5 to its own LAN IP
+  timed out once. The other nodes jump through raspi5.
+- `ANSIBLE_SSH_ARGS` replaces Ansible's default SSH arguments, so the `ControlMaster`/`ControlPersist`
+  flags are passed again explicitly.
+- `StrictHostKeyChecking yes` accepts only host keys already in `~/.ssh/known_hosts`. On-LAN Ansible runs record the nodes' LAN IPs there, and earlier `cloudflared` SSH use records `ssh.furchert.ch`. Add a missing key on the LAN first (`ssh ansible@<LAN IP>` once, then compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node). Never accept a first key over the tunnel.
+- Keep the file private: `chmod 600 ~/.ssh/homelab-offlan.conf`.
+- Verified on all four nodes on 2026-09-24 (with `accept-new` and existing known_hosts entries).
+
 #### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
 
 For a single read or a single-manifest apply, run kubectl on the control-plane node through the
 same Cloudflare Access SSH proxy instead of holding a forward open:
 
 ```bash
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl -n apps get pods'
 
 # apply exactly one manifest from the local checkout (used for PR #73 on 2026-09-03):
-ssh -i ~/.ssh/homelab -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
   'sudo k3s kubectl apply -f -' < cluster/apps/<app>/deployment.yaml
 ```
 
@@ -600,6 +859,8 @@ Expected UP targets:
 - `serviceMonitor/monitoring/postgresql` → apps
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
+- `serviceMonitor/monitoring/data-service` → apps (job `data-service`, `/actuator/prometheus` — see "data-service NM-1: Cloudflare keys, scrape and alerts")
+- `serviceMonitor/monitoring/coroot-node-agent` → monitoring (one target per gated node; none while the gate is closed)
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
 > absent from this list and from `/targets` entirely (disabled in
@@ -649,6 +910,85 @@ restriction (firewall rule or NetworkPolicy scoped to the `monitoring` namespace
 before it's safe to enable. None of this is implemented; revisit as a separate, security-reviewed
 task if real coverage of these 3 components is ever wanted.
 
+**Backup alerting (#92):** three backup mechanisms exist and none of them alerted before this
+change. The rules live in `cluster/values/kube-prometheus-stack.yaml` under
+`additionalPrometheusRulesMap.homelab-backups` and reach Discord through the existing single
+Alertmanager route. All four are `severity: warning`.
+
+| Alert | Fires when | `for` |
+|-------|-----------|-------|
+| `ResticBackupFailed` | `homelab_backup_exit_code > 0` — the last run of `homelab-backup.sh` on raspi5 exited non-zero | 15m |
+| `ResticBackupStale` | no successful restic run for more than 26 h, **or** the metric is absent entirely | 2h |
+| `LonghornRecurringJobNotSucceeding` | a CronJob in `longhorn-system` that is older than 26 h has no successful run in the last 26 h (or never had one) | 1h |
+| `LonghornRecurringJobMissing` | the `daily-snapshot` or `metrics-snapshot-cleanup` CronJob has disappeared | 1h |
+
+**A failed Longhorn recurring-job run is deliberately *not* covered by a new rule** — the chart's
+own `KubeJobFailed` (`kube_job_failed{namespace=~".*"} > 0`, `for: 15m`, warning) already fires for
+`longhorn-system` and routes to the same receiver. A second rule would mean two Discord messages
+for every failed run. Do not switch `KubeJobFailed` off via `defaultRules.disabled` without
+replacing that coverage.
+
+**Why the Longhorn rule is anchored on `kube_cronjob_created`:** kube-state-metrics only emits
+`kube_cronjob_status_last_successful_time` once `.status.lastSuccessfulTime` is set, so a job that
+has *never* succeeded has no series at all and a plain staleness comparison could never fire for
+it. The rule therefore selects CronJobs created more than 26 h ago and subtracts those with a
+recent success (`unless`), which also gives a newly created job a 26 h grace period. It is
+namespace-wide, so a new Longhorn recurring job is covered without editing the rule.
+26 h = the 24 h schedule plus DST slack (both crons are node-local, so the spring/autumn gaps are
+23 h and 25 h) plus one evaluation cycle.
+
+**restic metrics path:** `homelab-backup.sh` (`infra/roles/storage/tasks/main.yml`) writes
+`homelab-backup.prom` into `/var/lib/node_exporter/textfile_collector` on every exit — success or
+failure — via a temp file plus `mv`, so a scrape never sees a partial file. node-exporter reads
+that directory read-only (`--collector.textfile.directory`, configured in
+`cluster/values/kube-prometheus-stack.yaml`). The path is a contract between those two files and
+`storage_textfile_collector_dir` in `infra/roles/storage/defaults/main.yml`; change them together
+or the metric disappears and `ResticBackupStale` fires. The directory is created on **every** node
+(by Ansible and by the DaemonSet's `hostPath: DirectoryOrCreate`), because node-exporter raises
+`node_textfile_scrape_error=1` — the chart's `NodeTextFileCollectorScrapeError` alert — wherever
+the configured directory is missing. A failed run carries the previous last-success timestamp
+forward instead of erasing it; `0` means "never succeeded".
+
+**Known blind spots:**
+- A Longhorn recurring job that *silently skips* a detached volume still exits 0 and counts as a
+  success (`filterVolumesForJob` logs a warning only). The weekly manual snapshot check in the
+  maintenance checklist stays for that reason.
+- The **Mac-side app-data dumps** (`scripts/backup-app-data.sh`) are not covered. The Mac is not a
+  cluster node, so an automatic signal would need a new component (Pushgateway or an n8n check).
+  It remains a manual monthly check — see the maintenance checklist.
+- A lock collision (a manual run while the 03:00 cron holds the lock) exits before any metric is
+  written, on purpose: the run holding the lock owns the metrics. A permanently stuck lock surfaces
+  as `ResticBackupStale` after about 26 h.
+
+**Rollout order (matters):** the `ResticBackupStale` rule has an `absent()` branch, and
+`homelab-backup.sh` only writes its metric file when it runs. Apply in this order:
+
+1. `ansible-playbook infra/playbooks/10_base.yml` — **all nodes**. Creates the textfile directory
+   fleet-wide and installs the metric-writing script. node-exporter is not reading the directory
+   yet at this point.
+2. `ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"` — one manual run, so the `.prom` file
+   exists before anything scrapes it.
+3. `ansible-playbook infra/playbooks/41_monitoring.yml` — loads the rules and rolls the
+   node-exporter DaemonSet on all 4 nodes.
+
+In that order `absent()` is never true and no alert fires during the rollout. Running step 3
+before step 2 leaves a gap that lasts until the next 03:00 cron — up to about 24 hours — during
+which `ResticBackupStale` fires (correctly, in the sense that there is genuinely no evidence of a
+successful backup). `for: 2h` softens that window but does not close it.
+
+**Verify after a rollout:**
+
+```bash
+# the metric file on raspi5
+ssh raspi5 "cat /var/lib/node_exporter/textfile_collector/homelab-backup.prom"
+
+# no node reports a textfile scrape error (expect 4x 0)
+# Prometheus: node_textfile_scrape_error
+
+# the rules are loaded
+kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-backups
+```
+
 **`CPUThrottlingHigh` review (#68, following the 2026-08-28 auth-service/device-service CPU-limit
 changes to 1000m):** 24h throttled-CFS-period ratios — `postgres-exporter` (in the `postgresql-0`
 pod) **0.67**, the only container above the 25% alert threshold, at a `limits.cpu: 100m` against
@@ -658,6 +998,181 @@ Decision: raised `postgres-exporter`'s `limits.cpu` to `250m` in `infra/playbook
 (`requests` unchanged); kept the alert itself (severity `info`, already excluded from paging by
 `InfoInhibitor`) rather than tuning its expression — it was correctly identifying a genuinely
 undersized CPU quota, not a false positive.
+
+### coroot-node-agent (NM-2)
+
+eBPF egress/east-west visibility for the network-monitoring Epic (#114). Contract:
+`docs/060-network-monitoring.md` §6; issue #118. The agent is an **approved privileged workload**
+in `monitoring` (`privileged: true`, `hostPID: true`, host mounts `/sys/fs/cgroup` read-only,
+`/sys/kernel/tracing`, `/sys/kernel/debug`), metrics-only: it pushes nothing out of the cluster.
+
+| Piece | Where |
+|-------|-------|
+| DaemonSet, headless Service, ServiceMonitor, NetworkPolicy (ingress only from Prometheus on TCP 80) | `cluster/monitoring/coroot-node-agent/`, applied by `41_monitoring.yml` (no Helm chart; the chart is stale) |
+| Alert rules `NetmonNewExternalDestination`, `CorootNodeAgentDown` | `cluster/values/kube-prometheus-stack.yaml` → `additionalPrometheusRulesMap.homelab-netmon-egress` |
+| Image | `ghcr.io/coroot/coroot-node-agent:1.35.10@sha256:…` (index digest in the manifest comment; bumped by hand) |
+| Spike gate | node label `homelab.furchert.ch/coroot-node-agent=enabled`, managed by `41_monitoring.yml` from `coroot_node_agent_nodes` (default: all four nodes `[raspi5, mba1, mba2, raspi4]` since 2026-09-25) |
+
+**The gate.** The DaemonSet only schedules on labelled nodes. `41_monitoring.yml` labels exactly
+the nodes in `coroot_node_agent_nodes` and **removes** the label from every other node, so the
+play variable is the source of truth: nodes missing from the list lose the label on the next run.
+The default covers all four nodes, `[raspi5, mba1, mba2, raspi4]`, since 2026-09-25. raspi5 and
+mba1 ran the spike, mba2 joined on 2026-09-24, and raspi4 joined on 2026-09-25. With an empty list
+(`-e '{"coroot_node_agent_nodes": []}'`) the DaemonSet runs 0 pods and neither rule fires.
+
+**Memory options (researched 2026-09-24 against the v1.35.10 source; none applied).** The startup
+peak comes from TLS uprobe setup. For every new process the agent opens its executable, or its
+libssl, and loads the full ELF symbol table (`ebpftracer/tls.go`, `elf.go`) to find Go TLS, Rust
+TLS and OpenSSL functions. Large Go binaries such as k3s itself (`/system.slice/k3s*.service`) are
+the likely main cost, which is not measured per binary. Upstream docs and the README list no flags for this, and the only relevant
+flags are in `flags/flags*.go`:
+
+| Option | Effect | Keeps `ip_to_fqdn`? | Verdict |
+|---|---|---|---|
+| `--disable-l7-tracing` | Skips all TLS uprobes and ELF parsing, and all L7 events | **No**: `ip_to_fqdn` comes from DNS L7 events | Not usable |
+| `--container-denylist=<regex>` (e.g. `/system.slice/k3s.*`) | The agent ignores matching cgroups entirely: no ELF scan, but also no egress metrics for them | Yes, for the others | Possible if the owner accepts losing k3s/containerd egress (image pulls, Helm/Git fetches). Measure the effect first |
+| `--instrumentation-delay` (default `30s`) | Delays TLS attach after a process starts | Yes | Spreads the work but does not shrink the peak. No benefit |
+| Env `GOMEMLIMIT` (e.g. `600MiB`) | Go runtime soft limit, so the GC collects harder before the cgroup limit | Yes | Possible, but the risk is GC thrash if live heap during the scan really needs more. Would need its own measurement |
+| `--max-fqdns-per-container` (default 50), `--min-container-age` (default `30s`) | Cardinality limits, not memory | Yes | Not relevant to the peak |
+| `--go-heap-profiler`, Java/async-profiler flags | Only active with a profiles endpoint, which is not set | Yes | Already inert |
+
+No flag is both clearly safe and memory-reducing, so this PR only sizes the resources.
+
+**Kernel prerequisites** (read-only checks 2026-09-23, docs/060 §6.3): all four nodes have
+`CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`, tracefs and debugfs mounted, and lockdown `none`.
+The Pis (6.8.0-raspi) have BTF; mba1 (6.12.79-1-t2-noble) and mba2 (6.19.10-2-t2-noble) do not
+(`CONFIG_DEBUG_INFO_NONE=y`). coroot-node-agent ships precompiled programs, so BTF is not
+required; the spike on mba1 is what proves that.
+
+**Residual risk: unauthenticated pprof.** The agent registers Go's `/debug/pprof/*` on the same
+`:80` listener as `/metrics`, and v1.35.10 has no flag to turn it off. The NetworkPolicy admits
+only Prometheus from the pod network, but Kubernetes always admits traffic from the pod's own node.
+Host processes and hostNetwork pods on an agent node can therefore still fetch profiles and heap
+dumps, or burn CPU with `/debug/pprof/profile?seconds=N`. That includes Home Assistant, which has
+`hostNetwork: true` and no node pin. **The owner accepted this residual risk on 2026-09-24 (#118).**
+It is homelab-only, and the agent has no external exposure. Revisit it if either alternative
+becomes available:
+- a `/metrics`-only reverse-proxy sidecar with the agent bound to `127.0.0.1`, which adds a new pinned image and needs approval;
+- an upstream flag that disables pprof.
+
+#### Spike runbook (needs the owner's go — docs/060 §12 Q4)
+
+1. **Baseline** (Prometheus port-forward, see "Access" above): record `prometheus_tsdb_head_series`
+   (108 985 on 2026-09-23) and note which nodes host furchert-ch, a flux controller and litellm
+   (`kubectl get pods -A -o wide`). Criterion 3 needs those flows on the spiked nodes.
+2. **Open the gate on raspi5 only:**
+   ```bash
+   ansible-playbook infra/playbooks/41_monitoring.yml -e '{"coroot_node_agent_nodes": ["raspi5"]}'
+   ```
+   Lightweight alternative without the Helm upgrade (the rules then arrive with the next 41 run):
+   ```bash
+   kubectl apply -k cluster/monitoring/coroot-node-agent
+   kubectl label node raspi5 homelab.furchert.ch/coroot-node-agent=enabled
+   ```
+3. **Smoke check** (first 10 min):
+   ```bash
+   kubectl -n monitoring get pods -l app.kubernetes.io/name=coroot-node-agent -o wide
+   kubectl -n monitoring logs ds/coroot-node-agent | head -50   # expect "using /run/k3s/containerd/containerd.sock", no BPF load errors
+   # on the spiked node itself:
+   sudo journalctl -k --since "-15 min" | grep -iE "bpf|verifier" || echo none
+   ```
+   Prometheus → Targets must show `serviceMonitor/monitoring/coroot-node-agent/0` UP. raspi5 is
+   the only control-plane node (kine incident #129): abort (step 7) if `kubectl get --raw /readyz`
+   turns slow or the node's load climbs noticeably.
+4. **Measure for ≥ 24 h** and record the numbers in the NM-2 worklog (criteria from docs/060 §6.3):
+
+   | # | PromQL | Pass |
+   |---|--------|------|
+   | 2 | `kube_pod_container_status_restarts_total{namespace="monitoring", container="coroot-node-agent"}` and `kube_pod_container_status_last_terminated_reason{container="coroot-node-agent", reason="OOMKilled"}` | 0 restarts, no OOMKilled |
+   | 3 | `group by (container_id, actual_destination) (container_net_tcp_successful_connects_total)` and `ip_to_fqdn` | ≥ 3 known flows with a non-empty `actual_destination`; external IPs have an FQDN |
+   | 4 | `scrape_samples_post_metric_relabeling{job="coroot-node-agent"}` | < 5 000 per agent |
+   | 5 | CPU: `avg_over_time(rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`, `quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{namespace="monitoring", container="coroot-node-agent"}[5m])[24h:5m])`. Steady memory (the p95 over 24 h ignores the startup spike, which lasts minutes): `quantile_over_time(0.95, container_memory_rss{namespace="monitoring", container="coroot-node-agent"}[24h])`, `quantile_over_time(0.95, container_memory_working_set_bytes{namespace="monitoring", container="coroot-node-agent"}[24h])`. Startup peak, checked separately: `max_over_time(container_memory_working_set_bytes{namespace="monitoring", container="coroot-node-agent"}[24h])` against the limit `kube_pod_container_resource_limits{namespace="monitoring", container="coroot-node-agent", resource="memory"}` | avg < 100m, p95 < 250m; RSS p95 < 150 MiB, working-set p95 < 450 MiB; startup peak < memory limit (and no OOMKilled, row 2) |
+   | 6 | `prometheus_tsdb_head_series` | < +10 % over the baseline |
+   | 7 | `count by (container_id) (container_net_tcp_active_connections)` | record the `container_id` format (expected `/k8s/<ns>/<pod>/<container>`) |
+   | — | `prometheus_rule_group_last_duration_seconds{rule_group=~".*homelab-netmon-egress.*"}` | < 1 s (the group runs every 5 min) |
+
+   `scrape_samples_scraped{job="coroot-node-agent"}` shows the pre-relabel size, for information only;
+   `sampleLimit` (10 000) is counted after the keep-list.
+5. **Add mba1** (no BTF): repeat steps 2–4 with `-e '{"coroot_node_agent_nodes": ["raspi5", "mba1"]}'`
+   (or `kubectl label node mba1 …`). Every criterion must hold on both nodes.
+
+   **Result (2026-09-24, from 11:52):** raspi5 and mba1 were the playbook default after the spike; mba2 joined later (step 6).
+
+   | Measure | raspi5 | mba1 |
+   |---|---|---|
+   | First start at a 384Mi limit | OOMKilled, working-set peak 410 MiB | OOMKilled, peak 702 MiB |
+   | Restarts at 768Mi (temporary `kubectl set resources`), 2 h+ | 0 | 0 |
+   | Series after relabeling | 161 | 771 |
+   | CPU | 0.02 cores | 0.05 cores |
+   | Working set steady (2 h band) | 320 MiB (313–327) | 399 MiB (370–420) |
+   | RSS steady | 69 MiB | 105 MiB |
+
+   eBPF works on mba1's t2 kernel. No alerts fired, and 285 connect series plus 12 `ip_to_fqdn`
+   series flow. The working set is mostly reclaimable page cache from reading container binaries.
+   The manifest now requests 256Mi and limits at 1Gi, which leaves margin above the 702 MiB startup
+   peak. The next `41_monitoring.yml` run replaces the temporary 768Mi `kubectl set resources` drift.
+6. **Record and roll out.** Update docs/060 §3.3/§4.6 with the observed `container_id` format and
+   metric labels. Extend the rollout one node at a time, each with the owner's go, a PR adding the
+   node to `coroot_node_agent_nodes` in `41_monitoring.yml`, a `41_monitoring.yml` run, and steps 3–4:
+   first **mba2**, whose t2 kernel (6.19) differs from mba1's (6.12), then **raspi4**, which has
+   only 4 GB RAM and about 2 GB available.
+
+   **mba2 joined on 2026-09-24** (t2 kernel 6.19.10, no BTF), with the owner's go on #118. It
+   followed the raspi5 and mba1 measurements of the 1Gi run: requests 256Mi and limits 1Gi,
+   2026-09-24 15:09–17:15 CEST (2 h). These are a later run than the 768Mi spike table in step 5
+   (320 / 399 MiB, band up to 420, peak 702 MiB), not a contradiction of it:
+
+   | Measure (1Gi run, 2 h) | raspi5 | mba1 |
+   |---|---|---|
+   | Working set, steady | 318 MiB | 350 MiB |
+   | RSS, steady | 68 MiB | 98 MiB |
+   | Startup peak, under the 1Gi limit | 479 MiB | 544 MiB |
+   | Restarts | 0 | 0 |
+
+   Criterion 2's 24 h restart window (docs/060 §6.3) started 2026-09-24 11:52 CEST and ends
+   2026-09-25 11:52 CEST; the result is recorded at the 12:07 checkpoint (0 restarts so far on all
+   three nodes).
+
+   Expect a startup peak of about 500–700 MiB on mba2's t2 kernel, and watch for OOMKilled during
+   the first 5 minutes.
+
+   **raspi4 joined on 2026-09-25**, after 12 h of mba2 observation. The gate now covers all four
+   nodes. The plan's further 24 h of mba2 observation was shortened to 12 h on the lead's
+   recommendation (mba2 flat at 332 MiB steady / 349 MiB peak, 0 restarts). The owner decision is
+   Dominic's merge of PR #167 (2026-09-25). Evidence from the 2026-09-25 morning check:
+
+   | Node | Max working set (12 h window 19:13–07:13 CEST, excludes the startup peak) | Other |
+   |---|---|---|
+   | mba2 | 349 MiB | steady 332 MiB, RSS 63 MiB, 0 restarts, no OOMKilled |
+   | raspi5 | 442 MiB | — |
+   | mba1 | 390 MiB | — |
+
+   Memory headroom on raspi4 is the tightest in the cluster. It has 3 785 Mi allocatable, of which
+   1 736 Mi (about 46 %) is used, leaving about 2 GB free. That is enough for the agent's 256Mi request and
+   an expected startup peak of about 400–500 MiB on the arm64 Pi (raspi5 measured 479 MiB), under
+   the 1Gi limit. Watch raspi4's pod for OOMKilled during the first 5 minutes.
+7. **Rollback.**
+   - *Stop the agent, keep everything else:* run `41_monitoring.yml` with
+     `-e '{"coroot_node_agent_nodes": []}'` (the gate closes and the pods terminate), or
+     `kubectl label node --all homelab.furchert.ch/coroot-node-agent-`. The label is restored on the next
+     run without the override.
+     No alert fires in this state.
+   - *Remove it entirely:* revert the NM-2 PR and run `41_monitoring.yml` (removes the rule group),
+     then `kubectl delete -k cluster/monitoring/coroot-node-agent` from a checkout that still has the
+     directory, and remove the node labels as above. Deleting the DaemonSet while the rules are still
+     loaded fires `CorootNodeAgentDown` after 10 min.
+   - *If criteria 1–3 fail on the Macs:* keep the agent on the Pis only and use the conntrack
+     fallback (docs/060 §6.6) for mba1/mba2; if they fail on the Pis too, use the full fallback.
+
+**Alerts.** `NetmonNewExternalDestination` (`info`) fires for 15 min when a workload opens a TCP
+connection to an external `ip:port` not seen in the previous 24 h. It groups by `workload`
+(the pod-name hash stripped from `container_id`) so Flux rollouts do not re-report known
+destinations. Because of the chart's `InfoInhibitor` it is normally visible in Alertmanager/Prometheus
+without reaching Discord; raising it to `warning` is a tuning decision after the spike (expect noise
+from CDN-rotating destinations). `CorootNodeAgentDown` (`warning`, 10 min) fires when the DaemonSet
+is missing (also while kube-state-metrics is down) or fewer agents are scraped successfully than are available; crash loops, stuck rollouts
+and failed scrapes are also covered by the chart's `KubePodCrashLooping`, `KubeDaemonSetRolloutStuck`
+and `TargetDown`.
 
 ---
 
@@ -774,6 +1289,299 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 > up. The playbook can report success while the old image is still serving. Always confirm the
 > new image landed with `kubectl -n apps rollout status deploy/litellm --timeout=10m` rather than
 > trusting the playbook's "changed" result alone.
+
+---
+
+### data-service (Flux, NM-0 onboarding)
+
+NM-0 onboarding completed 2026-09-23 (homelab#126, homelab-data-service#18, homelab-auth-service#95).
+
+data-service is Flux-managed like auth-service/device-service (`cluster/apps/data-service/`), and uses its own Postgres DB `data_service` (role `data_service`, schema `netmon` created by its Flyway) plus the Secret `data-service-secrets`, both from `59_app_services.yml`. Contract: `docs/060-network-monitoring.md` §9; ownership: ADR 0002 (parent `docs/adr/0002-network-telemetry-ownership.md`). No public tunnel route — do not add it to `cf_ingress_body`.
+
+#### Order (first rollout)
+
+1. `homelab-data-service` NM-0 PR merged: `k8s/` exists on `main` and CI has pushed a first image `ghcr.io/doemefu/homelab-data-service:main-<YYYYMMDDTHHMMSS>`.
+2. Owner prerequisites below (deploy key, GHCR visibility, ruleset check, SOPS variable).
+3. The infra PR with `cluster/apps/data-service/` + the playbook-59 tasks is merged.
+4. Run playbook 59 right after the merge (creates DB, role and Secret).
+5. Flux reconciles (`apps` Kustomization, interval 10 min) or force it. A pod that starts before step 4 sits in `CreateContainerConfigError` and recovers by itself once the Secret exists.
+
+#### Owner prerequisites
+
+```bash
+# (a) SOPS variable (NM-0) — value e.g. from: openssl rand -hex 24
+sops infra/inventory/group_vars/all.sops.yml     # add: data_service_db_password: "<value>"
+
+# (b) Flux deploy key with WRITE access (image-automation pushes tag bumps to main).
+#     flux generates the key pair in-cluster; only the PUBLIC key leaves the cluster.
+flux create secret git data-service-flux-auth -n flux-system \
+  --url=ssh://git@github.com/doemefu/homelab-data-service \
+  --ssh-key-algorithm=ed25519
+kubectl -n flux-system get secret data-service-flux-auth \
+  -o jsonpath='{.data.identity\.pub}' | base64 -d > /tmp/flux-data-service.pub
+gh repo deploy-key add /tmp/flux-data-service.pub -R doemefu/homelab-data-service \
+  --title flux-data-service --allow-write
+rm /tmp/flux-data-service.pub
+
+# (c) GHCR visibility: new packages default to private. Siblings are public and their
+#     ImageRepository has no secretRef — make this one public after the first push:
+#     https://github.com/users/doemefu/packages/container/homelab-data-service/settings
+#     → Danger Zone → Change visibility → Public.
+#     Alternative: keep it private. That needs TWO credentials, because ghcr-auth in
+#     flux-system only lets Flux scan tags — it gives the Pod in apps nothing to pull with:
+#       1. ghcr-auth in flux-system (see the comment in cluster/apps/data-service/imagerepo.yaml)
+#          and uncomment its secretRef;
+#       2. a docker-registry Secret in apps (same command with -n apps, e.g. name ghcr-pull)
+#          plus `imagePullSecrets: [{name: ghcr-pull}]` in homelab-data-service's
+#          k8s/deployment.yaml (app repo change). Without 2 the rollout ends in ImagePullBackOff.
+
+# (d) Branch ruleset: the Flux push to main must not be blocked. Mirror the
+#     device-service ruleset (rules deletion, non_fast_forward, copilot_code_review,
+#     code_scanning, code_quality; bypass = Admin role; NO pull_request rule).
+gh api repos/doemefu/homelab-data-service/rulesets --jq '.[] | "\(.id) \(.name) \(.enforcement)"'
+#     If a ruleset requires pull requests, add the deploy key as a bypass actor
+#     (actor_type "DeployKey") or drop that rule.
+```
+
+#### Apply and verify
+
+```bash
+# Playbook 59 (after the infra PR merge); a second run must report changed=0
+ansible-playbook infra/playbooks/59_app_services.yml
+
+kubectl -n apps get secret data-service-secrets
+kubectl -n apps exec postgresql-0 -- psql -U postgres -tc \
+  "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='data_service'"
+
+flux reconcile kustomization apps -n flux-system --with-source
+flux get sources git data-service -n flux-system
+flux get image repository data-service -n flux-system
+flux get kustomizations data-service -n flux-system
+kubectl -n apps get pods -l app=data-service
+```
+
+**Troubleshooting:** while the k3s datastore is slow (incident #129), playbook 59's Secret task can fail with HTTP 500 `resource quota evaluation timed out`. Nothing is half-applied in that case — rerun the playbook once the control plane is healthy again (`kubectl get --raw=/readyz` returns `ok` quickly).
+
+Backups need no change: `scripts/backup-app-data.sh` reads the database list at runtime, so `data_service` is dumped automatically.
+
+### data-service NM-1: Cloudflare keys, scrape and alerts
+
+NM-1 (#116) adds the Cloudflare GraphQL Analytics credentials to `data-service-secrets`, a ServiceMonitor for data-service and the `homelab-netmon` alert rules. Contract: `docs/060-network-monitoring.md` §4.1, §4.2, §7.1, §9.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variables (owner) | `infra/inventory/group_vars/all.sops.yml` | `data_service_cloudflare_analytics_token` (zone `furchert.ch`, Analytics:Read), `data_service_cloudflare_zone_id` |
+| Secret keys | `59_app_services.yml` → `apps/data-service-secrets` | `cloudflare-api-token`, `cloudflare-zone-id` (read by data-service as `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`) |
+| Scrape | `41_monitoring.yml` → `monitoring/data-service` ServiceMonitor | port `http`, `/actuator/prometheus`, 30 s, job `data-service` |
+| Alerts | `cluster/values/kube-prometheus-stack.yaml` → PrometheusRule `monitoring/kube-prometheus-stack-homelab-netmon` | `NetmonCollectorStale`, `NetmonDataServiceDown` |
+
+#### Rollout order (NM-1)
+
+The PRs merge in this order: **homelab#116 → homelab-data-service#14 → furchert-ch#61**.
+
+1. Merge this infra PR, then run playbook 59 **twice**. The first run adds the two keys to the Secret. The second run must report no change for the Secret task (the other data-service tasks keep their NM-0 behaviour).
+2. Restart data-service so the running pod picks up the new env vars (`optional: true` secretKeyRefs are resolved only at pod start). Delete the pod rather than using `rollout restart`, which Flux undoes (see the note under "Enable order (NM-4)"). Skip this when data-service#14's image rollout follows right away — that rollout restarts the pod anyway.
+3. Run playbook 41. It applies the ServiceMonitor and loads the rules in one run, so the `absent()` branch of `NetmonDataServiceDown` never sees a scrape gap. data-service is already running since NM-0, so this step can happen before data-service#14.
+4. Merge data-service#14 (collectors), then furchert-ch#61 (UI).
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret task
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect: cloudflare-api-token, cloudflare-zone-id, db-password, db-username
+kubectl -n apps delete pod -l app=data-service         # only if no data-service image rollout follows
+ansible-playbook infra/playbooks/41_monitoring.yml
+```
+
+#### Verify the scrape and the rules
+
+```bash
+kubectl -n monitoring get servicemonitor data-service
+kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-netmon
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+curl -s 'http://localhost:9090/api/v1/query' --data-urlencode 'query=up{job="data-service"}' | jq '.data.result'
+# expect value "1"
+curl -s 'http://localhost:9090/api/v1/query' \
+  --data-urlencode 'query=netmon_collector_last_success_timestamp_seconds' | jq '.data.result[] | {c: .metric.collector, v: .value[1]}'
+curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name=="homelab-netmon") | .rules[].name'
+```
+
+#### Alert runbook
+
+**`NetmonCollectorStale`** (warning, `for: 10m`) fires per `collector` label. It fires when the collector's last success is older than its threshold. It also fires when the gauge is NaN, meaning the collector never succeeded, and the Pod is older than the threshold. Pod age comes from kube-state-metrics (`kube_pod_start_time`), so a container restart inside the same Pod does not reset the grace period. The `threshold` label shows the class:
+
+| Threshold | Collectors | Cadence (§4.1) |
+|-----------|------------|----------------|
+| `26h` | `blocklists`, `retention` | daily |
+| `3h` | `egress` | hourly |
+| `90m` | `lan`, `reputation` | 15 min / 30 min |
+| `15m` | every other collector: `cloudflare-requests`, `cloudflare-firewall`, `login-events`, and any collector not listed | 5 min / 1 min |
+
+1. Check `GET /api/netmon/status` through furchert-ch `/dashboard/network`, or the data-service logs (`kubectl -n apps logs deploy/data-service`). `lastError` and `consecutiveFailures` name the cause. data-service never logs tokens.
+2. `credentials` on a Cloudflare collector means the token has expired or was revoked. Create a new token (zone `furchert.ch`, Analytics:Read), update `data_service_cloudflare_analytics_token` in SOPS, run playbook 59 and restart data-service.
+3. A collector added in data-service without its own class falls into the `15m` class. If its cadence is slower, add a class to the rules in `cluster/values/kube-prometheus-stack.yaml`.
+4. A collector that is disabled (`netmon.collectors.<name>.enabled=false`) must not export the gauge. If one stays NaN forever, that is a data-service bug, not an outage.
+
+**`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system` and `kubectl -n monitoring get servicemonitor data-service`. The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
+
+### NM-4: login-event secrets (auth-service → data-service)
+
+NM-4 (#134) adds the secrets for the login-event pipeline: auth-service records form logins in an outbox, and data-service pulls them with its own client (`data-service`, scope `login-events:read`). Contract: `docs/060-network-monitoring.md` §7.6, §9.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variables (owner, optional) | `infra/inventory/group_vars/all.sops.yml` | `auth_service_data_service_client_secret` (plain, e.g. `openssl rand -hex 32`), `auth_service_login_event_hmac_key` (at least 32 characters, e.g. `openssl rand -base64 48`) |
+| auth-service keys | `59_app_services.yml` → `apps/homelab-auth-secrets` | `data-service-client-secret` (`{noop}<value>`, env `DATA_SERVICE_CLIENT_SECRET`), `login-event-hmac-key` (env `LOGIN_EVENT_HMAC_KEY`) |
+| data-service key | `59_app_services.yml` → `apps/data-service-secrets` | `auth-client-secret` (plain `<value>`, env `AUTH_CLIENT_SECRET`) |
+
+Both variables are optional. With neither, playbook 59 skips the three keys and prints a note. With only one, a key shorter than 32 characters, or a client secret that already starts with `{` (such as `{noop}`), the playbook fails. auth-service wires both env vars with `optional: true`, so it starts without them, keeps login-event capture off, answers 503 on `/api/v1/login-events` and logs one WARN. The auth-service PR (homelab-auth-service#94) can therefore merge before the keys exist.
+
+#### Enable order (NM-4)
+
+> **Restart Flux-managed pods with `kubectl delete pod`, not `rollout restart`.** This applies to every Deployment that a Flux Kustomization reconciles: auth-service, data-service, device-service and furchert-ch. It does not apply to Helm- or playbook-managed workloads. Flux's next server-side apply (interval 10 min) strips the `restartedAt` annotation that `rollout restart` sets. The new ReplicaSet can then be scaled back to 0 before its pod is Ready, while `rollout status` still reports success. Deleting the pod makes the ReplicaSet recreate it from the current template. A single-replica service is down for about 30 to 60 s. Check the pod age and the startup log, not `rollout status` alone.
+
+1. Owner: add both SOPS variables (`sops infra/inventory/group_vars/all.sops.yml`).
+2. Run playbook 59 **twice**. The first run adds the keys. The second run must report no change for the Secret tasks.
+3. Restart auth-service by deleting its pod (see the note above), so the new pod reads the new env vars. On startup it seeds the `data-service` client and logs `Login-event outbox enabled`.
+4. Merge the data-service PR (homelab-data-service#17), then restart data-service if its image rollout does not follow right away (`AUTH_CLIENT_SECRET` is read at pod start).
+5. Merge the furchert-ch PR (furchert-ch#64).
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret tasks
+kubectl -n apps get secret homelab-auth-secrets -o json | jq '.data | keys'
+# expect data-service-client-secret and login-event-hmac-key next to the existing keys
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect auth-client-secret next to the existing keys
+kubectl -n apps delete pod -l app=auth-service
+kubectl -n apps rollout status deploy/auth-service
+kubectl -n apps get pods -l app=auth-service          # the pod age must be new
+kubectl -n apps logs deploy/auth-service | grep -i 'login-event'
+# expect "Login-event outbox enabled (consumer client 'data-service')"; a WARN "disabled" names the missing variable
+```
+
+**Turning NM-4 off.** Removing the two SOPS variables does not remove the keys: playbook 59 then skips the NM-4 tasks, and its other Secret tasks patch the Secrets without deleting unknown keys. Remove the keys by hand, then restart both services:
+
+```bash
+kubectl -n apps patch secret homelab-auth-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/data-service-client-secret"},{"op":"remove","path":"/data/login-event-hmac-key"}]'
+kubectl -n apps patch secret data-service-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/auth-client-secret"}]'
+kubectl -n apps delete pod -l app=auth-service
+kubectl -n apps delete pod -l app=data-service
+```
+
+auth-service then logs the "disabled" WARN and answers 503. The seeded `data-service` row in `oauth2_registered_client` stays until it is deleted there.
+
+**After an auth-service DB restore.** Outbox ids can restart below data-service's cursor, so new login events would be skipped. With the owner's go, reset the cursor. The replay is absorbed by `event_id`:
+
+```bash
+kubectl -n apps exec postgresql-0 -- psql -U postgres -d data_service \
+  -c "UPDATE netmon.collector_state SET cursor = NULL WHERE collector = 'login-events'"
+```
+
+**Rotation.** `auth_service_login_event_hmac_key`: rotating it breaks HMAC continuity for login events already stored in data-service, so avoid it. `auth_service_data_service_client_secret`: auth-service seeds a client only once and never updates it, so a new SOPS value plus playbook 59 is not enough. Also update the `data-service` row in `oauth2_registered_client` (see homelab-auth-service `INTERFACES.md` §6), then restart auth-service and data-service.
+
+### NM-1 follow-up: AbuseIPDB key (optional)
+
+The `reputation` collector in data-service checks suspicious public IPs against AbuseIPDB (`docs/060-network-monitoring.md` §4.5). It stays off until the key exists. With the key, it runs every 30 min at :00 and :30. It checks at most 10 IPs per run and 200 per UTC day, which is well under the free plan's 1 000 checks per day.
+
+| Piece | Where | Names |
+|-------|-------|-------|
+| SOPS variable (owner, optional) | `infra/inventory/group_vars/all.sops.yml` | `data_service_abuseipdb_key` |
+| data-service key | `59_app_services.yml` → `apps/data-service-secrets` | `abuseipdb-api-key` (env `ABUSEIPDB_API_KEY`) |
+
+Without the variable, playbook 59 skips the key and prints a note. If the variable is set but empty, the playbook fails.
+
+#### Enable order
+
+1. Owner: create a free account at abuseipdb.com, then create an API key (Account → API).
+2. Owner: `sops infra/inventory/group_vars/all.sops.yml` and add `data_service_abuseipdb_key: "<key>"`.
+3. Commit the encrypted file on a branch, open a PR and merge it.
+4. Run playbook 59 **twice**. The first run adds the key. The second run must report no change for the Secret tasks.
+5. Restart data-service by deleting its pod (see the Flux note in "Enable order (NM-4)"). `ABUSEIPDB_API_KEY` is read at pod start, and `rollout restart` is reverted by Flux.
+
+```bash
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml   # second run: no change for the Secret tasks
+kubectl -n apps get secret data-service-secrets -o json | jq '.data | keys'
+# expect abuseipdb-api-key next to the existing keys
+kubectl -n apps delete pod -l app=data-service
+kubectl -n apps get pods -l app=data-service          # the pod age must be new
+```
+
+#### Verify
+
+After the next :00 or :30 run:
+- The Prometheus series `netmon_collector_last_success_timestamp_seconds{collector="reputation"}` exists. data-service registers it only when the key is set, so it is NaN until the first success.
+- `GET /api/netmon/status` lists `reputation` with `enabled: true` and without a `credentials` error. You can see this in furchert-ch `/dashboard/network`.
+
+A run with no candidate IPs also counts as a success. A `credentials` error means AbuseIPDB rejected the key.
+
+**Turning it off.** Removing the SOPS variable does not remove the key, because playbook 59 then only skips it. Remove the key by hand and restart data-service:
+
+```bash
+kubectl -n apps patch secret data-service-secrets --type=json \
+  -p='[{"op":"remove","path":"/data/abuseipdb-api-key"}]'
+kubectl -n apps delete pod -l app=data-service
+```
+
+The new pod exports no `reputation` gauge, so `NetmonCollectorStale` does not fire for it.
+
+---
+
+### Network monitoring: node LAN metrics (NM-3)
+
+Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the apt package `conntrack`, the Python 3 stdlib script `/usr/local/sbin/homelab-netmon-collect` and `homelab-netmon.service` (oneshot, root) + `homelab-netmon.timer` (every minute at :05). Each run writes `/var/lib/node_exporter/textfile_collector/homelab_netmon.prom` atomically; node-exporter exposes it on `:9100`, Prometheus keeps it 14 d as transport, and data-service snapshots it into `netmon` (docs/060 §4.6). Contract (names, labels, bucket semantics, cardinality cap): `docs/060-network-monitoring.md` §5.
+
+| Metric | Meaning |
+|--------|---------|
+| `homelab_lan_connections{node,dport,src_ip,state}` | current conntrack TCP entries to ports 1883, 22, 8123, 6443, 10250 (the node's own outbound flows excluded) |
+| `homelab_ufw_blocks_bucket{node,src_ip,dport,proto}` | `[UFW BLOCK]` kernel log lines in the last completed 15-min bucket — a lower bound, UFW logging is rate-limited |
+| `homelab_sshd_auth_bucket{node,src_ip,outcome}` | sshd `accepted` / `failed` / `invalid_user` in the same bucket (disjoint; `failed` is a lower bound); usernames are never emitted |
+| `homelab_netmon_bucket_end_timestamp_seconds{node}` | end (exclusive) of the bucket the two `*_bucket` gauges describe |
+| `homelab_netmon_last_success_timestamp_seconds{node}` | last successful run → alert `NetmonNodeScriptStale` (> 10 min, warning) |
+| `homelab_netmon_truncated_series{node,metric}` | series folded into `src_ip="other"` by the cap `netmon_node_max_series` (200) → alert `NetmonSeriesTruncated` (info) |
+
+**Dependency: homelab PR #109.** node-exporter's `--collector.textfile.directory` + hostPath (kube-prometheus-stack values) come from #109; merge #109 first. The textfile directory itself is created by this role and by #109's storage role with identical attributes, so the file is written even before #109 — it is just not scraped yet. Conntrack data is IPv4 only. The alert rules sit in `additionalPrometheusRulesMap.homelab-netmon-node` and need `41_monitoring.yml`.
+
+#### Rollout
+
+```bash
+# 1. After #109 (storage role + 41_monitoring.yml) and this PR are merged.
+#    One node first; --diff is safe (no secrets in these templates).
+#    Off-LAN: prefix each command with ANSIBLE_SSH_ARGS=… (see "Off-LAN kubectl / Ansible Access").
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node
+ansible-playbook infra/playbooks/10_base.yml --tags netmon_node          # all nodes
+ansible-playbook infra/playbooks/10_base.yml --tags netmon_node          # 2nd run: changed=0
+
+# 2. Alert rules (homelab-netmon-node PrometheusRule)
+ansible-playbook infra/playbooks/41_monitoring.yml
+```
+
+#### Verify
+
+```bash
+ssh ansible@<node-ip> "systemctl list-timers homelab-netmon.timer --all"
+ssh ansible@<node-ip> "sudo systemd-analyze verify /etc/systemd/system/homelab-netmon.service"
+ssh ansible@<node-ip> "sudo systemctl start homelab-netmon.service; systemctl status homelab-netmon.service --no-pager | head -5"
+ssh ansible@<node-ip> "cat /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
+curl -s http://<node-ip>:9100/metrics | grep '^homelab_'          # from the LAN (UFW allows 9100)
+curl -s http://<node-ip>:9100/metrics | grep '^node_textfile_scrape_error'   # expect 0
+# sshd really logs under unit "ssh" (docs/060 §12 unverified item)
+ssh ansible@<node-ip> "sudo journalctl -u ssh --since -1h -o cat | grep -c -E '^(Accepted|Failed|Invalid user)'"
+kubectl -n monitoring get prometheusrule | grep homelab-netmon-node
+```
+
+Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(lan_connections|ufw_blocks_bucket|sshd_auth_bucket)"})`). Tunnelled SSH (`ssh.furchert.ch`) shows up with the cloudflared pod or node IP as source, not the real client.
+
+#### Troubleshooting
+
+- **`NetmonNodeScriptStale`**: `journalctl -u homelab-netmon -n 20` on the node. `CalledProcessError` = conntrack, ip or journalctl failed; `FileNotFoundError` = textfile directory missing (re-run `10_base.yml --tags netmon_node`).
+- **Metric has `exported_node` instead of `node`**: would mean the node-exporter ServiceMonitor stopped honouring labels (`honorLabels: true` in chart 69.3.1); data-service's queries rely on `node`.
+- **Unit tests** (stdlib only, run before changing the script): `python3 -m unittest discover -s infra/roles/netmon_node/tests -v`.
+- **`nf_conntrack_acct`** stays at the kernel default; `netmon_node_conntrack_acct: true` is reserved for the NM-2 fallback (docs/060 §5.5/§6.6).
 
 ---
 
@@ -951,8 +1759,8 @@ A mosquitto restart briefly drops device-service's MQTT connection. After any mo
 kubectl -n apps logs deploy/device-service --since=5m | grep -i mqtt
 ```
 
-If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps rollout restart
-deploy/device-service`, then re-check the logs.
+If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps delete pod
+-l app=device-service` (Flux undoes `rollout restart`, see "Enable order (NM-4)"), then re-check the logs.
 
 #### Restore paths
 
@@ -1237,6 +2045,7 @@ flux get image update -n flux-system
 ```bash
 flux reconcile kustomization device-service -n flux-system --with-source
 flux reconcile kustomization auth-service -n flux-system --with-source
+flux reconcile kustomization data-service -n flux-system --with-source
 ```
 
 #### Emergency Pin/Unpin
@@ -1274,6 +2083,11 @@ Common issues:
 ```bash
 # Last run (systemd journal on raspi5)
 ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"
+
+# Prometheus metrics written by the last run (#92) — exit code, duration, last success
+ssh raspi5 "cat /var/lib/node_exporter/textfile_collector/homelab-backup.prom"
+# In Prometheus: homelab_backup_exit_code / homelab_backup_last_success_timestamp_seconds
+# Alerts: ResticBackupFailed, ResticBackupStale — see "Backup alerting (#92)" above
 
 # List snapshots
 ssh raspi5 "sudo restic snapshots \
@@ -1657,13 +2471,15 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify all pods Running | Daily | `kubectl get pods -A` |
 | Check node resource usage | Daily | `kubectl top nodes` |
 | Verify Longhorn volume health | Daily | `kubectl get volumes -n longhorn-system` |
-| Check backup status | Daily | `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
+| Check backup status | Daily | Primarily automatic since #92 — `ResticBackupFailed` / `ResticBackupStale` / `LonghornRecurringJob*` alert to Discord. Manual cross-check: `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
-| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup metrics-filesystem-trim` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify the metrics-group trim is still working | Weekly | `kubectl -n longhorn-system get volumes.longhorn.io <prometheus-volume> -o jsonpath='{.status.actualSize}'` (flat, not trending towards 40 G) + `kubectl -n longhorn-system logs <latest metrics-filesystem-trim pod>` showing `Finished recurring filesystem trim` — every failure mode of the trim is silent; alerting is tracked in #92 |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
+| Check app-data dump freshness | Monthly | `ls -lt ~/informatik/homelab/backups/` on the Mac — **not alerted** (the Mac is not a cluster node, see "Backup alerting (#92)") |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
 | Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |
@@ -1677,6 +2493,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 |----------|---------|---------|------------|
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, MacBook scheduled reboot (#102) | 3-5 min | Yes |
+| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
@@ -1686,7 +2503,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `52_n8n.yml` | n8n deployment | 2-3 min | Yes |
 | `53_litellm.yml` | LiteLLM deployment | 3-5 min | Yes |
 | `54_club_assistant.yml` | Open WebUI (Club Assistant) deployment + DB provisioning | 3–5 min | Yes |
-| `59_app_services.yml` | App secrets and bootstrap | 2-3 min | Yes |
+| `59_app_services.yml` | App secrets, per-app DBs (litellm, data_service) and bootstrap | 2-3 min | Yes |
 
 ---
 

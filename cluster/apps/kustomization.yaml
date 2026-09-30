@@ -4,3 +4,4 @@ resources:
   - device-service
   - auth-service
   - furchert-ch
+  - data-service

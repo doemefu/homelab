@@ -30,7 +30,7 @@ Follow this loop for **every change** to this repository:
 | k3s installation / configuration | `infra/playbooks/20_k3s.yml`, `infra/roles/k3s/` | `20_k3s.yml` |
 | k3s version pinning | `infra/roles/k3s/defaults/main.yml` (`k3s_version`) | `20_k3s.yml` |
 | Longhorn storage | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` | `30_longhorn.yml` |
-| Longhorn recurring snapshot schedule/retention | `infra/playbooks/30_longhorn.yml` (`daily-snapshot` RecurringJob task) | `30_longhorn.yml` |
+| Longhorn recurring snapshot/trim schedule and retention | `infra/playbooks/30_longhorn.yml` (the `daily-snapshot`, `metrics-snapshot-cleanup` and `metrics-filesystem-trim` RecurringJob tasks) | `30_longhorn.yml` |
 | Longhorn recurring snapshot per-volume exclusions (PVC labels) | the playbook owning the PVC — today `infra/playbooks/41_monitoring.yml` (Prometheus PVC) | `41_monitoring.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
 | App-data backup script (components, retention, verification) | `scripts/backup-app-data.sh` | none (run the script) |
@@ -46,7 +46,7 @@ Follow this loop for **every change** to this repository:
 | LiteLLM runtime | `infra/playbooks/53_litellm.yml`, `cluster/apps/litellm/` | `53_litellm.yml` |
 | Open WebUI / Club Assistant runtime | `infra/playbooks/54_club_assistant.yml`, `cluster/apps/open-webui/` | `54_club_assistant.yml` |
 | App secrets / DB bootstrap | `infra/playbooks/59_app_services.yml` | `59_app_services.yml` |
-| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
+| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch,data-service}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
 | Node inventory / IPs | `infra/inventory/hosts.yml` | - |
 | Common variables (non-secret) | `infra/inventory/group_vars/all.yml` | - |
 | Secrets (SOPS) | `infra/inventory/group_vars/all.sops.yml` | - |
@@ -72,11 +72,12 @@ ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collec
 # Note: kubernetes.core.helm requires Helm <4.0.0
 brew install helm@3 kubectl
 
-# helm-diff plugin (eliminates idempotency warnings)
+# helm-diff plugin, pinned. Without it kubernetes.core.helm warns and falls back to a values comparison,
+# which reports the InfluxDB task in 50_apps_infra.yml as "changed" on every run (homelab#66)
 # Intel Mac:
-/usr/local/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff
+/usr/local/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff --version v3.15.13
 # Apple Silicon:
-/opt/homebrew/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff
+/opt/homebrew/opt/helm@3/bin/helm plugin install https://github.com/databus23/helm-diff --version v3.15.13
 
 # Secrets + GitOps CLI
 brew install sops age fluxcd/tap/flux
@@ -252,15 +253,15 @@ unimplemented), so these bumps are manual:
    real run.
 
 ### Helm Chart Version Tracking (Automated Freshness Check)
-- Container images: Pinned tags for every image; the 8 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch) stay tag-pinned via `ImagePolicy`/Flux image automation instead
+- Container images: Pinned tags for every image; the 9 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch, data-service) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
 - GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
 - CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction
 
 ### Digest-Pinned Platform Images
 
-The 8 platform images (open-webui, litellm, n8n, cloudflared, pgvector,
-postgres-exporter, mosquitto, mosquitto-exporter) are pinned by **tag
+The 9 platform images (open-webui, litellm, n8n, cloudflared, pgvector,
+postgres-exporter, mosquitto, mosquitto-exporter, coroot-node-agent) are pinned by **tag
 and digest** (`repo:tag@sha256:...`), not tag alone — a tag can be
 repointed upstream/registry-side without changing what's in git, but a
 digest can't. Each pin's comment records the multi-arch **index**
@@ -271,6 +272,8 @@ line's index digest is the actual source of truth).
 
 **Locations:**
 - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml` — `image:` field
+- `cluster/monitoring/coroot-node-agent/daemonset.yaml` — `image:` field (in the
+  CI kubeconform/conftest loops like the three above)
 - `cluster/values/cloudflared.yaml` — `image.tag` (see that file's own
   comment for why the digest lives in `tag` rather than a dedicated field)
 - `infra/playbooks/50_apps_infra.yml` — `image:` field for pgvector,
@@ -361,7 +364,7 @@ rationale.
 
 ### Standard App Ownership
 
-- **Flux-managed**: `auth-service`, `device-service`, `furchert-ch`
+- **Flux-managed**: `auth-service`, `device-service`, `furchert-ch`, `data-service`
 - **Ansible-managed**: `n8n`, `litellm`, `homeassistant`, `open-webui` (Club Assistant), PostgreSQL, InfluxDB, Mosquitto
 - **Platform-managed**: cert-manager, cloudflared, Traefik, Longhorn, kube-prometheus-stack
 
@@ -679,7 +682,7 @@ ansible-lint infra/
 
 # Kubernetes schema validation
 brew install kustomize kubeconform
-for d in cluster/apps/auth-service cluster/apps/device-service \
+for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
          cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
@@ -691,7 +694,7 @@ done
 # Cluster policies — CI evaluates each per-app overlay with --all-namespaces
 brew install conftest
 conftest verify --policy policy/kubernetes/
-for d in cluster/apps/auth-service cluster/apps/device-service \
+for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
          cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -

@@ -18,6 +18,21 @@
   run_once: true
   vars:
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    # coroot-node-agent spike gate (NM-2, #118): nodes listed here get the label
+    # homelab.furchert.ch/coroot-node-agent=enabled, every other node loses it, and the
+    # DaemonSet schedules only on labelled nodes. Empty = the DaemonSet exists but runs no pod.
+    # This list is the source of truth: nodes not listed lose the label on the next run.
+    # raspi5 + mba1 = the owner-approved spike nodes (2026-09-24); mba2 (t2 kernel 6.19, no BTF)
+    # joined on 2026-09-24 after their measurements (owner go, #118). raspi4 (4 GB RAM) joined on
+    # 2026-09-25 after 12 h of mba2 observation, so the gate covers all four nodes. Stop all agents with
+    # -e '{"coroot_node_agent_nodes": []}'. Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
+    coroot_node_agent_nodes:
+      - raspi5
+      - mba1
+      - mba2
+      - raspi4
+    coroot_node_agent_label: homelab.furchert.ch/coroot-node-agent
+    coroot_node_agent_dir: "{{ playbook_dir }}/../../cluster/monitoring/coroot-node-agent"
 
   tasks:
     - name: Prüfen dass alertmanager_discord_webhook_url gesetzt ist
@@ -159,7 +174,8 @@
     # volume size and filled raspi4 (DiskPressure 2026-09-11). Labelling the
     # PVC as recurring-job "source" makes Longhorn sync the PVC's recurring-job
     # labels to the Volume, where they override the auto-added `default` label;
-    # group `metrics` only carries the snapshot-cleanup job defined in 30.
+    # group `metrics` takes no snapshots at all: it carries the
+    # snapshot-cleanup and filesystem-trim jobs defined in 30.
     # The PVC is created by the Prometheus Operator after the Helm release is
     # up, hence the wait (60 × 10 s covers a fresh cluster). In --check mode on
     # a fresh cluster this wait times out after about 10 minutes (60 × 10 s) —
@@ -220,4 +236,109 @@
             selector:
               matchLabels:
                 app.kubernetes.io/name: traefik
+      delegate_to: localhost
+
+    # data-service (docs/060-network-monitoring.md §7.1, NM-1 #116): Spring Boot actuator
+    # metrics on the Service port named `http` (8082), path /actuator/prometheus (served
+    # without auth, no IP labels). Lives here — not in 50_apps_infra.yml — because
+    # data-service is Flux-deployed (like traefik is not deployed by this playbook either)
+    # and because the homelab-netmon alert rules that depend on this scrape (job
+    # "data-service", incl. an absent() branch) are rolled out by the same run.
+    - name: Data-service ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: data-service
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: http
+                path: /actuator/prometheus
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - apps
+            selector:
+              matchLabels:
+                app: data-service
+      delegate_to: localhost
+
+    # --- coroot-node-agent (NM-2, #118; docs/060-network-monitoring.md §6) ---
+    # Plain manifests in cluster/monitoring/coroot-node-agent/, applied file by file like the
+    # Ansible-managed apps (52/53/54). Its alert rules live in
+    # cluster/values/kube-prometheus-stack.yaml (additionalPrometheusRulesMap.homelab-netmon-egress)
+    # and ship with the Helm release above. Runs after the Helm release because the
+    # ServiceMonitor CRD comes with kube-prometheus-stack.
+    - name: Coroot-node-agent — read cluster nodes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Node
+      register: coroot_node_agent_node_info
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — assert the gate list names existing nodes
+      ansible.builtin.assert:
+        that:
+          - coroot_node_agent_nodes | difference(coroot_node_agent_node_info.resources | map(attribute='metadata.name') | list) | length == 0
+        fail_msg: >-
+          coroot_node_agent_nodes contains unknown node(s):
+          {{ coroot_node_agent_nodes | difference(coroot_node_agent_node_info.resources | map(attribute='metadata.name') | list) }}
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — label gated nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: v1
+        kind: Node
+        name: "{{ item.metadata.name }}"
+        definition:
+          metadata:
+            labels:
+              # literal key (must equal coroot_node_agent_label and the DaemonSet nodeSelector)
+              homelab.furchert.ch/coroot-node-agent: "enabled"
+      loop: "{{ coroot_node_agent_node_info.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - item.metadata.name in coroot_node_agent_nodes
+        - (item.metadata.labels | default({}))[coroot_node_agent_label] | default('') != 'enabled'
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — remove the label from nodes outside the gate list
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: v1
+        kind: Node
+        name: "{{ item.metadata.name }}"
+        definition:
+          metadata:
+            labels:
+              # null = strategic-merge delete of the label
+              homelab.furchert.ch/coroot-node-agent: null
+      loop: "{{ coroot_node_agent_node_info.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - item.metadata.name not in coroot_node_agent_nodes
+        - coroot_node_agent_label in (item.metadata.labels | default({}))
+      delegate_to: localhost
+
+    - name: Coroot-node-agent — apply manifests
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        src: "{{ coroot_node_agent_dir }}/{{ item }}"
+      loop:
+        - networkpolicy.yaml
+        - service.yaml
+        - servicemonitor.yaml
+        - daemonset.yaml
       delegate_to: localhost

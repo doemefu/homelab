@@ -7,6 +7,11 @@
     group: root
     mode: "0755"
 
+- name: Remove the manual etcd health-check drop-in from the homelab#129 incident (now applied via the systemd unit)
+  ansible.builtin.file:
+    path: "{{ k3s_kubeconfig_dir }}/config.yaml.d/90-incident-129-etcd-healthcheck.yaml"
+    state: absent
+
 - name: K3s Server Systemd-Service anlegen
   ansible.builtin.template:
     src: k3s-server.service.j2

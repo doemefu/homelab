@@ -14,7 +14,9 @@ ExecStart=/usr/local/bin/k3s server \
   --write-kubeconfig-mode=644 \
   --tls-san={{ ansible_host }} \
   --node-ip={{ ansible_host }} \
-  --flannel-backend=vxlan
+  --flannel-backend=vxlan \
+  --kube-apiserver-arg=etcd-healthcheck-timeout={{ k3s_apiserver_etcd_healthcheck_timeout }} \
+  --kube-apiserver-arg=etcd-readycheck-timeout={{ k3s_apiserver_etcd_readycheck_timeout }}
 KillMode=process
 Delegate=yes
 LimitNOFILE=1048576
