@@ -87,8 +87,9 @@ ansible-playbook infra/playbooks/40_platform.yml
 ### Post-Deployment Setup
 
 ```bash
-# Enable Flux GitOps for auth-service, device-service, furchert-ch and data-service
-# (data-service first needs its deploy key + DB/Secret — see "data-service (Flux, NM-0 onboarding)")
+# Enable Flux GitOps for auth-service, device-service, furchert-ch, data-service and mcp-hub
+# (data-service first needs its deploy key + DB/Secret — see "data-service (Flux, NM-0 onboarding)";
+#  mcp-hub its deploy key + Secret — see "mcp-hub (Flux, #170 onboarding)")
 kubectl apply -f cluster/flux-system/apps-sync.yaml
 
 # Verify cluster health
@@ -127,7 +128,7 @@ kubectl get ns
 | `platform` | cert-manager (3x), cloudflared | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
 | `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-*, coroot-node-agent-* (only on gated nodes — see "coroot-node-agent (NM-2)") | Running |
-| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, data-service-*, n8n-*, litellm-*, open-webui-* | Running |
+| `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, data-service-*, mcp-hub-*, n8n-*, litellm-*, open-webui-* | Running |
 | `homeassistant` | home-assistant-0 | Running |
 | `flux-system` | source-controller, kustomize-controller, helm-controller, notification-controller, image-reflector-controller, image-automation-controller | Running |
 
@@ -580,6 +581,8 @@ kubectl -n platform logs -l app=cloudflared --tail=50
 1. Edit `infra/playbooks/40_platform.yml`, add to `ingress` list before `http_status:404`
 2. Re-run: `ansible-playbook infra/playbooks/40_platform.yml`
 3. Create DNS CNAME in Cloudflare Dashboard
+
+Worked example: `mcp.furchert.ch` in "mcp-hub (Flux, #170 onboarding)".
 
 #### Restart Tunnel Pod
 
@@ -1538,6 +1541,430 @@ Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(
 
 ---
 
+### mcp-hub (Flux, #170 onboarding)
+
+`mcp-hub` gives Claude (claude.ai custom connector) read-only access to mail and calendars through one endpoint, reachable at `https://mcp.furchert.ch/mcp` once the tunnel route (second PR of #177) is applied. It is Flux-managed like data-service (`cluster/apps/mcp-hub/`), reads its account registry, provider credentials and subject allowlist from the Secret `mcp-hub-secrets` (mounted as files, created by `59_app_services.yml`), and validates access tokens that auth-service issues to the client `claude-mcp-hub`. Contract: `docs/080-mcp-hub.md` (§4.6 incident procedure, §4.7 edge, §7.1 variables); authorization decision: [`docs/adr/0003-mcp-hub-authorization.md`](docs/adr/0003-mcp-hub-authorization.md). Run every command from the repository root. Every step that changes the cluster, Cloudflare or SOPS is an owner action.
+
+#### Order (first rollout, spec 080 §11.1 WP7)
+
+The go-live has two stages. **Stage a** uses the first hub image, which offers only `list_accounts`: it proves the login, the token, the kill switch and the incident drill in production, with no provider credential in the cluster: the `icloud` registry entry is switched off (`enabled: false`) and `mcp_hub_credentials: {}`, so `icloud` shows `disabled` (`unknown` is reserved for enabled accounts whose adapter or check has not run yet). **Stage b** follows once the mail and calendar tools have shipped: it switches the `icloud` entry on and adds its credentials (step 13). Rolling back at any stage: once auth-service has seeded the `claude-mcp-hub` client (step 5), a revert of the auth-service change, an older auth-service image or a removed or renamed client entry is allowed only after "Disable and remove the `claude-mcp-hub` client" ("mcp-hub incident runbook").
+
+1. `homelab-mcp-hub` bootstrap merged: `k8s/` exists on `main`, CI pushed a first image `ghcr.io/doemefu/homelab-mcp-hub:main-…`.
+2. Owner prerequisites (a)–(f) below — the SOPS values **before** step 3.
+3. The platform PR of this repository merged (Flux bundle, playbook tasks, this runbook) — only after the auth-service change (homelab-auth-service#107) and the device-service gate tests (homelab-device-service#88) are merged with their gates green, so the client is never seeded before the barrier is in place (spec 080 D54); local checkout on `main` (step (g)).
+4. Playbook 59, twice (step (h)).
+5. auth-service with the `claude-mcp-hub` client deployed, then its pod deleted so it reads the new keys and seeds the client (step (i)).
+6. Flux reconciles mcp-hub; the pod is Ready (step (j)). Until image automation has committed the first real tag, the pod shows `ImagePullBackOff` on the never-built placeholder tag — expected, see "Troubleshooting" below.
+7. Pre-go-live allowlist check (step (k)).
+8. Edge rate-limit rule (below, "Cloudflare rules") — before the first production login.
+9. The tunnel-route PR of this repository merged (the last merge of the rollout), then playbook 40 + DNS record (step (l)); zone checks; unauthenticated check (step (m)).
+10. Stage a: deployed-image check (step (o)) — both services run images built after their gate-test merges; then add the connector in claude.ai; the first login shows the consent page with both scopes; ask Claude to list the accounts (`icloud` shows `disabled`).
+11. WAF allow rule (below), then one more `list_accounts` call.
+12. Incident drill ("mcp-hub incident runbook").
+13. Stage b (after the hub release with the mail and calendar tools is running): in the same SOPS edit set `enabled: true` on the `icloud` entry of `mcp_hub_accounts` and add `icloud-username` and `icloud-app-password` to `mcp_hub_credentials` (step (f)), run playbook 59 (step (h)), then restart the hub (step (n)) — the registry changed, and the hub reads it only at start-up. No route or rule change. `list_accounts` shows `icloud` as `ok` or `unknown`, no longer `disabled`. Ask for tomorrow's events and for unread iCloud mail.
+
+A pod that starts before step 4 waits in `ContainerCreating` (Secret volume missing) and starts by itself once the Secret exists.
+
+**Which Secret changes need a hub restart.** The kubelet refreshes every key of `mcp-hub-secrets` in the running pod within about 1–2 min, but the hub uses them differently:
+
+| Key | Read by the hub | After a change |
+|-----|-----------------|----------------|
+| `accounts.json` (registry) | once, at start-up | **delete the hub pod** (step (n)) — every registry change: stage b, a new account (`gmail` #172, `outlook` #171, `uzh` #173), `enabled` on or off |
+| `allowed-subjects` | re-read at least every 60 s | nothing (kill switch L2 adds a pod delete only to be faster) |
+| credential keys (`icloud-username`, …) | when a provider connection opens; presence checked per `list_accounts` call | nothing, as long as the key names in `accounts.json` stay the same; a renamed or new key is a registry change |
+
+#### Owner prerequisites
+
+```bash
+# (a) Flux deploy key with WRITE access (image automation pushes tag bumps to main).
+flux create secret git mcp-hub-flux-auth -n flux-system \
+  --url=ssh://git@github.com/doemefu/homelab-mcp-hub \
+  --ssh-key-algorithm=ed25519
+kubectl -n flux-system get secret mcp-hub-flux-auth \
+  -o jsonpath='{.data.identity\.pub}' | base64 -d > /tmp/flux-mcp-hub.pub
+gh repo deploy-key add /tmp/flux-mcp-hub.pub -R doemefu/homelab-mcp-hub \
+  --title flux-mcp-hub --allow-write
+rm /tmp/flux-mcp-hub.pub
+
+# (b) GHCR visibility: make the package public after the first push (the image holds no secrets):
+#     https://github.com/users/doemefu/packages/container/homelab-mcp-hub/settings
+#     -> Danger Zone -> Change visibility -> Public.
+gh api /users/doemefu/packages/container/homelab-mcp-hub --jq '.visibility'   # expect: public
+
+# (c) Branch ruleset on the hub repository (same as auth-service, whose main receives Flux image-update
+#     commits with this combination): pull request required, no force push, no deletion, automatic
+#     Copilot review, bypass = admin role only, no deploy-key bypass actor. Show it:
+gh api repos/doemefu/homelab-mcp-hub/rulesets --jq '.[].id' | while read -r id; do gh api "repos/doemefu/homelab-mcp-hub/rulesets/$id" --jq '{name, enforcement, bypass: [.bypass_actors[] | "\(.actor_type):\(.actor_id)"], rules: [.rules[].type]}'; done
+# expect exactly one ruleset: name "main", enforcement "active", bypass only a RepositoryRole entry (admin),
+#     rules deletion, non_fast_forward, pull_request and the Copilot review rule.
+#     The proof that Flux can push is the first Flux image-update commit on the hub's main — checked in step (j).
+#     Required status checks and the CodeQL rule are added by you after the first build on main.
+
+# (d) Client secret for claude-mcp-hub (32 random bytes, hex). The plaintext is shown ONCE: store it in
+#     the password manager now; it is needed only when adding the connector in claude.ai. SOPS gets only
+#     the bcrypt hash (cost 10).
+MCP_HUB_CLIENT_SECRET="$(openssl rand -hex 32)"
+printf '%s\n' "$MCP_HUB_CLIENT_SECRET"
+MCP_HUB_CLIENT_SECRET_BCRYPT="{bcrypt}$(printf '%s' "$MCP_HUB_CLIENT_SECRET" | htpasswd -niBC 10 claude-mcp-hub | cut -d: -f2- | tr -d '\n')"
+printf '%s\n' "$MCP_HUB_CLIENT_SECRET_BCRYPT"   # -> auth_service_claude_mcp_hub_client_secret (in single quotes)
+unset MCP_HUB_CLIENT_SECRET MCP_HUB_CLIENT_SECRET_BCRYPT
+
+# (e) Your auth-service username exactly as stored (letter case matters for both allowlists):
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -tAc \
+  "SELECT username FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' ORDER BY username"
+
+# (f) SOPS: add the variables below, then save (sops re-encrypts on save).
+sops infra/inventory/group_vars/all.sops.yml
+```
+
+The playbooks read the working tree, so an uncommitted SOPS edit works for steps (h)–(n). Commit the re-encrypted file as `chore(sops): …` and bring it to `main` through a pull request, as for earlier SOPS changes; do not leave the commit unpushed on local `main`, or the `git pull --ff-only` of steps (g) and (l) stops.
+
+Variables for step (f). Set all three `mcp_hub_*` variables together (with none, playbook 59 skips the hub; with only some, it fails):
+
+| Variable | Value |
+|----------|-------|
+| `mcp_hub_accounts` | the registry below (no addresses, only key names). Stage a: `enabled: false` (as shown). Stage b: `enabled: true` |
+| `mcp_hub_credentials` | stage a: `{}` (the entry is off, `list_accounts` shows `icloud` as `disabled`). Stage b: `icloud-username` = the Apple mail name, `icloud-app-password` = an app-specific password created in the Apple Account settings (two-factor authentication required) |
+| `mcp_hub_allowed_subjects` | a list with the username from (e), for example written as a one-element YAML list; `[]` = nobody |
+| `auth_service_claude_mcp_hub_client_secret` | the `{bcrypt}…` line printed by (d), in single quotes |
+| `auth_service_claude_mcp_hub_allowed_users` | the username from (e) |
+
+```yaml
+mcp_hub_accounts:
+  version: 1
+  accounts:
+    - id: icloud
+      label: iCloud
+      provider: icloud
+      enabled: false        # stage a; set to true in stage b together with the credentials
+      capabilities: {mail: true, calendar: true}
+      mail: {protocol: imap, host: imap.mail.me.com, port: 993, username_ref: icloud-username, password_ref: icloud-app-password, inbox: INBOX}
+      calendar: {protocol: caldav, url: "https://caldav.icloud.com/", username_ref: icloud-username, password_ref: icloud-app-password, include_calendars: all}
+```
+
+Later stories add their entries and credential keys (`gmail` #172, `outlook` #171, `uzh` #173) — see `docs/080-mcp-hub.md` §8.2.
+
+#### Apply and verify
+
+```bash
+# (g) Playbooks run from a checkout that has pulled main (group_vars and the new tasks come from the checkout).
+git switch main && git pull --ff-only
+grep -n 'mcp-hub-secrets' infra/playbooks/59_app_services.yml   # must print the new task
+
+# (h) Playbook 59; the second run must report no change for the Secret tasks.
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+kubectl -n apps get secret mcp-hub-secrets --request-timeout=10s -o json | jq '.data | keys'
+# expect stage a: accounts.json, allowed-subjects; stage b additionally: icloud-app-password, icloud-username
+kubectl -n apps get secret homelab-auth-secrets --request-timeout=10s -o json | jq '.data | keys'
+# expect claude-mcp-hub-allowed-users and claude-mcp-hub-client-secret next to the existing keys
+
+# (i) Only after the auth-service release with the claude-mcp-hub client is running:
+kubectl -n apps delete pod -l app=auth-service
+kubectl -n apps get pods -l app=auth-service --request-timeout=10s   # the pod age must be new
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -tAc \
+  "SELECT client_id, left(client_secret, 12) FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub'"
+# expect one row: claude-mcp-hub|{bcrypt}$2y$
+
+# (j) Flux
+flux reconcile kustomization apps -n flux-system --with-source
+flux get sources git mcp-hub -n flux-system
+flux get image repository mcp-hub -n flux-system
+flux get image policy mcp-hub -n flux-system
+flux get kustomizations mcp-hub -n flux-system
+flux get image update mcp-hub -n flux-system        # READY True, last run pushed a commit (a rejected push shows here)
+gh api 'repos/doemefu/homelab-mcp-hub/commits?sha=main&per_page=20' --jq '[.[] | select(.commit.author.name == "Flux") | .commit.message][0]'
+# expect: chore: update mcp-hub image to ghcr.io/doemefu/homelab-mcp-hub:main-… (proof that the ruleset of (c) lets Flux push).
+#   null + a push error in the line above: add the deploy key as a bypass actor (GitHub -> homelab-mcp-hub -> Settings ->
+#   Rules -> Rulesets -> main -> Bypass list -> Add bypass -> Deploy keys), then run this step again.
+kubectl -n apps get deploy mcp-hub --request-timeout=10s -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+# expect a main-… tag other than main-20260928T000000 (the never-built placeholder; ImagePullBackOff until it is replaced)
+kubectl -n apps get pods -l app=mcp-hub --request-timeout=10s
+kubectl -n apps logs deploy/mcp-hub --tail=50 --request-timeout=10s
+
+# (k) Pre-go-live allowlist check (docs/080 §10.4): both allowlists hold exactly one entry, identical to each
+#     other and spelled exactly (letter case) like your username from step (e). Values are read from the
+#     Secrets and the users table; nothing is typed in.
+HUB_ALLOW="$(kubectl -n apps get secret mcp-hub-secrets --request-timeout=10s -o jsonpath='{.data.allowed-subjects}' | base64 -d)"
+AUTH_ALLOW="$(kubectl -n apps get secret homelab-auth-secrets --request-timeout=10s -o jsonpath='{.data.claude-mcp-hub-allowed-users}' | base64 -d | sed 's/^ *//;s/ *$//')"
+[ -n "$HUB_ALLOW" ] && [ "$(printf '%s\n' "$HUB_ALLOW" | wc -l | tr -d ' ')" = 1 ] && echo "hub allowlist: one entry" || echo "hub allowlist: NOT exactly one entry"
+[ "$HUB_ALLOW" = "$AUTH_ALLOW" ] && echo "allowlists match" || echo "allowlists DIFFER"
+kubectl -n apps exec -i postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -tA -v u="$HUB_ALLOW" <<'SQL'
+SELECT count(*) FROM users WHERE username = :'u' AND role = 'ADMIN' AND status = 'ACTIVE';
+SQL
+# expect 1: the entry is a stored active ADMIN username, exact spelling
+printf '%s\n' "$HUB_ALLOW"   # must be the line of step (e) that is your username
+unset HUB_ALLOW AUTH_ALLOW
+
+# (l) Tunnel route + DNS — after the tunnel-route PR is merged. Pull main again, check the route, run playbook 40.
+git switch main && git pull --ff-only
+grep -n 'mcp.furchert.ch' infra/playbooks/40_platform.yml
+ansible-playbook infra/playbooks/40_platform.yml
+kubectl -n platform logs -l app=cloudflared --tail=20 --request-timeout=10s
+```
+
+DNS record (Cloudflare dashboard → `furchert.ch` → DNS → Records → Add record): Type `CNAME`, Name `mcp`, Target: the same `….cfargotunnel.com` value as the existing `auth` record, Proxy status **Proxied**, TTL Auto. Do not add the hostname under Zero Trust → Tunnels → Public hostnames: playbook 40 replaces the whole tunnel configuration.
+
+```bash
+# (m) Unauthenticated check — BEFORE the WAF allow rule exists (afterwards it is blocked from outside):
+curl -sS -i -X POST https://mcp.furchert.ch/mcp | sed -n '1p;/^www-authenticate/Ip'
+# expect: HTTP/2 401 and a WWW-Authenticate line with resource_metadata=… and scope="mail:read calendar:read"
+curl -sS https://mcp.furchert.ch/.well-known/oauth-protected-resource/mcp
+# expect: {"resource":"https://mcp.furchert.ch/mcp","authorization_servers":["https://auth.furchert.ch"],…}
+```
+
+```bash
+# (n) Hub restart after every change of accounts.json (stage b and every later registry change), after playbook 59:
+kubectl -n apps delete pod -l app=mcp-hub
+n=0; until [ "$(kubectl -n apps get pods -l app=mcp-hub --request-timeout=10s -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}')" = "true" ] || [ $n -ge 36 ]; do n=$((n+1)); sleep 5; done
+kubectl -n apps get pods -l app=mcp-hub --request-timeout=10s
+# expect one pod, READY 1/1, a new AGE (the loop gives up after 3 min; if it did, read the log below)
+kubectl -n apps logs deploy/mcp-hub --tail=20 --request-timeout=10s
+```
+
+```bash
+# (o) Deployed-image check before the first login (docs/080 §4.5 "Production evidence", §10.4): the running
+#     auth-service and device-service images must be built after the merge of their gate tests.
+#     Image tags are main-YYYYMMDDTHHMMSS (UTC build time); merge times come from GitHub (UTC).
+AS_TAG="$(kubectl -n apps get deploy auth-service --request-timeout=10s -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*:main-//')"
+AS_MERGED="$(gh pr list -R doemefu/homelab-auth-service --head feat/107-mcp-hub-client --state merged --json mergedAt --jq '.[0].mergedAt' | tr -d ':-' | sed 's/Z$//')"
+DS_TAG="$(kubectl -n apps get deploy device-service --request-timeout=10s -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*:main-//')"
+DS_MERGED="$(gh pr list -R doemefu/homelab-device-service --head test/88-reject-hub-tokens --state merged --json mergedAt --jq '.[0].mergedAt' | tr -d ':-' | sed 's/Z$//')"
+printf 'auth-service   image %s  merged %s\n' "$AS_TAG" "$AS_MERGED"
+printf 'device-service image %s  merged %s\n' "$DS_TAG" "$DS_MERGED"
+[[ -n "$AS_MERGED" && "$AS_TAG" > "$AS_MERGED" ]] && echo "auth-service: OK" || echo "auth-service: NOT newer than the #107 merge - stop"
+[[ -n "$DS_MERGED" && "$DS_TAG" > "$DS_MERGED" ]] && echo "device-service: OK" || echo "device-service: NOT newer than the #88 merge - stop"
+kubectl -n apps get pods -l app=auth-service --request-timeout=10s -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}'
+kubectl -n apps get pods -l app=device-service --request-timeout=10s -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}'
+# expect: both "OK" lines, and the running pods show the same images as the Deployments
+unset AS_TAG AS_MERGED DS_TAG DS_MERGED
+```
+
+**Abort paths during the go-live** (docs/080 §11.1; after an abort the stage-a state is safe: `icloud` is disabled and no provider credential is in the cluster; every step is an owner action):
+
+- **Hub not Ready after the Flux bundle is applied** (step (j)): stop. The tunnel route is not merged yet, so nothing is exposed. Read `kubectl -n apps get pods -l app=mcp-hub --request-timeout=10s`, `kubectl -n apps logs deploy/mcp-hub --tail=50 --request-timeout=10s` and `flux get kustomizations mcp-hub -n flux-system`, fix the cause (Troubleshooting below), retry from step (j).
+- **Route applied, but a later check fails** (zone settings, the unauthenticated check (m), `invalid_target`, the rate-limit rule blocking the login): take the host off the internet — revert the tunnel-route pull request and run playbook 40 from an updated `main`, or delete the DNS record `mcp` in the Cloudflare dashboard (faster; the tunnel route alone then serves nothing). If a token was already issued, also run L2 step 1 ("mcp-hub incident runbook").
+
+```bash
+gh pr list -R doemefu/homelab --head feat/177-mcp-hub-tunnel-route --state merged --json number,mergeCommit --jq '.[0] | "\(.number) \(.mergeCommit.oid)"'
+# revert: open a revert pull request of that merge commit (GitHub -> the PR -> "Revert"), merge it with your go, then:
+git switch main && git pull --ff-only
+grep -c 'mcp.furchert.ch' infra/playbooks/40_platform.yml   # expect 0
+ansible-playbook infra/playbooks/40_platform.yml
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://mcp.furchert.ch/mcp   # expect 404 (catch-all) or a DNS error
+```
+
+- **First login fails:** if a token was issued (the hub log shows `sub` for the owner), run L2 step 1. A refused login ("access denied" at auth-service) → "Recovery: login refused for `claude-mcp-hub`". Any other failure → take the route off as above until the cause is found.
+- **WAF allow rule breaks the connection** (tool calls fail after step 11): dashboard `furchert.ch` → Security → WAF → Custom rules → `mcp-hub: only Anthropic egress` → Disable. The connector works without it; re-check Anthropic's published range before enabling it again.
+
+**Troubleshooting.** `ImagePullBackOff` on `main-20260928T000000` right after the first rollout: expected until image automation has committed the first real tag (step (j): package public (b), write deploy key (a), ruleset (c)). `CrashLoopBackOff` and a `startup_failed` line about the registry in the log: `accounts.json` passed the playbook checks but not the hub's schema (for example an unknown field or missing `capabilities`) — fix `mcp_hub_accounts` in SOPS, run playbook 59, then step (n).
+
+Backups need no change now; `mcp_hub` (a database added with #171) will be dumped by `scripts/backup-app-data.sh` automatically.
+
+#### Cloudflare rules (owner, dashboard; recreate from these settings)
+
+**Edge rate-limit rule on the login service** (docs/080 §4.7, D32) — create before the first production login; remove or relax once homelab-auth-service#104 lands. Dashboard: `furchert.ch` → Security → WAF → Rate limiting rules → Create rule. Action **Block**, never a challenge (Claude cannot solve one); never block the whole Anthropic range.
+
+| Setting | Pro plan or higher (preferred) | Free plan (fields limited to Path, period and block fixed at 10 s) |
+|---------|--------------------------------|---------------------------------------------------------------------|
+| Name | `auth-service: token and login` | `auth-service: token and login` |
+| Expression | `(http.host eq "auth.furchert.ch" and http.request.method eq "POST" and (http.request.uri.path eq "/oauth2/token" or http.request.uri.path eq "/login"))` | `(http.request.uri.path eq "/oauth2/token" or http.request.uri.path eq "/login")` |
+| Counting | Per IP | Per IP |
+| Rate | 30 requests per 1 minute | 5 requests per 10 seconds |
+| Block duration | 1 minute | 10 seconds |
+
+On a Free zone the rule also counts `GET /login` and `/login` on other hostnames of the zone; normal use (one token request per 10-minute token, one or two login requests per sign-in) stays far below 5 per 10 s.
+
+**WAF allow rule on `mcp.furchert.ch`** (docs/080 §4.7, D31) — after the first successful production connection and the §10.4 checks. First confirm on Anthropic's published IP page (`https://platform.claude.com/docs/en/api/ip-addresses`) that `160.79.104.0/21` is still the only outbound range. Dashboard: Security → WAF → Custom rules → Create rule:
+
+| Setting | Value |
+|---------|-------|
+| Name | `mcp-hub: only Anthropic egress` |
+| Expression | `(http.host eq "mcp.furchert.ch" and not ip.src in {160.79.104.0/21})` |
+| Action | Block |
+
+Then ask Claude to list the accounts once more (stage a); the tool call must still work. Not applied to `auth.furchert.ch`.
+
+### mcp-hub incident runbook — cutting access
+
+**Access is always cut on the homelab side.** Removing the connector in claude.ai sends no revocation and is not a lever; the refresh token held by claude.ai stays valid until L4 or L5. The `claude-mcp-hub` allowlist in auth-service is not a lever either: it covers new logins only. Source: `docs/080-mcp-hub.md` §4.6. Every lever below except L1 changes the cluster or the database and needs the owner's go. Off-LAN, run the `kubectl` lines through "One-shot kubectl over SSH" (the off-LAN form of L2 step 1 is given below).
+
+| # | Lever | Effect | Speed |
+|---|-------|--------|-------|
+| L1 | Cloudflare block rule on `mcp.furchert.ch` | nothing reaches the hub | seconds; works without cluster access |
+| L2 | Hub kill switch, two steps | every token gets 401 | ≤ 2 min after step 1 (the new pod starts with the empty list) |
+| L3 | Stop the hub | hub down | seconds |
+| L4 | Delete the client's authorizations | refresh fails; issued access tokens live ≤ 10 min | immediate for refresh |
+| L5 | Rotate the client secret | old secret useless | minutes |
+| L6 | Provider side (hub compromise suspected) | layer-2 credentials renewed | minutes to hours |
+| — | Disable and remove the `claude-mcp-hub` client (below) — mandatory before any auth-service rollback once the client is seeded | client gone; no token for the hub any more | minutes |
+
+**L1 — Cloudflare block.** Dashboard `furchert.ch` → Security → WAF → Custom rules → Create rule: name `mcp-hub: incident block`, expression `(http.host eq "mcp.furchert.ch")`, action Block, Deploy. One custom-rule slot of the zone's plan is kept free for this rule at all times — do not use it for anything else. Fallback only if the slot was used after all: edit the rule `mcp-hub: only Anthropic egress` and set its expression to `(http.host eq "mcp.furchert.ch")`. Undo: delete the incident rule, or restore the allow rule's expression from "Cloudflare rules".
+
+**L2 — Hub kill switch, two steps.** Step 1 alone is undone by the next playbook-59 run for any service; step 2 makes it persistent. Step 1 is two commands: empty the allowlist, then delete the hub pod, so the new pod starts with the empty list and refuses every token as soon as it is Ready (an empty or missing file means nobody). If the pod delete is forgotten, the running hub still picks up the empty file on its own (kubelet refresh plus the hub's re-read every 60 s), but that can take up to about 3 minutes.
+
+```bash
+# Step 1 — immediately (LAN):
+kubectl -n apps patch secret mcp-hub-secrets --type merge -p '{"stringData":{"allowed-subjects":""}}'
+kubectl -n apps delete pod -l app=mcp-hub
+# Step 1 — off-LAN, one shot over SSH (both commands):
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl -n apps patch secret mcp-hub-secrets --type merge -p "{\"stringData\":{\"allowed-subjects\":\"\"}}" && sudo k3s kubectl -n apps delete pod -l app=mcp-hub'
+# Confirm the new pod is Ready (repeat until one pod shows 1/1) and its file is empty:
+kubectl -n apps get pods -l app=mcp-hub --request-timeout=10s
+kubectl -n apps exec deploy/mcp-hub --request-timeout=10s -- wc -c /etc/mcp-hub/secrets/allowed-subjects   # expect: 0 …
+
+# Step 2 — then: set  mcp_hub_allowed_subjects: []  in SOPS.
+sops infra/inventory/group_vars/all.sops.yml
+```
+
+Re-enable: SOPS first (put the username back into `mcp_hub_allowed_subjects`), then `ansible-playbook infra/playbooks/59_app_services.yml`. No restart and no re-login is needed; access returns within about 3 minutes (kubelet refresh plus the 60 s re-read).
+
+**L3 — Stop the hub.** A plain scale is reverted by Flux, so suspend first:
+
+```bash
+flux suspend kustomization mcp-hub -n flux-system
+kubectl -n apps scale deploy/mcp-hub --replicas=0
+# undo: Flux restores the replica count from the hub repository
+flux resume kustomization mcp-hub -n flux-system
+```
+
+Optional drill for L3: after the suspend, wait at least 10 minutes (one `apps` reconcile), then `flux get kustomizations mcp-hub -n flux-system` must still show `SUSPENDED True`, which proves that the reconcile of the parent `apps` Kustomization does not undo the suspend; if it shows `False`, rely on L1 or L2 instead of L3.
+
+**L4 — Revoke the consents and authorizations of `claude-mcp-hub`** (`registered_client_id` holds the internal id, not the client id). auth-service stores consent in the database, so the consent rows are deleted first, then the authorizations, in one transaction (the block's own `BEGIN;` … `COMMIT;`; with `ON_ERROR_STOP=1` a failing statement aborts before `COMMIT`, so both or neither). The next refresh fails and claude.ai asks for a new login; access tokens already issued expire within 10 minutes. **Check that it worked:** the next login shows the consent page again.
+
+```bash
+kubectl -n apps exec -i postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+DELETE FROM oauth2_authorization_consent
+ WHERE registered_client_id = (SELECT id FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub');
+DELETE FROM oauth2_authorization
+ WHERE registered_client_id = (SELECT id FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub');
+COMMIT;
+SQL
+# expect BEGIN, two DELETE lines (first the consents, then the authorizations), COMMIT
+```
+
+(The SQL block is the binding L4 revocation block of the auth-service plan (§2 Context), copied verbatim — the amended spec 080 §4.6 L4 statement exactly as the auth-service gate test runs it — homelab-auth-service#107, `McpHubConsentPersistenceGateTest`; do not reword or reflow it.)
+
+Alternative: reset your auth-service password — this revokes all your authorizations, including other relying parties. When you stop using the hub for good, removing the connector is not enough: run L4.
+
+**L5 — Rotate the client secret.** The seeder never updates an existing client, so the database row and SOPS are both changed; otherwise a database restore or a reseed brings the old secret back. Run L4 first.
+
+```bash
+MCP_HUB_CLIENT_SECRET="$(openssl rand -hex 32)"
+printf '%s\n' "$MCP_HUB_CLIENT_SECRET"      # store in the password manager; needed when re-adding the connector
+MCP_HUB_CLIENT_SECRET_BCRYPT="{bcrypt}$(printf '%s' "$MCP_HUB_CLIENT_SECRET" | htpasswd -niBC 10 claude-mcp-hub | cut -d: -f2- | tr -d '\n')"
+printf "\\set h '%s'\nUPDATE oauth2_registered_client SET client_secret = :'h' WHERE client_id = 'claude-mcp-hub';\n" "$MCP_HUB_CLIENT_SECRET_BCRYPT" \
+  | kubectl -n apps exec -i postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -v ON_ERROR_STOP=1
+# expect: UPDATE 1
+printf '%s\n' "$MCP_HUB_CLIENT_SECRET_BCRYPT"  # -> SOPS auth_service_claude_mcp_hub_client_secret (single quotes)
+unset MCP_HUB_CLIENT_SECRET MCP_HUB_CLIENT_SECRET_BCRYPT
+sops infra/inventory/group_vars/all.sops.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+```
+
+Then remove the connector in claude.ai and add it again with the new secret (authentication settings cannot be edited in place).
+
+**L6 — Provider side** (only if a hub compromise is suspected; every layer-2 credential counts as exposed): revoke the `icloud` app-specific password in the Apple Account settings and the `gmail` app password in the Google Account settings; revoke the app consent and sessions of the Microsoft accounts (`outlook`, and `uzh` if it uses Graph); reset a published calendar address if one is used. Put new values into SOPS and run playbook 59 (same key names: no restart needed); for Microsoft accounts (from #171) run `kubectl -n apps exec -it deploy/mcp-hub -- mcp-hub login outlook` (docs/080 §7.3).
+
+**Recovery: login refused for `claude-mcp-hub`** (auth-service rejects the owner, for example an empty allowlist or a different letter case):
+
+```bash
+# 1. Correct auth_service_claude_mcp_hub_allowed_users (username exactly as printed by the query in onboarding step (e)).
+sops infra/inventory/group_vars/all.sops.yml
+# 2. Playbook 59 (from a checkout on main).
+ansible-playbook infra/playbooks/59_app_services.yml
+# 3. Restart auth-service so it reads the new value (a rollout restart would be reverted by Flux).
+kubectl -n apps delete pod -l app=auth-service
+```
+
+Then press "Connect" (or add the connector) again in claude.ai.
+
+**Disable and remove the `claude-mcp-hub` client** (required before any auth-service rollback). Once the client has been seeded in production, reverting the auth-service change that added it, deploying an older auth-service image, or removing or renaming its configuration entry is allowed only **after** the client has been disabled and removed with this procedure: a registered-client row without the code and configuration that shape its tokens keeps claude.ai's refresh token working and issues tokens without the audience binding and the owner-only check. Emptying or removing the client secret alone does **not** disable a client that has already been seeded. Every step needs the owner's go. Before the client was ever seeded (the check query at the end already returns `0`), no step is needed.
+
+Order: (1) cut the hub off with L2 step 1; (2) remove both SOPS variables of the client and run playbook 59; (3) remove the two keys from `homelab-auth-secrets` by hand — playbook 59 only skips them once the variables are gone and never deletes a key; (4) run the client-removal SQL; (5) check that the row is gone; (6) only then merge the auth-service revert or configuration change (in `homelab-auth-service`, not in this repository). The keys are removed **before** the SQL on purpose: auth-service seeds the client only at start-up and only while the secret is set, so a restart of auth-service between the two steps cannot create the client again. `mcp-hub-secrets` and the hub deployment are independent of this procedure; they can stay or be removed separately (L3).
+
+```bash
+# 1. L2 step 1 (LAN): empty the hub allowlist and restart the hub.
+kubectl -n apps patch secret mcp-hub-secrets --type merge -p '{"stringData":{"allowed-subjects":""}}'
+kubectl -n apps delete pod -l app=mcp-hub
+
+# 2. SOPS: delete the lines auth_service_claude_mcp_hub_client_secret and auth_service_claude_mcp_hub_allowed_users
+#    (both; with only one of them the play fails). Then playbook 59 from a checkout on main.
+sops infra/inventory/group_vars/all.sops.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+# expect the message "skipping the claude-mcp-hub keys in homelab-auth-secrets"
+
+# 3. Remove both keys from the Secret (JSON patch; the playbook leaves existing keys in place), then list the key names only.
+kubectl -n apps patch secret homelab-auth-secrets --type json -p '[{"op":"remove","path":"/data/claude-mcp-hub-client-secret"},{"op":"remove","path":"/data/claude-mcp-hub-allowed-users"}]'
+kubectl -n apps get secret homelab-auth-secrets --request-timeout=10s -o json | jq '.data | keys'
+# expect: neither claude-mcp-hub-client-secret nor claude-mcp-hub-allowed-users in the list
+
+# 4. Client-removal SQL (consents, authorizations, registered-client row; one transaction).
+kubectl -n apps exec -i postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+DELETE FROM oauth2_authorization_consent
+ WHERE registered_client_id = (SELECT id FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub');
+DELETE FROM oauth2_authorization
+ WHERE registered_client_id = (SELECT id FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub');
+DELETE FROM oauth2_registered_client
+ WHERE client_id = 'claude-mcp-hub';
+COMMIT;
+SQL
+# expect BEGIN, three DELETE lines (the last one DELETE 1), COMMIT
+
+# 5. Check: the client row is gone.
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -tAc \
+  "SELECT count(*) FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub'"
+# expect 0 — only now merge the auth-service revert or configuration change
+```
+
+Off-LAN, run steps 1 and 3–5 over SSH; step 2 (SOPS edit and playbook 59) runs as described in "Off-LAN kubectl / Ansible Access":
+
+```bash
+# 1. L2 step 1
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl -n apps patch secret mcp-hub-secrets --type merge -p "{\"stringData\":{\"allowed-subjects\":\"\"}}" && sudo k3s kubectl -n apps delete pod -l app=mcp-hub'
+# 3. Remove both keys, then list the key names only (values are not printed)
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl -n apps patch secret homelab-auth-secrets --type json -p "[{\"op\":\"remove\",\"path\":\"/data/claude-mcp-hub-client-secret\"},{\"op\":\"remove\",\"path\":\"/data/claude-mcp-hub-allowed-users\"}]"'
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl -n apps get secret homelab-auth-secrets -o json' | jq '.data | keys'
+# 4. Client-removal SQL (same block, read from stdin)
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl -n apps exec -i postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -v ON_ERROR_STOP=1' <<'SQL'
+BEGIN;
+DELETE FROM oauth2_authorization_consent
+ WHERE registered_client_id = (SELECT id FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub');
+DELETE FROM oauth2_authorization
+ WHERE registered_client_id = (SELECT id FROM oauth2_registered_client WHERE client_id = 'claude-mcp-hub');
+DELETE FROM oauth2_registered_client
+ WHERE client_id = 'claude-mcp-hub';
+COMMIT;
+SQL
+# 5. Check
+ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch \
+  'sudo k3s kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -tAc "SELECT count(*) FROM oauth2_registered_client WHERE client_id = '\''claude-mcp-hub'\''"'
+```
+
+If step 3 answers that a path does not exist, that key was already gone: patch the remaining key alone (one `remove` entry) and repeat the key-name check. The SQL block is the binding client-removal block of the auth-service plan, copied verbatim (gate test `McpHubConsentPersistenceGateTest`, homelab-auth-service#107); do not reword or reflow it.
+
+**Scoping an incident:** hub log lines carry `sub`, `client_id`, `jti` and the tool name per call (`kubectl -n apps logs deploy/mcp-hub --since=24h --request-timeout=10s`); auth-service logins are in data-service's `netmon.login_events`.
+
+#### Incident drill (after go-live; target ≤ 2 min, owner go)
+
+```bash
+date -u +%T                                                   # T0 (the patch)
+kubectl -n apps patch secret mcp-hub-secrets --type merge -p '{"stringData":{"allowed-subjects":""}}'
+kubectl -n apps delete pod -l app=mcp-hub
+n=0; until [ "$(kubectl -n apps exec deploy/mcp-hub --request-timeout=10s -- sh -c 'wc -c < /etc/mcp-hub/secrets/allowed-subjects' 2>/dev/null | tr -d ' ')" = "0" ] || [ $n -ge 36 ]; do n=$((n+1)); sleep 5; done; date -u +%T   # new pod up, file empty (gives up after 3 min)
+```
+
+Then ask Claude to list the accounts (stage a; after stage b any tool works) every 15 s until the call fails, and note the time of the first refused call (T1); check the hub log for the rejection (`kubectl -n apps logs deploy/mcp-hub --since=5m --request-timeout=10s`). Record T0, the "file empty" time and T1 separately. Pass: T1 − T0 ≤ 2 min. (Without the pod delete, the worst case is about 150–165 s: kubelet Secret sync up to about 1.5 min plus the hub's 60 s re-read plus the 15 s asking interval — the reason for the pod delete.) If the loop gave up after 3 min, the file is not readable in the pod or the pod did not start: check `kubectl -n apps get pods -l app=mcp-hub --request-timeout=10s` and the log. Restore without touching SOPS (step 2 was not done in the drill): `ansible-playbook infra/playbooks/59_app_services.yml`; within about 3 minutes the next tool call works without a new login. L1 drill (docs/080 §10.4): create the L1 rule `mcp-hub: incident block` in the free custom-rule slot, ask Claude to list the accounts once — the call must be refused — then delete the rule and confirm that the next call works again (the free slot is free again). L4 drill: run L4, then ask Claude again — it must ask for a new login; reconnect, and the consent page must appear again (proof that the consent row was removed).
+
+---
+
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 
 All 8 platform images (the 5 in this runbook, plus postgres-exporter, mosquitto, and
@@ -1999,6 +2426,7 @@ flux get image update -n flux-system
 flux reconcile kustomization device-service -n flux-system --with-source
 flux reconcile kustomization auth-service -n flux-system --with-source
 flux reconcile kustomization data-service -n flux-system --with-source
+flux reconcile kustomization mcp-hub -n flux-system --with-source
 ```
 
 #### Emergency Pin/Unpin
