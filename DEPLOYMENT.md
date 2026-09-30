@@ -1765,7 +1765,7 @@ Backups need no change now; `mcp_hub` (a database added with #171) will be dumpe
 
 **Edge rate-limit rule on the login service** (docs/080 §4.7, D32) — create before the first production login; remove or relax once homelab-auth-service#104 lands. Dashboard: `furchert.ch` → Security → WAF → Rate limiting rules → Create rule. Action **Block**, never a challenge (Claude cannot solve one); never block the whole Anthropic range.
 
-| Setting | Pro plan or higher (preferred) | Free plan (fields limited to Path, period and block fixed at 10 s) |
+| Setting | Business plan or higher (preferred) | Free plan (fields limited to Path, period and block fixed at 10 s) |
 |---------|--------------------------------|---------------------------------------------------------------------|
 | Name | `auth-service: token and login` | `auth-service: token and login` |
 | Expression | `(http.host eq "auth.furchert.ch" and http.request.method eq "POST" and (http.request.uri.path eq "/oauth2/token" or http.request.uri.path eq "/login"))` | `(http.request.uri.path eq "/oauth2/token" or http.request.uri.path eq "/login")` |
@@ -1773,7 +1773,7 @@ Backups need no change now; `mcp_hub` (a database added with #171) will be dumpe
 | Rate | 30 requests per 1 minute | 5 requests per 10 seconds |
 | Block duration | 1 minute | 10 seconds |
 
-On a Free zone the rule also counts `GET /login` and `/login` on other hostnames of the zone; normal use (one token request per 10-minute token, one or two login requests per sign-in) stays far below 5 per 10 s.
+Method is a rate-limiting field only from the Business plan on. On a Pro zone use the Business expression without `http.request.method eq "POST" and`, with the same counting, rate and block duration; it then also counts `GET /login`. On a Free zone the rule also counts `GET /login` and `/login` on other hostnames of the zone; normal use (one token request per 10-minute token, one or two login requests per sign-in) stays far below 5 per 10 s.
 
 **WAF allow rule on `mcp.furchert.ch`** (docs/080 §4.7, D31) — after the first successful production connection and the §10.4 checks. First confirm on Anthropic's published IP page (`https://platform.claude.com/docs/en/api/ip-addresses`) that `160.79.104.0/21` is still the only outbound range. Dashboard: Security → WAF → Custom rules → Create rule:
 

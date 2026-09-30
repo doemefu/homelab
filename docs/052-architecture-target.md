@@ -386,7 +386,7 @@ cd terrarium-auth-service
 | InfluxDB 2 | 150-250Mi | 50-300m | IaC repo |
 | Mosquitto 2 | 10-20Mi | 10-50m | IaC repo |
 | mcp-hub | 128-256Mi | 50-500m | Own repo (estimate, 080 §9.6) |
-| **Total** | **~838-1226Mi** | **~410-1750m** | |
+| **Total** | **~838-1276Mi** | **~310-1750m** | |
 
 Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 
@@ -396,7 +396,7 @@ Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 
 | Aspect | Legacy Monolith | Target Microservices |
 |--------|----------------|---------------------|
-| Services | 1 (Spring Boot) | 3 (auth + device + data) |
+| Services | 1 (Spring Boot) | 4 (auth + device + data + mcp-hub) |
 | Auth | Custom JWT (JJWT) | Custom JWT (JJWT) with JWKS distribution |
 | Auth framework | None (custom filters) | None (simple jjwt + RSA, NOT Spring Authorization Server) |
 | User roles | USER, MOD, ADMIN | USER, ADMIN (MOD dropped) |

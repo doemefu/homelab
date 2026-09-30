@@ -739,6 +739,7 @@
           - mcp_hub_accounts.version is defined
           - mcp_hub_accounts.accounts is defined
           - mcp_hub_accounts.accounts is sequence and mcp_hub_accounts.accounts is not string
+          - mcp_hub_accounts.accounts is not mapping
           - mcp_hub_credentials is defined and mcp_hub_credentials is mapping
           - mcp_hub_credentials.keys() | reject('match', '^[a-z0-9][a-z0-9.-]*$') | list | length == 0
           - mcp_hub_credentials.keys() | list | intersect(mcp_hub_reserved_secret_keys) | length == 0
