@@ -1691,6 +1691,33 @@ mcp_hub_accounts:
 
 Later stories add their entries and credential keys (`gmail` #172, `outlook` #171, `uzh` #173) — see `docs/080-mcp-hub.md` §8.2.
 
+##### Alternative without the editor (`sops set`)
+
+The same stage-a values can be written without opening the editor; this path also generates the client secret of step (d), so use it instead of (d) and (f), not in addition. In the editor, an unquoted `{bcrypt}…` value is read as a YAML flow mapping and the save fails; `sops set` avoids that because every value is given as JSON. `sops set` rejects a top-level JSON array, so the one-element allowlist is written through the index form `["mcp_hub_allowed_subjects"][0]`; `--value-stdin` keeps the values out of the process list. The registry is the YAML example above as JSON.
+
+```bash
+F=infra/inventory/group_vars/all.sops.yml
+sops set --value-stdin "$F" '["mcp_hub_accounts"]' <<'JSON'
+{"version":1,"accounts":[{"id":"icloud","label":"iCloud","provider":"icloud","enabled":false,
+ "capabilities":{"mail":true,"calendar":true},
+ "mail":{"protocol":"imap","host":"imap.mail.me.com","port":993,"username_ref":"icloud-username","password_ref":"icloud-app-password","inbox":"INBOX"},
+ "calendar":{"protocol":"caldav","url":"https://caldav.icloud.com/","username_ref":"icloud-username","password_ref":"icloud-app-password","include_calendars":"all"}}]}
+JSON
+printf '{}' | sops set --value-stdin "$F" '["mcp_hub_credentials"]'
+U="$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -tAc "SELECT username FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' ORDER BY username")"
+printf '%s\n' "$U"
+printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_allowed_subjects"][0]'
+printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["auth_service_claude_mcp_hub_allowed_users"]'
+S="$(openssl rand -hex 32)"
+printf '%s\n' "$S"
+H="{bcrypt}$(printf '%s' "$S" | htpasswd -niBC 10 claude-mcp-hub | cut -d: -f2- | tr -d '\n')"
+printf '%s' "$H" | grep -Ec '^\{bcrypt\}\$2[aby]\$10\$[./A-Za-z0-9]{53}$'
+printf '%s' "$H" | jq -Rs . | sops set --value-stdin "$F" '["auth_service_claude_mcp_hub_client_secret"]'
+unset S H
+```
+
+Paste the commands one at a time (the `sops set … <<'JSON'` command up to the closing `JSON` line counts as one) and check two outputs before going on: the username query must print exactly one line (your username, as in step (e)) — otherwise stop before the two allowlist commands; the `grep -Ec` line must print `1` — otherwise the hash is malformed, stop before it is written. The plaintext secret printed by `printf '%s\n' "$S"` is shown only once: store it in the password manager before `unset S H`.
+
 #### Apply and verify
 
 ```bash
