@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Managed by Ansible — do not edit manually
+# homelab#102: the T2 chip resets these MacBooks ~432000 s (5 d) after every host
+# boot. Reboot earlier so the reset never fires. Uses `systemctl reboot` (never
+# `/sbin/reboot` or `--force`): only that path goes through logind, so the kubelet's
+# shutdown inhibitor is honoured and pods are terminated through the API first.
+# `--no-block` is required: a blocking `systemctl reboot` from inside a oneshot unit
+# puts this very unit into the shutdown transaction.
+set -euo pipefail
+
+min_uptime="{{ mac_tweaks_reboot_min_uptime_seconds }}"
+uptime_seconds="$(cut -d ' ' -f 1 /proc/uptime | cut -d . -f 1)"
+
+if [ "${uptime_seconds}" -lt "${min_uptime}" ]; then
+  echo "uptime ${uptime_seconds}s < ${min_uptime}s — no reboot needed"
+  exit 0
+fi
+
+echo "uptime ${uptime_seconds}s >= ${min_uptime}s — rebooting before the T2 5-day reset"
+exec /usr/bin/systemctl --no-block reboot
