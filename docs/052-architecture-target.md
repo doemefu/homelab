@@ -2,6 +2,7 @@
 
 > Amended 2026-09-01 per ADR 0001 (parent `docs/adr/0001-schedules-ownership-and-data-plane.md`): schedules ownership -> device-service.
 > Amended 2026-09-23 per ADR 0002 (parent `docs/adr/0002-network-telemetry-ownership.md`): data-service = analytical data plane (sensor history + network telemetry), owns Postgres DB `data_service` (schema `netmon`); contract in [`060-network-monitoring.md`](060-network-monitoring.md).
+> Amended 2026-09-28 per ADR 0003 ([`adr/0003-mcp-hub-authorization.md`](adr/0003-mcp-hub-authorization.md)): new service mcp-hub (read-only mail/calendar MCP endpoint, resource server for auth-service tokens); contract in [`080-mcp-hub.md`](080-mcp-hub.md).
 
 This document describes the target architecture for the Terrarium IoT application after the migration from the legacy monolith.
 
@@ -136,6 +137,24 @@ Internet
 **Key design decision (superseded 2026-09-01, ADR 0001):** Schedule CRUD does not live here. Schedules are a device-management concern, tightly coupled to the in-process scheduling engine that executes them, so the `schedules` table, its CRUD REST API, and execution all live in device-service. This supersedes the original design (schedule CRUD in data-service) described in earlier drafts of this document. data-service's near-term scope is limited to read-only historical InfluxDB queries. (Amended 2026-09-23, ADR 0002: the scope now also covers network telemetry in its own Postgres DB `data_service`.)
 
 **Target picture (later step, ADR 0001):** data-service is intended to eventually own sensor-data ingestion and processing (MQTT -> InfluxDB writes), moving that responsibility out of device-service. That is an explicit, separate decision not yet made — until then, ingestion stays in device-service and the "Does NOT" items above hold.
+
+### mcp-hub
+
+**Domain (added 2026-09-28, ADR 0003):** read-only mail and calendar access for Claude (claude.ai custom connector) through one MCP endpoint, `https://mcp.furchert.ch/mcp` once the tunnel route (#177, second PR) is applied (Epic `homelab#168`, contract [`080-mcp-hub.md`](080-mcp-hub.md)). Python 3.13, own repository `homelab-mcp-hub`.
+
+**Responsibilities:**
+- MCP tools `list_accounts`, `list_unread`, `get_message`, `get_events` (read-only; no provider writes)
+- OAuth resource server: validates auth-service access tokens offline (JWKS), audience `https://mcp.furchert.ch/mcp`, scopes `mail:read calendar:read`, subject allowlist
+- Provider adapters (IMAP, CalDAV; Microsoft Graph from #171), sanitising of third-party content
+
+**Does NOT:**
+- Store mail or calendar content
+- Issue tokens or manage users (auth-service does)
+- Forward Claude's token to any provider or service
+
+**Database:** none at first go-live; PostgreSQL `mcp_hub` (role `mcp_hub`, encrypted provider refresh tokens) from #171.
+**Ports:** 8083 (MCP, tunnel route `mcp.furchert.ch` (#177, second PR)), 8084 (health/metrics, internal).
+**Egress:** iCloud IMAP/CalDAV (#170), Gmail IMAP (#172), Microsoft Graph and login (#171); cluster-internal auth-service (JWKS).
 
 ---
 
@@ -366,7 +385,8 @@ cd terrarium-auth-service
 | PostgreSQL 17 | 100-150Mi | 50-200m | IaC repo |
 | InfluxDB 2 | 150-250Mi | 50-300m | IaC repo |
 | Mosquitto 2 | 10-20Mi | 10-50m | IaC repo |
-| **Total** | **~710-970Mi** | **~360-1250m** | |
+| mcp-hub | 128-256Mi | 50-500m | Own repo (estimate, 080 §9.6) |
+| **Total** | **~838-1276Mi** | **~310-1750m** | |
 
 Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 
@@ -376,7 +396,7 @@ Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 
 | Aspect | Legacy Monolith | Target Microservices |
 |--------|----------------|---------------------|
-| Services | 1 (Spring Boot) | 3 (auth + device + data) |
+| Services | 1 (Spring Boot) | 4 (auth + device + data + mcp-hub) |
 | Auth | Custom JWT (JJWT) | Custom JWT (JJWT) with JWKS distribution |
 | Auth framework | None (custom filters) | None (simple jjwt + RSA, NOT Spring Authorization Server) |
 | User roles | USER, MOD, ADMIN | USER, ADMIN (MOD dropped) |
