@@ -10,3 +10,16 @@ mac_tweaks_kernel_modules:
 # logind: Lid-close-Verhalten
 mac_tweaks_logind_handle_lid_switch: "ignore"
 mac_tweaks_logind_handle_lid_switch_external_power: "ignore"
+
+# Scheduled preventive reboot + kubelet graceful shutdown (homelab#102).
+# The T2 chip power-cycles both MacBooks ~432000 s (5 d) after every host boot. The
+# mac_tweaks role reboots them earlier (slots and threshold live in the role defaults);
+# the kubelet gets a shutdown grace period so pods terminate through the API first.
+k3s_graceful_shutdown_enabled: true
+
+# softdog never loads on the t2 kernels (no /dev/watchdog, watchdog.service failed on
+# both nodes) and a software watchdog cannot prevent a T2-initiated power cut anyway.
+# Leaving this true also makes 10_base.yml fail on the Macs: the service task runs with
+# state: started and the modprobe task is unguarded, so both error out on a real run
+# (--check passes, which is why it went unnoticed). false runs the role's cleanup branch.
+mac_tweaks_watchdog_enabled: false

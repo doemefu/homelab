@@ -30,7 +30,7 @@ Follow this loop for **every change** to this repository:
 | k3s installation / configuration | `infra/playbooks/20_k3s.yml`, `infra/roles/k3s/` | `20_k3s.yml` |
 | k3s version pinning | `infra/roles/k3s/defaults/main.yml` (`k3s_version`) | `20_k3s.yml` |
 | Longhorn storage | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` | `30_longhorn.yml` |
-| Longhorn recurring snapshot schedule/retention | `infra/playbooks/30_longhorn.yml` (`daily-snapshot` RecurringJob task) | `30_longhorn.yml` |
+| Longhorn recurring snapshot/trim schedule and retention | `infra/playbooks/30_longhorn.yml` (the `daily-snapshot`, `metrics-snapshot-cleanup` and `metrics-filesystem-trim` RecurringJob tasks) | `30_longhorn.yml` |
 | Longhorn recurring snapshot per-volume exclusions (PVC labels) | the playbook owning the PVC — today `infra/playbooks/41_monitoring.yml` (Prometheus PVC) | `41_monitoring.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
 | App-data backup script (components, retention, verification) | `scripts/backup-app-data.sh` | none (run the script) |

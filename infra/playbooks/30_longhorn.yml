@@ -124,9 +124,11 @@
     # `retain: 0` is the value Longhorn's webhook mutates snapshot-cleanup jobs
     # to (retain has no effect for this task), so declaring 0 keeps the task
     # idempotent.
-    # ⚠️ Deleting this CR makes Longhorn strip the `metrics` labels from the PVC
-    # and the Volume — the volume silently falls back to `default` and the daily
-    # snapshots resume (see DEPLOYMENT.md).
+    # ⚠️ Deleting the LAST RecurringJob of the `metrics` group makes Longhorn
+    # strip the group labels from the PVC and the Volume — the volume silently
+    # falls back to `default` and the daily snapshots resume (see DEPLOYMENT.md).
+    # Since the filesystem-trim job below joined the group, removing one of the
+    # two is safe; removing both is not.
     - name: Longhorn RecurringJob metrics-snapshot-cleanup anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -140,6 +142,52 @@
             name: metrics-snapshot-cleanup
             cron: "0 4 * * *"
             task: snapshot-cleanup
+            groups:
+              - metrics
+            retain: 0
+            concurrency: 1
+      delegate_to: localhost
+
+    # --- Recurring filesystem trim for excluded volumes (#106, follow-up to #101) ---
+    # Volumes in the `metrics` group get no snapshots, so nothing ever coalesces
+    # their last snapshot away: Longhorn never deletes the newest snapshot of a
+    # volume, it only marks it removed and merges it once a newer one appears.
+    # The Prometheus TSDB therefore kept a frozen 19.3 G base while its head
+    # diverged again after the #101 cleanup (21.3 G → 22.0 G within a day,
+    # heading back towards ~40 G = 2 x the 20 Gi volume).
+    # `filesystem-trim` reclaims the blocks ext4 no longer uses — in the volume
+    # head AND in the continuous chain of already-removed snapshots below it, so
+    # the frozen base shrinks too. Valid (not removed) snapshots are immutable
+    # and are never trimmed, which is why the app volumes keep their chains.
+    # Prerequisites: a trimmable filesystem (ext4/XFS — the longhorn
+    # StorageClass formats ext4) and the volume attached AND mounted. A detached
+    # volume (Prometheus down) is skipped silently, and a trim is a no-op while
+    # a replica is rebuilding; the job log line "Finished recurring filesystem
+    # trim" is the only proof that a run did something.
+    # 05:00 node-local: clear of the 02:00 snapshot window, the 03:00 restic
+    # cron on raspi5 (which holds a Prometheus replica) and the 04:00 cleanup
+    # job — there is no functional dependency between those jobs and this one.
+    # `retain: 0` is the value Longhorn's webhook mutates filesystem-trim jobs
+    # to (retain has no effect for this task), so declaring 0 keeps the task
+    # idempotent.
+    # ⚠️ Do NOT enable the global setting `remove-snapshots-during-filesystem-trim`
+    # to "help" this job: it is unnecessary here (the leftover snapshot is
+    # already marked removed) and it is cluster-wide — it would mark the newest
+    # snapshot of EVERY volume as removed during a trim, including the app
+    # volumes that rely on `daily-snapshot` for rollback.
+    - name: Longhorn RecurringJob metrics-filesystem-trim anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: RecurringJob
+          metadata:
+            name: metrics-filesystem-trim
+            namespace: longhorn-system
+          spec:
+            name: metrics-filesystem-trim
+            cron: "0 5 * * *"
+            task: filesystem-trim
             groups:
               - metrics
             retain: 0

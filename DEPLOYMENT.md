@@ -481,6 +481,36 @@ snapshot protection needed.
   0, concurrency 1) — purges removed/system snapshots (e.g. replica rebuilds) and keeps the
   group's labels backed by a real job. 04:00 is clear of the 02:00 snapshot window and the 03:00
   restic cron on raspi5.
+- **Filesystem trim job (#106):** group `metrics` carries a second `RecurringJob`,
+  `metrics-filesystem-trim` (`infra/playbooks/30_longhorn.yml`, task `filesystem-trim`, cron
+  `0 5 * * *` node-local, retain 0, concurrency 1). It exists because an excluded volume keeps a
+  frozen base forever: Longhorn never deletes a volume's *newest* snapshot, it only marks it
+  removed and merges it once a newer snapshot appears — and with no snapshot job on the volume,
+  no newer snapshot ever appears. After the #101 cleanup the Prometheus volume went from 21.3 G
+  back to 22.0 G within a day, on its way to ~40 G (2 x the 20 Gi volume). A trim reclaims the
+  blocks the filesystem no longer uses, both in the volume head **and** in the continuous chain
+  of already-removed snapshots below it, so the frozen base shrinks too; valid (not removed)
+  snapshots are immutable and are never trimmed, which is why the `default`-group volumes keep
+  their chains. 05:00 is simply clear of the 02:00, 03:00 and 04:00 windows — the cleanup job
+  is not a precondition for the trim. The job ends with a snapshot purge, which is a no-op
+  unless a replica rebuild left a system snapshot behind.
+  - Prerequisites: a trimmable filesystem (ext4 or XFS — the `longhorn` StorageClass formats
+    ext4, check with `kubectl get sc longhorn -o jsonpath='{.parameters.fsType}'`) and the volume
+    **attached and mounted**. The workload keeps running; no `discard` mount option is needed.
+  - Every failure mode is silent: a detached volume (workload scaled to 0, node down) is skipped
+    with a log warning only, and a trim does nothing while a replica is rebuilding. The line
+    `Finished recurring filesystem trim` in the job pod's log is the only proof that a run did
+    something — see the weekly maintenance checklist.
+  - ⚠️ Do **not** enable the global setting `remove-snapshots-during-filesystem-trim` to "help"
+    this job. It is unnecessary here (the leftover snapshot is already marked removed) and it is
+    cluster-wide: it would mark the newest snapshot of *every* volume as removed during a trim,
+    including the app volumes that rely on `daily-snapshot` for rollback.
+  - ext4 remembers which blocks it has already discarded. A snapshot that is marked removed
+    *after* a trim may therefore keep its blocks until the filesystem is remounted — restart the
+    Prometheus pod and let the next trim run if a removed snapshot refuses to shrink.
+  - Cost: the trim runs as `fstrim` in the host mount namespace with a one-hour timeout. The first
+    run discards the whole accumulated free space at once and loads the replica nodes noticeably;
+    steady-state runs discard only one day of churn.
 - **Excluding another volume:** label its PVC the same way —
   `kubectl -n <ns> label pvc/<name> recurring-job.longhorn.io/source=enabled recurring-job-group.longhorn.io/metrics=enabled`
   — or add an equivalent task to the owning playbook. Longhorn syncs the Volume within about a
@@ -501,19 +531,36 @@ snapshot protection needed.
     `kubectl -n longhorn-system get engines.longhorn.io -l longhornvolume=<volume-name> -o jsonpath='{.items[0].status.purgeStatus}'`
     — after a successful purge `actualSize` decreases substantially but can stay above the
     nominal size (the volume head keeps every block the filesystem ever wrote until a filesystem
-    trim). This is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
+    trim — for `metrics`-group volumes that is what `metrics-filesystem-trim` does nightly). This
+    is how the Prometheus volume's pre-#101 chain (≈ 40 G) was removed, once.
 - **Verify:**
   ```bash
-  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup
+  kubectl -n longhorn-system get recurringjobs.longhorn.io        # daily-snapshot + metrics-snapshot-cleanup + metrics-filesystem-trim
   kubectl -n monitoring get pvc <name> --show-labels
   kubectl -n longhorn-system get snapshots.longhorn.io -o json | jq '[.items[] | select(.spec.volume=="<volume-name>")] | length'
+
+  # Did the nightly trim actually run? (a skipped volume logs a warning and nothing else)
+  kubectl -n longhorn-system get pods --sort-by=.metadata.creationTimestamp | grep metrics-filesystem-trim
+  kubectl -n longhorn-system logs <that pod> | grep 'Finished recurring filesystem trim'
+
+  # Volume attached and running the expected engine image (a detached volume is skipped silently)
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.state}{"  "}{.status.currentImage}'
+
+  # Did it free anything? Compare before and after a run; actualSize should approach "Used".
+  kubectl -n longhorn-system get volumes.longhorn.io <volume-name> -o jsonpath='{.status.actualSize}'
+  kubectl -n monitoring exec prometheus-kube-prometheus-stack-prometheus-0 -c prometheus -- df -h /prometheus
+
+  # On-disk proof on each replica node — this is the number that filled raspi4's SD card
+  ssh raspi5 'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
+  ssh mba1   'sudo du -sh /var/lib/longhorn/replicas/<volume-name>-*'
   ```
 - **Warnings:**
   - Removing the labeling task from `41_monitoring.yml` does NOT remove the labels — clear them
     explicitly (`kubectl -n monitoring label pvc/<name> recurring-job-group.longhorn.io/metrics- recurring-job.longhorn.io/source-`).
-  - Deleting the `metrics-snapshot-cleanup` CR strips the labels from PVC and Volume, silently
-    returning the volume to `default`; recover by re-running `30_longhorn.yml` and
-    `41_monitoring.yml`.
+  - Deleting the *last* `RecurringJob` of the group strips the labels from PVC and Volume,
+    silently returning the volume to `default`; recover by re-running `30_longhorn.yml` and
+    `41_monitoring.yml`. With both `metrics-snapshot-cleanup` and `metrics-filesystem-trim` in
+    place, deleting one of the two is safe — deleting both is not.
   - Re-run `41_monitoring.yml` after any recreation of the Prometheus PVC (restore,
     `volumeClaimTemplate` change) — labels don't survive it.
   - `--check` of `41_monitoring.yml` on a fresh cluster stops at the PVC wait for about 10
@@ -2132,24 +2179,177 @@ ansible <node> -m reboot --become
 kubectl uncordon <node>
 ```
 
-### MacBook Watchdog
+### MacBook nodes: controlled reboots (#102)
 
-MacBook Air workers (mba1, mba2) run a kernel watchdog (`softdog`) that auto-reboots on kernel freeze/panic.
+Both MacBook Air workers are power-cycled by their T2 chip at monotonic **432 000 s (5 d) ± 10 s
+after every host boot**. The journal of every crashed boot ends with the apple-bce driver tearing
+down the T2's virtual USB host controller (`bce_vhci_free_device`), there is no oops, no panic, no
+thermal event, and `/sys/fs/pstore/` is empty — the reset is initiated by the firmware, below
+Linux. mba2 has done this on an unbroken 5-day cycle since 2026-04-13, mba1 since 2026-07-02.
+
+The mitigation is a schedule, not a fix: keep every boot shorter than five days. Two pieces run on
+the nodes.
+
+**1. A daily timer with an uptime guard** (`mac_tweaks` role). `homelab-scheduled-reboot.timer`
+fires once a day and runs a script that reboots **only** when `/proc/uptime` is at least
+`mac_tweaks_reboot_min_uptime_seconds` (3.5 d), otherwise it logs `no reboot needed` and exits 0.
+Worst case is therefore 3.5 d + 1 d = 4.5 d, twelve hours before the deadline, and the schedule
+re-derives itself from actual uptime after any unplanned reboot. The script uses
+`systemctl --no-block reboot`: only the logind path honours the kubelet's shutdown inhibitor, and
+`--no-block` keeps the oneshot unit out of its own shutdown transaction.
+
+| Node | Slot | Why |
+|------|------|-----|
+| `mba2` | `*-*-* 06:10:00` | after the 05:00 `metrics-filesystem-trim` window |
+| `mba1` | `*-*-* 07:40:00` | 90 min after mba2, so a Longhorn rebuild finishes first |
+
+Slots and threshold are role defaults (`infra/roles/mac_tweaks/defaults/main.yml`), so the role
+works without inventory edits. Override a single host from the untracked inventory
+(`host_vars/<node>.yml`) or with `-e mac_tweaks_reboot_on_calendar="*-*-* 08:00:00"`.
+
+**2. Kubelet graceful node shutdown** (`k3s` role, `mac` group only). The kubelet gets
+`shutdownGracePeriod: 60s` / `shutdownGracePeriodCriticalPods: 20s` through
+`/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/50-graceful-shutdown.conf`. k3s passes
+`--config-dir` for that directory and merges every `*.conf` at start; the `00-`/`10-`/`20-`
+prefixes are k3s' own (it rewrites `00-k3s-defaults.conf` at every start), which is why ours is
+`50-`. Do **not** switch this to `--kubelet-arg=config=`: k3s strips that flag and copies the file
+in one-way as `10-cli-config.conf`, which a rollback would not revert.
+
+On a **fresh** node the drop-in directory does not exist until k3s-agent has started once, so the
+role installs and starts the agent first and only then waits (up to 150 s) for
+`00-k3s-defaults.conf`, fails loudly if it never appears, and writes the drop-in.
+
+This only works if logind's inhibitor delay is at least as long as the grace period. Ubuntu caps it
+at 30 s (`/usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf`), and when the
+kubelet cannot raise it, it logs `Failed to start node shutdown manager` **and carries on with the
+feature disabled** — a silent degradation. The `mac_tweaks` role therefore ships
+`/etc/systemd/logind.conf.d/zz-homelab-kubelet.conf` with `InhibitDelayMaxSec=60`; the `zz-` prefix
+wins logind's lexical merge and Ubuntu's file is left untouched.
+
+**Rollout order matters**: `10_base.yml` (logind delay) before `20_k3s.yml` (kubelet), and one node
+at a time — mba2 first, mba1 at least 60 minutes later.
 
 ```bash
-# Verify watchdog health
-ssh ansible@<mba-ip> "systemctl is-active watchdog && lsmod | grep softdog"
+# mba2 first. --diff is safe here.
+ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks
 
-# Temporarily disable for maintenance
-ansible-playbook infra/playbooks/10_base.yml -l <node> -e "mac_tweaks_watchdog_enabled=false"
+# 20_k3s.yml: --check only, NEVER --diff. k3s-agent.service.j2 embeds K3S_TOKEN, so a
+# diff of that template prints the token to the terminal and into any log.
+ansible-playbook infra/playbooks/20_k3s.yml -l mba2 --check
+ansible-playbook infra/playbooks/20_k3s.yml -l mba2
 
-# Re-enable
-ansible-playbook infra/playbooks/10_base.yml -l <node>
-
-# Check unexpected reboots
-ssh ansible@<mba-ip> "sudo journalctl -b -1 --no-pager | tail -50"
-ssh ansible@<mba-ip> "sudo last -x reboot | head -5"
+# Then repeat both for mba1, >= 60 min later.
 ```
+
+**Verify** (before the first scheduled fire; safe while uptime is below the threshold):
+
+```bash
+ssh ansible@<mba-ip> "systemctl list-timers homelab-scheduled-reboot.timer --all"
+ssh ansible@<mba-ip> "sudo systemd-analyze verify /etc/systemd/system/homelab-scheduled-reboot.timer"
+ssh ansible@<mba-ip> "systemd-analyze calendar '*-*-* 06:10:00' --iterations=3"
+
+# Functional test — this is not a passive check: below the threshold it prints "no reboot
+# needed" and exits 0, but once uptime >= mac_tweaks_reboot_min_uptime_seconds (3.5 d) this
+# command IS the reboot. That makes it the recommended, attended end-to-end test: run it
+# deliberately once a node's uptime crosses 3.5 d (mba2 first, mba1 >= 60 min later) and
+# watch the graceful shutdown end to end — kubectl -n apps logs postgresql-0 --previous |
+# tail -5 for "database system is shut down" and journalctl -u k3s-agent -f for the
+# shutdown-manager handoff — instead of waiting for the unattended timer slot.
+ssh ansible@<mba-ip> "cat /proc/uptime; sudo systemctl start homelab-scheduled-reboot.service && \
+  journalctl -u homelab-scheduled-reboot -n 5 --no-pager"
+
+# logind delay: 30 s before the rollout, 60 s after
+ssh ansible@<mba-ip> "busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager InhibitDelayMaxUSec"
+ssh ansible@<mba-ip> "systemd-analyze cat-config systemd/logind.conf | grep -n -B2 -A2 InhibitDelayMaxSec"
+
+# Inhibitor lock: expect a kubelet "delay" lock for shutdown here. The role's
+# flush_handlers restarts systemd-logind mid-role, which drops any held inhibitor locks;
+# whether kubelet 1.32 re-acquires one without its own restart is unverified — check this
+# explicitly rather than assuming the busctl delay above means a lock is actually held.
+ssh ansible@<mba-ip> "systemd-inhibit --list"
+
+# Kubelet: the drop-in is in place and the shutdown manager did NOT give up
+ssh ansible@<mba-ip> "sudo ls -l /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/"
+ssh ansible@<mba-ip> "sudo journalctl -u k3s-agent -b --no-pager | grep -i 'shutdown manager'"
+```
+
+**Mandatory gate — did the scheduled reboot actually complete?** Before treating any given
+night as a test of the T2 hypothesis, confirm on the morning after the first expected slot
+(e.g. 2026-09-20 at 08:30 CEST or later) that each node picked up a new boot at its slot time:
+
+```bash
+ssh ansible@<mba-ip> "sudo journalctl --list-boots"                 # new boot ≈ 06:10 (mba2) / ≈ 07:40 (mba1)
+ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"            # a shutdown entry, not a bare crash
+ssh ansible@<mba-ip> "systemctl list-timers homelab-scheduled-reboot.timer --all"   # timer activation, not just the service outcome
+ssh ansible@<mba-ip> "sudo journalctl -u homelab-scheduled-reboot -b -1 --no-pager"
+  # expect: "uptime <n>s >= <min_uptime>s — rebooting before the T2 5-day reset"; read the
+  # full unit journal, not just the tail — "no reboot needed" here would itself be unexpected
+  # once uptime has passed the 3.5 d threshold, and is a different failure mode from the timer
+  # never having activated at all
+```
+
+If there is no boot at the expected slot time, no shutdown entry, or no matching "rebooting
+before the T2 5-day reset" line, the scheduled reboot did not complete — but that alone does
+not prove the timer never fired. Check timer activation (`systemctl list-timers`) and the
+service's own journal separately: the timer can activate and the service can still exit
+without rebooting (e.g. a stale uptime read) or fail mid-run. Diagnose which of the three
+failed (see Troubleshooting) and re-run before drawing any conclusion about the T2 hypothesis.
+
+After the first scheduled reboot, the fuller verification:
+
+```bash
+ssh ansible@<mba-ip> "last -x reboot shutdown | head -5"          # a shutdown entry, not a bare crash
+ssh ansible@<mba-ip> "uptime -s; journalctl --list-boots | tail -3"
+ssh ansible@<mba-ip> "journalctl -u homelab-scheduled-reboot -b -1 --no-pager | tail -3"
+ssh ansible@<mba-ip> "sudo journalctl -b -1 -u k3s-agent --no-pager | grep -i shutdown"
+kubectl -n apps logs postgresql-0 --previous | tail -5            # "database system is shut down"
+kubectl get nodes -o wide
+kubectl -n longhorn-system get volumes.longhorn.io                # all robustness=healthy
+```
+
+**How to read 2026-09-20/21**
+
+| Observation | Meaning |
+|---|---|
+| 09-20 ≥ 08:30: new boot ≈ 06:10/07:40, shutdown entry in `last -x`, service journal line present | Scheduled reboot completed — the night is a valid test of the T2 hypothesis. |
+| 09-20 ≥ 08:30: no such boot | Scheduled reboot did not complete — the night proves nothing. Check timer activation and the service journal separately before assuming it's a timer bug; fix and re-run. |
+| 09-21: `uptime -s` still shows the 09-20 morning boot, no later boot | Hypothesis TRUE (the countdown restarts at host boot) — keep the mitigation as-is. |
+| 09-21: a boot ≈ 09-20 21:39 CEST (mba2) / ≈ 22:50 CEST (mba1), previous journal ending at monotonic ≈ 55 700 s / ≈ 54 600 s, no shutdown record | Hypothesis FALSE (phase-locked to the T2, not to host-boot age) — a five-figure end-of-journal instead of ≈ 432 000 s is the cleanest proof; apply the fallback section below or the rollback. |
+| 09-21: boot at any other time, or journal ending at a third monotonic value | Unrelated failure — investigate separately, do not attribute it to the T2 cycle. |
+
+**Rollback**, one variable each, both idempotent. Trigger: a node still resets at its 5-day
+mark on 2026-09-20 evening even though its scheduled reboot completed that morning (per the
+mandatory gate above) — that means the reboot does not reset the T2 countdown, so run this on
+2026-09-21, or apply the fallback section below instead; otherwise the timer just adds one
+pointless reboot per cycle without preventing the reset:
+
+```bash
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
+ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e k3s_graceful_shutdown_enabled=false
+```
+
+**If a warm reboot does not reset the T2 countdown**, the timer cannot prevent the reset — it can
+only make sure the node is drained and cleanly stopped when it fires. In that case keep the
+plumbing and replace the uptime guard with a phase guard derived from a pinned per-node
+reference. Re-pinned from the 2026-09-15 boots — mba2 `2026-09-15 21:39:09`, mba1
+`2026-09-15 22:50:46` — +5 d per cycle, drifting +54 s / +62 s (measured boot-to-boot deltas
+432 054 s / 432 062 s, 2026-09-10 → 2026-09-15); fire the timer every 15 minutes, and escalate:
+move the stateful workloads off the MacBooks and take the root cause upstream to t2linux. That
+reference has to be re-pinned every few months. Each crashed boot's journal still ends at
+monotonic ≈ 431 940–431 975 s (the reset itself lands ≈ 432 000–432 018 s in), but the
+`bce_vhci_free_device` teardown line that used to mark the cut was absent on the 2026-09-15
+cycle — do not rely on it as the reset's signature; the monotonic-time window above is the only
+signal confirmed so far.
+
+**The `softdog` watchdog was removed** (`mac_tweaks_watchdog_enabled: false`). It never worked on
+the t2 kernels — there is no `/dev/watchdog`, `softdog` does not load, and `watchdog.service` sat
+in `failed` state on both nodes — and a software watchdog cannot stop a firmware power cut anyway.
+Leaving it enabled also made `10_base.yml` fail on the Macs, because the service task runs with
+`state: started` and the `modprobe` task is unguarded (a `--check` run passes, a real run does
+not). The role's cleanup branch removes `/etc/watchdog.conf` and
+`/etc/modules-load.d/watchdog.conf` on the next run.
 
 ---
 
@@ -2274,7 +2474,8 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Check backup status | Daily | Primarily automatic since #92 — `ResticBackupFailed` / `ResticBackupStale` / `LonghornRecurringJob*` alert to Discord. Manual cross-check: `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
-| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup metrics-filesystem-trim` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
+| Verify the metrics-group trim is still working | Weekly | `kubectl -n longhorn-system get volumes.longhorn.io <prometheus-volume> -o jsonpath='{.status.actualSize}'` (flat, not trending towards 40 G) + `kubectl -n longhorn-system logs <latest metrics-filesystem-trim pod>` showing `Finished recurring filesystem trim` — every failure mode of the trim is silent; alerting is tracked in #92 |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
@@ -2291,6 +2492,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Playbook | Purpose | Runtime | Idempotent |
 |----------|---------|---------|------------|
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
+| `10_base.yml` | Base packages, hardening, UFW, fail2ban, MacBook scheduled reboot (#102) | 3-5 min | Yes |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
