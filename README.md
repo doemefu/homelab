@@ -127,6 +127,7 @@ All external access is via Cloudflare Tunnel. Canonical hostnames are configured
 | `https://n8n.furchert.ch` | Web UI + Webhooks | `n8n.apps.svc:80` | 80 | Workflow automation platform (container: 5678) |
 | `https://ai.furchert.ch` | OpenAI-compatible API + UI | `litellm.apps.svc:4000` | 4000 | LiteLLM AI gateway |
 | `https://club.furchert.ch` | Web UI | `open-webui.apps.svc:80` | 80 | Club Assistant (Open WebUI) chat UI (container: 8080) |
+| `https://mcp.furchert.ch/mcp` | MCP endpoint | `mcp-hub.apps.svc:8083` | 8083 | Read-only mail and calendar tools for the claude.ai connector (OAuth via auth-service) |
 | `https://furchert.ch` | Web UI | `furchert-ch.apps.svc:3000` | 3000 | Public site (Next.js); apex only — `www.furchert.ch` is a Cloudflare 301 redirect to apex, not a tunnel route |
 
 ### OIDC/OAuth2 Endpoints (Auth Service)
