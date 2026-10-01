@@ -1612,6 +1612,8 @@ The go-live has two stages. **Stage a** runs with the registry entry switched of
 
 A pod that starts before step 4 waits in `ContainerCreating` (Secret volume missing) and starts by itself once the Secret exists.
 
+Restart Flux-managed Deployments by deleting the pod: `kubectl -n apps delete pod -l app=auth-service` or `kubectl -n apps delete pod -l app=mcp-hub`. A `kubectl rollout restart` works once, but Flux removes its annotation at the next reconcile and the pod restarts a second time.
+
 **Which Secret changes need a hub restart.** The kubelet refreshes every key of `mcp-hub-secrets` in the running pod within about 1–2 min, but the hub uses them differently:
 
 | Key | Read by the hub | After a change |
@@ -1838,6 +1840,11 @@ Stage b (the calendar and mail tools with `icloud` enabled):
 - `icloud` stays `unknown` for more than a minute after step (n): the background status check is off in the running hub. It runs only with `HUB_STATUS_CHECK_ENABLED` set to `true` in the hub repository's `k8s/` manifest (spec 080 D57). Check the running Deployment: `kubectl -n apps get deploy mcp-hub --request-timeout=10s -o jsonpath='{.spec.template.spec.containers[0].env}{"\n"}'`. If it is missing, the CalDAV release of the hub is not deployed yet (step (j)).
 - `icloud` shows `auth_expired`, and the hub log has a `status_check_failed` line with `outcome=auth_expired`: Apple refused the app-specific password (revoked, or the Apple Account password changed). Create a new app-specific password, put it into `icloud-app-password` in SOPS and run playbook 59. The key name stays the same, so no restart is needed; the status returns to `ok` at the next check (at most 30 min), or at once after step (n).
 - `get_events` answers with `truncated: true`: a recurrence-expansion cap or the expansion time budget stopped the call (spec 080 D62). Ask again for a shorter time window. A `calendar_object_skipped` line in the hub log means that one calendar object was refused (for example a recurrence rule finer than daily) and left out; the other events are still returned. This is expected behaviour, not a hub fault.
+
+Playbook 40 (tunnel route, step (l)):
+
+- "Cloudflared deployen" fails because the chart archive cannot be fetched (on 2026-10-01 GitHub answered 504 for `cloudflare-tunnel-remote-0.1.2.tgz`, although the chart was cached): apply the route without the Helm step with `ansible-playbook infra/playbooks/40_platform.yml --start-at-task "CF Ingress-Konfiguration als Variable setzen"` — the tasks from there on depend only on variables. Run the whole playbook again later.
+- The cloudflared restart drops an SSH forward that runs through the tunnel (off-LAN `kubectl`/Ansible), so a task after it can fail with "connection refused". Re-establish the forward ("Off-LAN kubectl / Ansible Access") and run the same command again; the playbook is idempotent.
 
 Backups need no change now; `mcp_hub` (a database added with #171) will be dumped by `scripts/backup-app-data.sh` automatically.
 
