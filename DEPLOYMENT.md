@@ -1608,7 +1608,7 @@ The go-live has two stages. **Stage a** runs with the registry entry switched of
 10. Stage a: deployed-image check (step (o)) — both services run images built after their gate-test merges; then add the connector in claude.ai; the first login shows the consent page with both scopes; ask Claude to list the accounts (`icloud` shows `disabled`).
 11. WAF allow rule (below), then one more `list_accounts` call.
 12. Incident drill ("mcp-hub incident runbook").
-13. Stage b (after the hub release with the mail and calendar tools is running): in the same SOPS edit set `enabled: true` on the `icloud` entry of `mcp_hub_accounts` and add `icloud-username` and `icloud-app-password` to `mcp_hub_credentials` (step (f)), run playbook 59 (step (h)), then restart the hub (step (n)) — the registry changed, and the hub reads it only at start-up. No route or rule change. `list_accounts` shows `icloud` as `ok` after the first background status check, about 30 s after the restart (`unknown` before it), no longer `disabled`. Ask for tomorrow's events and for unread iCloud mail.
+13. Stage b (after the hub release with the mail and calendar tools is running): in the same SOPS edit set `enabled: true` on the `icloud` entry of `mcp_hub_accounts` and add `icloud-username` and `icloud-app-password` to `mcp_hub_credentials` (step (f)), run playbook 59 (step (h)), then restart the hub (step (n)) — the registry changed, and the hub reads it only at start-up. No route or rule change. `list_accounts` shows `icloud` as `ok` after the first background status check, about 30 s after the restart (`unknown` before it), no longer `disabled`; the check repeats every 30 min (`HUB_HEALTH_CHECK_INTERVAL_SECONDS` in the hub's own manifest). Ask for tomorrow's events and for unread iCloud mail. Stage-b symptoms are under "Troubleshooting" below.
 
 A pod that starts before step 4 waits in `ContainerCreating` (Secret volume missing) and starts by itself once the Secret exists.
 
@@ -1832,6 +1832,12 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://mcp.furchert.ch/mcp   
 - **WAF allow rule breaks the connection** (tool calls fail after step 11): dashboard `furchert.ch` → Security → WAF → Custom rules → `mcp-hub: only Anthropic egress` → Disable. The connector works without it; re-check Anthropic's published range before enabling it again.
 
 **Troubleshooting.** `ImagePullBackOff` on `main-20260928T000000` right after the first rollout: expected until image automation has committed the first real tag (step (j): package public (b), write deploy key (a), ruleset (c)). `CrashLoopBackOff` and a `startup_failed` line about the registry in the log: `accounts.json` passed the playbook checks but not the hub's schema (for example an unknown field or missing `capabilities`) — fix `mcp_hub_accounts` in SOPS, run playbook 59, then step (n).
+
+Stage b (the calendar and mail tools with `icloud` enabled):
+
+- `icloud` stays `unknown` for more than a minute after step (n): the background status check is off in the running hub. It runs only with `HUB_STATUS_CHECK_ENABLED` set to `true` in the hub repository's `k8s/` manifest (spec 080 D57). Check the running Deployment: `kubectl -n apps get deploy mcp-hub --request-timeout=10s -o jsonpath='{.spec.template.spec.containers[0].env}{"\n"}'`. If it is missing, the CalDAV release of the hub is not deployed yet (step (j)).
+- `icloud` shows `auth_expired`, and the hub log has a `status_check_failed` line with `outcome=auth_expired`: Apple refused the app-specific password (revoked, or the Apple Account password changed). Create a new app-specific password, put it into `icloud-app-password` in SOPS and run playbook 59. The key name stays the same, so no restart is needed; the status returns to `ok` at the next check (at most 30 min), or at once after step (n).
+- `get_events` answers with `truncated: true`: a recurrence-expansion cap or the expansion time budget stopped the call (spec 080 D62). Ask again for a shorter time window. A `calendar_object_skipped` line in the hub log means that one calendar object was refused (for example a recurrence rule finer than daily) and left out; the other events are still returned. This is expected behaviour, not a hub fault.
 
 Backups need no change now; `mcp_hub` (a database added with #171) will be dumped by `scripts/backup-app-data.sh` automatically.
 
