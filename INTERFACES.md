@@ -52,6 +52,7 @@ All external access goes through Cloudflare Tunnel. Public hostnames are **centr
 | `n8n.furchert.ch` | `http://n8n.apps.svc.cluster.local:80` | HTTP | n8n | Workflow automation (container: 5678) |
 | `ai.furchert.ch` | `http://litellm.apps.svc.cluster.local:4000` | HTTP | LiteLLM | AI gateway, OpenAI-compatible |
 | `club.furchert.ch` | `http://open-webui.apps.svc.cluster.local:80` | HTTP | Open WebUI (Club Assistant) | Chat UI (container: 8080) |
+| `mcp.furchert.ch` | `http://mcp-hub.apps.svc.cluster.local:8083` | HTTP | mcp-hub | MCP endpoint `/mcp` for the claude.ai custom connector (OAuth access tokens from auth-service client `claude-mcp-hub`); internal port 8084 is never routed; WAF allows only Anthropic's egress range (`docs/080-mcp-hub.md` §4.7) |
 
 ### Adding a New Public Endpoint
 
