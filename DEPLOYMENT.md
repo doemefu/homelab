@@ -1722,13 +1722,13 @@ Paste the commands one at a time (the `sops set … <<'JSON'` command up to the 
 
 ##### Stage b without the editor (`sops set`)
 
-Step 13 can also be done without the editor, in the same style as the step (f) alternative. Paste the commands one at a time. The two `read` lines prompt for the iCloud user name and the app-specific password; the password is not echoed, so press Enter after typing it.
+Step 13 can also be done without the editor, in the same style as the step (f) alternative. Paste the commands one at a time. The two `read` lines prompt for the iCloud user name and the app-specific password (they work in zsh and bash); the password is not echoed, so press Enter after typing it.
 
 ```bash
 F=infra/inventory/group_vars/all.sops.yml
 sops set "$F" '["mcp_hub_accounts"]["accounts"][0]["enabled"]' 'true'
-read -r "U?iCloud user name: "
-read -rs "P?App-specific password: "
+printf 'iCloud user name: '; IFS= read -r U
+printf 'App-specific password: '; IFS= read -rs P; printf '\n'
 printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-username"]'
 printf '%s' "$P" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-app-password"]'
 unset U P
