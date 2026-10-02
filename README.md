@@ -178,7 +178,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | Deployed, Flux-managed |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Deployed, Flux-managed |
 | data-service | `data-service.apps.svc.cluster.local` | 8082 | Deployed, Flux-managed (no tunnel route) |
-| mcp-hub | `mcp-hub.apps.svc.cluster.local` | 8083 | Flux-managed; public as `mcp.furchert.ch` once the tunnel route is applied |
+| mcp-hub | `mcp-hub.apps.svc.cluster.local` | 8083 | Deployed, Flux-managed; public as `mcp.furchert.ch` |
 
 ### Home Assistant
 
@@ -349,7 +349,7 @@ This repository provides the **platform infrastructure**. Application services t
 | [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | Deployed | Flux-managed |
 | [furchert-ch](https://github.com/doemefu/furchert-ch) | Public site (Next.js, DE/EN) + OIDC-gated `/dashboard` | Deployed | Flux-managed |
 | [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Analytical data plane (ADR 0002): network telemetry in Postgres DB `data_service` (schema `netmon`) + historical sensor data (InfluxDB); schedules live in device-service (ADR 0001) — contract `docs/060-network-monitoring.md` | Deployed | Flux-managed |
-| [homelab-mcp-hub](https://github.com/doemefu/homelab-mcp-hub) | Read-only mail and calendar MCP endpoint for Claude (`docs/080-mcp-hub.md`) | Active | Flux-managed |
+| [homelab-mcp-hub](https://github.com/doemefu/homelab-mcp-hub) | Read-only mail and calendar MCP endpoint for Claude (`docs/080-mcp-hub.md`) | Deployed | Flux-managed |
 
 Architecture and migration planning documents are in `docs/`.
 

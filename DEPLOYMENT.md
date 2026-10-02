@@ -1590,11 +1590,11 @@ Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(
 
 ### mcp-hub (Flux, #170 onboarding)
 
-`mcp-hub` gives Claude (claude.ai custom connector) read-only access to mail and calendars through one endpoint, reachable at `https://mcp.furchert.ch/mcp` once the tunnel route (second PR of #177) is applied. It is Flux-managed like data-service (`cluster/apps/mcp-hub/`), reads its account registry, provider credentials and subject allowlist from the Secret `mcp-hub-secrets` (mounted as files, created by `59_app_services.yml`), and validates access tokens that auth-service issues to the client `claude-mcp-hub`. Contract: `docs/080-mcp-hub.md` (§4.6 incident procedure, §4.7 edge, §7.1 variables); authorization decision: [`docs/adr/0003-mcp-hub-authorization.md`](docs/adr/0003-mcp-hub-authorization.md). Run every command from the repository root. Every step that changes the cluster, Cloudflare or SOPS is an owner action.
+`mcp-hub` gives Claude (claude.ai custom connector) read-only access to mail and calendars through one endpoint, reachable at `https://mcp.furchert.ch/mcp` (tunnel route since #177, live since 2026-10-01). It is Flux-managed like data-service (`cluster/apps/mcp-hub/`), reads its account registry, provider credentials and subject allowlist from the Secret `mcp-hub-secrets` (mounted as files, created by `59_app_services.yml`), and validates access tokens that auth-service issues to the client `claude-mcp-hub`. Contract: `docs/080-mcp-hub.md` (§4.6 incident procedure, §4.7 edge, §7.1 variables); authorization decision: [`docs/adr/0003-mcp-hub-authorization.md`](docs/adr/0003-mcp-hub-authorization.md). Run every command from the repository root. Every step that changes the cluster, Cloudflare or SOPS is an owner action.
 
 #### Order (first rollout, spec 080 §11.1 WP7)
 
-The go-live has two stages. **Stage a** runs with the registry entry switched off and no provider credential in the cluster; the hub image may already offer the mail tools (spec 080 D61) — with no enabled account they reach no provider. It proves the login, the token, the kill switch and the incident drill in production: the `icloud` registry entry is switched off (`enabled: false`) and `mcp_hub_credentials: {}`, so `icloud` shows `disabled` (`unknown` is reserved for enabled accounts whose adapter or check has not run yet). **Stage b** follows once the mail and calendar tools have shipped: it switches the `icloud` entry on and adds its credentials (step 13). Rolling back at any stage: once auth-service has seeded the `claude-mcp-hub` client (step 5), a revert of the auth-service change, an older auth-service image or a removed or renamed client entry is allowed only after "Disable and remove the `claude-mcp-hub` client" ("mcp-hub incident runbook").
+The go-live has two stages. **Stage a** runs with the registry entry switched off and no provider credential in the cluster; the hub image may already offer the mail tools (spec 080 D61) — with no enabled account they reach no provider. It proves the login, the token, the kill switch and the incident drill in production: the `icloud` registry entry is switched off (`enabled: false`) and `mcp_hub_credentials: {}`, so `icloud` shows `disabled` (`unknown` is reserved for enabled accounts whose adapter or check has not run yet). **Stage b** follows once the mail and calendar tools have shipped: it switches the `icloud` entry on and adds its credentials (step 13). Stage a was completed on 2026-10-01; stage b was switched on on 2026-10-02 (acceptance: `homelab#170`). Rolling back at any stage: once auth-service has seeded the `claude-mcp-hub` client (step 5), a revert of the auth-service change, an older auth-service image or a removed or renamed client entry is allowed only after "Disable and remove the `claude-mcp-hub` client" ("mcp-hub incident runbook").
 
 1. `homelab-mcp-hub` bootstrap merged: `k8s/` exists on `main`, CI pushed a first image `ghcr.io/doemefu/homelab-mcp-hub:main-…`.
 2. Owner prerequisites (a)–(f) below — the SOPS values **before** step 3.
@@ -1608,9 +1608,11 @@ The go-live has two stages. **Stage a** runs with the registry entry switched of
 10. Stage a: deployed-image check (step (o)) — both services run images built after their gate-test merges; then add the connector in claude.ai; the first login shows the consent page with both scopes; ask Claude to list the accounts (`icloud` shows `disabled`).
 11. WAF allow rule (below), then one more `list_accounts` call.
 12. Incident drill ("mcp-hub incident runbook").
-13. Stage b (after the hub release with the mail and calendar tools is running): in the same SOPS edit set `enabled: true` on the `icloud` entry of `mcp_hub_accounts` and add `icloud-username` and `icloud-app-password` to `mcp_hub_credentials` (step (f)), run playbook 59 (step (h)), then restart the hub (step (n)) — the registry changed, and the hub reads it only at start-up. No route or rule change. `list_accounts` shows `icloud` as `ok` after the first background status check, about 30 s after the restart (`unknown` before it), no longer `disabled`; the check repeats every 30 min (`HUB_HEALTH_CHECK_INTERVAL_SECONDS` in the hub's own manifest). Ask for tomorrow's events and for unread iCloud mail. Stage-b symptoms are under "Troubleshooting" below.
+13. Stage b (after the hub release with the mail and calendar tools is running): in the same SOPS edit set `enabled: true` on the `icloud` entry of `mcp_hub_accounts` and add `icloud-username` and `icloud-app-password` to `mcp_hub_credentials` (step (f)), run playbook 59 (step (h)), then restart the hub (step (n)) — the registry changed, and the hub reads it only at start-up (without the editor: "Stage b without the editor" below). No route or rule change. `list_accounts` shows `icloud` as `ok` after the first background status check, about 30 s after the restart (`unknown` before it), no longer `disabled`; the check repeats every 30 min (`HUB_HEALTH_CHECK_INTERVAL_SECONDS` in the hub's own manifest). Ask for tomorrow's events and for unread iCloud mail. Stage-b symptoms are under "Troubleshooting" below.
 
 A pod that starts before step 4 waits in `ContainerCreating` (Secret volume missing) and starts by itself once the Secret exists.
+
+Restart Flux-managed Deployments by deleting the pod: `kubectl -n apps delete pod -l app=auth-service` or `kubectl -n apps delete pod -l app=mcp-hub`. A `kubectl rollout restart` works once, but Flux removes its annotation at the next reconcile and the pod restarts a second time.
 
 **Which Secret changes need a hub restart.** The kubelet refreshes every key of `mcp-hub-secrets` in the running pod within about 1–2 min, but the hub uses them differently:
 
@@ -1717,6 +1719,32 @@ unset S H
 ```
 
 Paste the commands one at a time (the `sops set … <<'JSON'` command up to the closing `JSON` line counts as one) and check two outputs before going on: the username query must print exactly one line (your username, as in step (e)) — otherwise stop before the two allowlist commands; the `grep -Ec` line must print `1` — otherwise the hash is malformed, stop before it is written. The plaintext secret printed by `printf '%s\n' "$S"` is shown only once: store it in the password manager before `unset S H`.
+
+##### Stage b without the editor (`sops set`)
+
+Step 13 can also be done without the editor, in the same style as the step (f) alternative. Paste the commands one at a time (the `if … fi` block counts as one command and is pasted only after both prompts have been answered). The two `read` lines prompt for the iCloud user name and the app-specific password (they work in zsh and bash); the password is not echoed, so press Enter after typing it.
+
+```bash
+F=infra/inventory/group_vars/all.sops.yml
+printf 'iCloud user name: '; IFS= read -r U
+printf 'App-specific password: '; IFS= read -rs P; printf '\n'
+if [ -n "$U" ] && [ -n "$P" ]; then
+  sops set "$F" '["mcp_hub_accounts"]["accounts"][0]["enabled"]' 'true'
+  printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-username"]'
+  printf '%s' "$P" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-app-password"]'
+else
+  echo 'Empty input: nothing was written. Run the block again.'
+fi
+unset U P
+```
+
+Then commit the re-encrypted file through a pull request (as for step (f)), run playbook 59 (step (h)) and restart the hub (step (n)).
+
+**Go-live result (2026-10-02).** Stage b was switched on on 2026-10-02. After the last step, about 30 s after the pod start, the hub log showed `status_check_cycle` with `outcome: ok` and `result_count: 2`, and `list_accounts` showed both capabilities (mail, calendar) working; use the same two checks after any later registry or credential change. Lesson: a mistyped value needed a second SOPS commit (`homelab#189`). The block above can simply be run again to overwrite the values; then commit through a pull request, re-run playbook 59 and delete the hub pod again (step (n)).
+
+**User names for mail and calendar.** Apple documents the Apple Account e-mail as the CalDAV user name and the iCloud Mail address (or its name part) as the IMAP user name; when the Apple Account is not an iCloud address, the two differ. The registry allows a separate credential key per capability (`mail.username_ref`, `calendar.username_ref`). If `list_accounts` shows `auth_expired` for one capability and `ok` for the other after the first status check, add a second user-name key to `mcp_hub_credentials`, point that capability's `username_ref` to it in `mcp_hub_accounts`, run playbook 59 and delete the hub pod (step (n); a registry change). At go-live (2026-10-02) one username key served both mail and calendar, so this fallback was not needed.
+
+**Resources.** The hub pod has a CPU limit of 1 and a memory limit of 256 Mi. Measured in the production image, one calendar account stays at or below about 165 MiB in the worst case. Before a second calendar account is enabled (a later story), raise the memory limit or query the accounts one after another (spec 080 R26).
 
 #### Apply and verify
 
@@ -1838,6 +1866,12 @@ Stage b (the calendar and mail tools with `icloud` enabled):
 - `icloud` stays `unknown` for more than a minute after step (n): the background status check is off in the running hub. It runs only with `HUB_STATUS_CHECK_ENABLED` set to `true` in the hub repository's `k8s/` manifest (spec 080 D57). Check the running Deployment: `kubectl -n apps get deploy mcp-hub --request-timeout=10s -o jsonpath='{.spec.template.spec.containers[0].env}{"\n"}'`. If it is missing, the CalDAV release of the hub is not deployed yet (step (j)).
 - `icloud` shows `auth_expired`, and the hub log has a `status_check_failed` line with `outcome=auth_expired`: Apple refused the app-specific password (revoked, or the Apple Account password changed). Create a new app-specific password, put it into `icloud-app-password` in SOPS and run playbook 59. The key name stays the same, so no restart is needed; the status returns to `ok` at the next check (at most 30 min), or at once after step (n).
 - `get_events` answers with `truncated: true`: a recurrence-expansion cap or the expansion time budget stopped the call (spec 080 D62). Ask again for a shorter time window. A `calendar_object_skipped` line in the hub log means that one calendar object was refused (for example a recurrence rule finer than daily) and left out; the other events are still returned. This is expected behaviour, not a hub fault.
+- `get_events` returns `skipped_objects` greater than 0: one or more calendar objects were left out. `kubectl -n apps logs deploy/mcp-hub --since=10m --request-timeout=10s | grep calendar_object_skipped` shows the `outcome` per skipped object (`rule_refused`, `object_too_large`, `too_many_components`, `too_many_dates`, `start_out_of_range`, `expansion_too_slow`). This is expected for unusual objects (limits in spec 080 §5.4). One known case to report back: a custom time zone with several open-ended rule pairs.
+
+Playbook 40 (tunnel route, step (l)):
+
+- "Cloudflared deployen" fails because the chart archive cannot be fetched (on 2026-10-01 GitHub answered 504 for `cloudflare-tunnel-remote-0.1.2.tgz`, although the chart was cached): apply the route without the Helm step with `ansible-playbook infra/playbooks/40_platform.yml --start-at-task "CF Ingress-Konfiguration als Variable setzen"` — the tasks from there on depend only on variables. Run the whole playbook again later.
+- The cloudflared restart drops an SSH forward that runs through the tunnel (off-LAN `kubectl`/Ansible), so a task after it can fail with "connection refused". Re-establish the forward ("Off-LAN kubectl / Ansible Access") and run the same command again; the playbook is idempotent.
 
 Backups need no change now; `mcp_hub` (a database added with #171) will be dumped by `scripts/backup-app-data.sh` automatically.
 
@@ -1911,7 +1945,7 @@ flux resume kustomization mcp-hub -n flux-system
 
 Optional drill for L3: after the suspend, wait at least 10 minutes (one `apps` reconcile), then `flux get kustomizations mcp-hub -n flux-system` must still show `SUSPENDED True`, which proves that the reconcile of the parent `apps` Kustomization does not undo the suspend; if it shows `False`, rely on L1 or L2 instead of L3.
 
-**L4 — Revoke the consents and authorizations of `claude-mcp-hub`** (`registered_client_id` holds the internal id, not the client id). auth-service stores consent in the database, so the consent rows are deleted first, then the authorizations, in one transaction (the block's own `BEGIN;` … `COMMIT;`; with `ON_ERROR_STOP=1` a failing statement aborts before `COMMIT`, so both or neither). The next refresh fails and claude.ai asks for a new login; access tokens already issued expire within 10 minutes. **Check that it worked:** the next login shows the consent page again.
+**L4 — Revoke the consents and authorizations of `claude-mcp-hub`** (`registered_client_id` holds the internal id, not the client id). auth-service stores consent in the database, so the consent rows are deleted first, then the authorizations, in one transaction (the block's own `BEGIN;` … `COMMIT;`; with `ON_ERROR_STOP=1` a failing statement aborts before `COMMIT`, so both or neither). The next refresh fails and claude.ai asks for a new login; access tokens already issued expire within 10 minutes. **Check that it worked:** the next login shows the consent page again. L4 takes effect when the access token already issued expires — at most 10 minutes (measured at the stage-a drill on 2026-10-01); for an immediate cut use L2 or L1 first.
 
 ```bash
 kubectl -n apps exec -i postgresql-0 -c postgresql -- psql -U postgres -d homelabdb -v ON_ERROR_STOP=1 <<'SQL'
@@ -2067,6 +2101,14 @@ n=0; until [ "$(kubectl -n apps exec deploy/mcp-hub --request-timeout=10s -- sh 
 ```
 
 Then ask Claude to list the accounts (stage a; after stage b any tool works) every 15 s until the call fails, and note the time of the first refused call (T1); check the hub log for the rejection (`kubectl -n apps logs deploy/mcp-hub --since=5m --request-timeout=10s`). Record T0, the "file empty" time and T1 separately. Pass: T1 − T0 ≤ 2 min. (Without the pod delete, the worst case is about 150–165 s: kubelet Secret sync up to about 1.5 min plus the hub's 60 s re-read plus the 15 s asking interval — the reason for the pod delete.) If the loop gave up after 3 min, the file is not readable in the pod or the pod did not start: check `kubectl -n apps get pods -l app=mcp-hub --request-timeout=10s` and the log. Restore without touching SOPS (step 2 was not done in the drill): `ansible-playbook infra/playbooks/59_app_services.yml`; within about 3 minutes the next tool call works without a new login. L1 drill (docs/080 §10.4): create the L1 rule `mcp-hub: incident block` in the free custom-rule slot, ask Claude to list the accounts once — the call must be refused — then delete the rule and confirm that the next call works again (the free slot is free again). L4 drill: run L4, then ask Claude again — it must ask for a new login; reconnect, and the consent page must appear again (proof that the consent row was removed).
+
+Stage-a drill results (2026-10-01):
+
+| Lever | Result |
+|-------|--------|
+| L2 step 1 (kill switch) | 76 s from the patch to the first refused call (target ≤ 120 s); restore through playbook 59 without a new login |
+| L1 (edge block rule) | the call was refused while the rule existed and worked again after it was deleted |
+| L4 | the next call asked for a new login, and the consent page appeared again |
 
 ---
 
