@@ -105,7 +105,7 @@ All services are discoverable via Kubernetes internal DNS.
 
 | Service | FQDN | Port | Metrics Port | Authentication | Notes |
 |---------|------|------|---------------|----------------|-------|
-| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171) |
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171; excluded from the app-data dumps by design) |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |

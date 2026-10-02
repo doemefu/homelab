@@ -1875,7 +1875,7 @@ Playbook 40 (tunnel route, step (l)):
 - "Cloudflared deployen" fails because the chart archive cannot be fetched (on 2026-10-01 GitHub answered 504 for `cloudflare-tunnel-remote-0.1.2.tgz`, although the chart was cached): apply the route without the Helm step with `ansible-playbook infra/playbooks/40_platform.yml --start-at-task "CF Ingress-Konfiguration als Variable setzen"` — the tasks from there on depend only on variables. Run the whole playbook again later.
 - The cloudflared restart drops an SSH forward that runs through the tunnel (off-LAN `kubectl`/Ansible), so a task after it can fail with "connection refused". Re-establish the forward ("Off-LAN kubectl / Ansible Access") and run the same command again; the playbook is idempotent.
 
-Backups need no change now; `mcp_hub` (a database added with #171) will be dumped by `scripts/backup-app-data.sh` automatically.
+Backups: the token-store database `mcp_hub` (#171) is excluded from `scripts/backup-app-data.sh` by design — see "App-data backups to the operator's Mac (#64)" and (m) of "mcp-hub token store and the Outlook account".
 
 #### Cloudflare rules (owner, dashboard; recreate from these settings)
 
@@ -2591,7 +2591,7 @@ backups and for every restore.
 
 | Component | Artifacts | Consistency |
 |-----------|-----------|-------------|
-| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`) | application-consistent (`pg_dumpall --clean --if-exists`, `pg_dump -Fc`) |
+| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
 | `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`); the run fails if a shard directory on disk has no matching shard archive |
 | `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
 | `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
@@ -2657,7 +2657,7 @@ contains every workflow. To re-check an existing run directory:
 
 ```bash
 RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
-cat "$RUN/MANIFEST.txt"                        # every row must read OK
+cat "$RUN/MANIFEST.txt"                        # every row must read OK, except pg-mcp_hub.dump EXCLUDED (#171)
 (cd "$RUN" && shasum -a 256 -c SHA256SUMS)     # every line must read OK
 gzip -t "$RUN/pg-dumpall.sql.gz"
 tar -tzf "$RUN/n8n-data.tgz" >/dev/null
