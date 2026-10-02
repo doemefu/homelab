@@ -2451,8 +2451,10 @@ kubectl -n apps scale deploy/n8n --replicas=1
 
 #### PostgreSQL (all databases, before an image bump)
 
+`mcp_hub` is left out by design (#171, D65): the token store is re-created by a login, and a dump copy would be a live credential.
+
 ```bash
-kubectl -n apps exec postgresql-0 -c postgresql -- pg_dumpall -U postgres > ~/homelab-backups/$(date +%F)/pg-all.sql
+kubectl -n apps exec postgresql-0 -c postgresql -- pg_dumpall -U postgres --exclude-database=mcp_hub > ~/homelab-backups/$(date +%F)/pg-all.sql
 grep -c '^CREATE DATABASE' ~/homelab-backups/$(date +%F)/pg-all.sql
 kubectl -n apps exec postgresql-0 -c postgresql -- pg_dump -U postgres -Fc club_assistant > ~/homelab-backups/$(date +%F)/club_assistant.dump
 pg_restore -l ~/homelab-backups/$(date +%F)/club_assistant.dump | head -5
