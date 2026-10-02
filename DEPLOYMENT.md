@@ -1722,7 +1722,7 @@ Paste the commands one at a time (the `sops set … <<'JSON'` command up to the 
 
 ##### Stage b without the editor (`sops set`)
 
-Step 13 can also be done without the editor, in the same style as the step (f) alternative. Paste the commands one at a time. The two `read` lines prompt for the iCloud user name and the app-specific password (they work in zsh and bash); the password is not echoed, so press Enter after typing it.
+Step 13 can also be done without the editor, in the same style as the step (f) alternative. Paste the commands one at a time (the `if … fi` block counts as one command and is pasted only after both prompts have been answered). The two `read` lines prompt for the iCloud user name and the app-specific password (they work in zsh and bash); the password is not echoed, so press Enter after typing it.
 
 ```bash
 F=infra/inventory/group_vars/all.sops.yml
@@ -1740,7 +1740,7 @@ unset U P
 
 Then commit the re-encrypted file through a pull request (as for step (f)), run playbook 59 (step (h)) and restart the hub (step (n)).
 
-**Go-live result (2026-10-02).** Stage b was switched on on 2026-10-02. After the last step, about 30 s after the pod start, the hub log showed `status_check_cycle` with `outcome: ok` and `result_count: 2`, and `list_accounts` showed both capabilities (mail, calendar) working; use the same two checks after any later registry or credential change. Lesson: a mistyped value needed a second SOPS commit (`homelab#189`). The two `sops set --value-stdin` commands above can simply be repeated to overwrite the values; then commit through a pull request, re-run playbook 59 and delete the hub pod again (step (n)).
+**Go-live result (2026-10-02).** Stage b was switched on on 2026-10-02. After the last step, about 30 s after the pod start, the hub log showed `status_check_cycle` with `outcome: ok` and `result_count: 2`, and `list_accounts` showed both capabilities (mail, calendar) working; use the same two checks after any later registry or credential change. Lesson: a mistyped value needed a second SOPS commit (`homelab#189`). The block above can simply be run again to overwrite the values; then commit through a pull request, re-run playbook 59 and delete the hub pod again (step (n)).
 
 **User names for mail and calendar.** Apple documents the Apple Account e-mail as the CalDAV user name and the iCloud Mail address (or its name part) as the IMAP user name; when the Apple Account is not an iCloud address, the two differ. The registry allows a separate credential key per capability (`mail.username_ref`, `calendar.username_ref`). If `list_accounts` shows `auth_expired` for one capability and `ok` for the other after the first status check, add a second user-name key to `mcp_hub_credentials`, point that capability's `username_ref` to it in `mcp_hub_accounts`, run playbook 59 and delete the hub pod (step (n); a registry change). At go-live (2026-10-02) one username key served both mail and calendar, so this fallback was not needed.
 
