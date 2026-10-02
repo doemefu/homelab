@@ -70,7 +70,16 @@
 #   mcp_hub_allowed_subjects: <list of auth-service usernames, exact case; [] is valid and means "nobody">
 #       written as mcp-hub-secrets/allowed-subjects (one per line) — the hub's kill switch (docs/080 §4.6).
 #       Only "defined" is asserted, so the emergency value [] never blocks this play.
-#   The token-store DB/role and the #171 keys (db-password, token-encryption-key) are added by #171.
+#   Token store (#171, docs/080-mcp-hub.md §7.2) — OPTIONAL, set both or neither (needs the three hub variables above):
+#   mcp_hub_db_password: <openssl rand -hex 24>   # PostgreSQL password of role mcp_hub (database mcp_hub)
+#   mcp_hub_token_encryption_key: <openssl rand -base64 32>   # 32 random bytes, standard base64 (44 characters)
+#       written as mcp-hub-secrets/db-username (literal mcp_hub), db-password, token-encryption-key.
+#       The hub derives the key id from the key itself; a rotation needs no hub change (DEPLOYMENT.md
+#       "mcp-hub token store", (k)).
+#   mcp_hub_token_encryption_key_previous: <the previous key>  # only during a key rotation; written as
+#       token-encryption-key-previous. Removing it later leaves the key in the Secret until deleted by hand.
+#   With neither, the play skips the token store; with only one, or without the hub variables, it fails —
+#   in the Guards section, before any database or Secret task.
 #
 # claude-mcp-hub client in auth-service (docs/080-mcp-hub.md §4.1, §7.1) — OPTIONAL, set both or neither:
 #   auth_service_claude_mcp_hub_client_secret: <'{bcrypt}$2y$10$...' — bcrypt (cost 10) hash of the client secret;
@@ -111,6 +120,10 @@
       {{ mcp_hub_accounts is defined
          and mcp_hub_credentials is defined
          and mcp_hub_allowed_subjects is defined }}
+    # mcp-hub token store (#171): created only when both SOPS variables exist (see header).
+    mcp_hub_token_store_configured: >-
+      {{ mcp_hub_db_password is defined
+         and mcp_hub_token_encryption_key is defined }}
     # Keys of mcp-hub-secrets that this play (or #171) writes itself; credentials must not reuse them.
     mcp_hub_reserved_secret_keys:
       - accounts.json
@@ -222,6 +235,57 @@
           skipping the claude-mcp-hub keys in homelab-auth-secrets. Keys created by an earlier run are NOT removed;
           without them auth-service does not seed the claude-mcp-hub client.
       when: not auth_service_claude_mcp_hub_configured
+      delegate_to: localhost
+
+    - name: Mcp-hub token store — report that it is skipped
+      ansible.builtin.debug:
+        msg: >-
+          mcp_hub_db_password and mcp_hub_token_encryption_key are not set: skipping the mcp_hub database and the
+          token-store keys. Graph accounts stay disabled until both are set (DEPLOYMENT.md "mcp-hub token store").
+      when: >-
+        mcp_hub_db_password is not defined
+        and mcp_hub_token_encryption_key is not defined
+        and mcp_hub_token_encryption_key_previous is not defined
+      delegate_to: localhost
+
+    - name: Mcp-hub token store — assert that the hub variables exist (set all three mcp_hub_* first)
+      ansible.builtin.assert:
+        that:
+          - mcp_hub_accounts is defined
+          - mcp_hub_credentials is defined
+          - mcp_hub_allowed_subjects is defined
+        fail_msg: >-
+          An mcp-hub SOPS variable is missing: the token store needs mcp_hub_accounts, mcp_hub_credentials and
+          mcp_hub_allowed_subjects (set all three or none). See the header comment in this playbook.
+      when: >-
+        mcp_hub_db_password is defined
+        or mcp_hub_token_encryption_key is defined
+        or mcp_hub_token_encryption_key_previous is defined
+      delegate_to: localhost
+
+    - name: Mcp-hub token store — assert that the SOPS variables are set and valid
+      ansible.builtin.assert:
+        that:
+          - mcp_hub_db_password is defined
+          - mcp_hub_db_password is string
+          - mcp_hub_db_password is match('^[!-~]{16,128}\Z')
+          - mcp_hub_token_encryption_key is defined
+          - mcp_hub_token_encryption_key is string
+          - mcp_hub_token_encryption_key is match('^[A-Za-z0-9+/]{43}=\Z')
+          - >-
+            mcp_hub_token_encryption_key_previous is not defined
+            or (mcp_hub_token_encryption_key_previous is string
+                and mcp_hub_token_encryption_key_previous is match('^[A-Za-z0-9+/]{43}=\Z')
+                and mcp_hub_token_encryption_key_previous != mcp_hub_token_encryption_key)
+        fail_msg: >-
+          The mcp-hub token store needs both mcp_hub_db_password (16-128 printable characters without spaces, e.g.
+          openssl rand -hex 24) and mcp_hub_token_encryption_key (openssl rand -base64 32: 44 characters, standard
+          base64). mcp_hub_token_encryption_key_previous is optional, only during a key rotation, and must differ
+          from the current key. Set both or neither.
+      when: >-
+        mcp_hub_db_password is defined
+        or mcp_hub_token_encryption_key is defined
+        or mcp_hub_token_encryption_key_previous is defined
       delegate_to: localhost
 
     # --- PostgreSQL: database + user (idempotent) ---
@@ -717,7 +781,7 @@
 
     # --- mcp-hub: Secret mcp-hub-secrets (docs/080-mcp-hub.md §7.1, §8.1, §9.5) ---
     # First go-live (#170). The hub mounts the Secret read-only as files. The token-store DB/role and the
-    # #171 keys come with #171. Guarded (all three variables or none), so a missing hub value never
+    # #171 keys follow after this block. Guarded (all three variables or none), so a missing hub value never
     # fails the secrets of the other services.
 
     - name: Mcp-hub — report that the block is skipped
@@ -787,5 +851,118 @@
         # Jinja literal into a newline, so join('\n') would write a backslash and an n.
         mcp_hub_newline: "\n"
       when: mcp_hub_configured
+      no_log: true
+      delegate_to: localhost
+
+    # --- mcp-hub token store (#171, docs/080-mcp-hub.md §7.1, §7.2, §9.5) ---
+    # Role = database = mcp_hub, like data_service. The hub creates the schema mcp_hub on first use.
+    # The guards for these tasks are in the Guards section above.
+
+    - name: Mcp-hub token store — create PostgreSQL role (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - -c
+          - postgresql
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='mcp_hub'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE mcp_hub WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_mcp_hub_create_user
+      changed_when: "'CREATE ROLE' in pg_mcp_hub_create_user.stdout"
+      when: mcp_hub_token_store_configured | bool
+
+    - name: Mcp-hub token store — set/update PostgreSQL role password
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - -c
+          - postgresql
+          - --
+          - psql
+          - -v
+          - ON_ERROR_STOP=1
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ 'mcp_hub' | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ mcp_hub_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      # Password rotation is intentionally always enforced; SQL output is not a reliable change signal here.
+      # ON_ERROR_STOP (deliberate deviation from the data-service task, review 02 m2): a failed ALTER ROLE fails
+      # the task instead of exiting 0 behind no_log.
+      changed_when: false
+      when: mcp_hub_token_store_configured | bool
+
+    - name: Mcp-hub token store — create PostgreSQL database (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - -c
+          - postgresql
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='mcp_hub'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE mcp_hub OWNER mcp_hub"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_mcp_hub_create_db
+      changed_when: "'CREATE DATABASE' in pg_mcp_hub_create_db.stdout"
+      when: mcp_hub_token_store_configured | bool
+
+    - name: Mcp-hub token store — add the token-store keys to mcp-hub-secrets
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: mcp-hub-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          # Read by the hub from /etc/mcp-hub/secrets per use (docs/080 §7.2, §8.1); no restart needed once the
+          # kubelet has refreshed the files (about 1-2 min). Current and previous key go in ONE patch, so the kubelet
+          # never projects "new current, no previous" during a rotation (review 02 delta D4).
+          stringData: "{{ mcp_hub_token_store_data }}"
+      vars:
+        mcp_hub_token_store_data: >-
+          {{ {'db-username': 'mcp_hub', 'db-password': mcp_hub_db_password,
+              'token-encryption-key': mcp_hub_token_encryption_key}
+             | combine({'token-encryption-key-previous': mcp_hub_token_encryption_key_previous}
+                       if mcp_hub_token_encryption_key_previous is defined else {}) }}
+      when: mcp_hub_token_store_configured | bool
       no_log: true
       delegate_to: localhost
