@@ -1594,7 +1594,7 @@ Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(
 
 #### Order (first rollout, spec 080 §11.1 WP7)
 
-The go-live has two stages. **Stage a** runs with the registry entry switched off and no provider credential in the cluster; the hub image may already offer the mail tools (spec 080 D61) — with no enabled account they reach no provider. It proves the login, the token, the kill switch and the incident drill in production: the `icloud` registry entry is switched off (`enabled: false`) and `mcp_hub_credentials: {}`, so `icloud` shows `disabled` (`unknown` is reserved for enabled accounts whose adapter or check has not run yet). **Stage b** follows once the mail and calendar tools have shipped: it switches the `icloud` entry on and adds its credentials (step 13). Stage a was completed on 2026-10-01, stage b on 2026-10-02. Rolling back at any stage: once auth-service has seeded the `claude-mcp-hub` client (step 5), a revert of the auth-service change, an older auth-service image or a removed or renamed client entry is allowed only after "Disable and remove the `claude-mcp-hub` client" ("mcp-hub incident runbook").
+The go-live has two stages. **Stage a** runs with the registry entry switched off and no provider credential in the cluster; the hub image may already offer the mail tools (spec 080 D61) — with no enabled account they reach no provider. It proves the login, the token, the kill switch and the incident drill in production: the `icloud` registry entry is switched off (`enabled: false`) and `mcp_hub_credentials: {}`, so `icloud` shows `disabled` (`unknown` is reserved for enabled accounts whose adapter or check has not run yet). **Stage b** follows once the mail and calendar tools have shipped: it switches the `icloud` entry on and adds its credentials (step 13). Stage a was completed on 2026-10-01; stage b was switched on on 2026-10-02 (acceptance: `homelab#170`). Rolling back at any stage: once auth-service has seeded the `claude-mcp-hub` client (step 5), a revert of the auth-service change, an older auth-service image or a removed or renamed client entry is allowed only after "Disable and remove the `claude-mcp-hub` client" ("mcp-hub incident runbook").
 
 1. `homelab-mcp-hub` bootstrap merged: `k8s/` exists on `main`, CI pushed a first image `ghcr.io/doemefu/homelab-mcp-hub:main-…`.
 2. Owner prerequisites (a)–(f) below — the SOPS values **before** step 3.
@@ -1726,17 +1726,21 @@ Step 13 can also be done without the editor, in the same style as the step (f) a
 
 ```bash
 F=infra/inventory/group_vars/all.sops.yml
-sops set "$F" '["mcp_hub_accounts"]["accounts"][0]["enabled"]' 'true'
 printf 'iCloud user name: '; IFS= read -r U
 printf 'App-specific password: '; IFS= read -rs P; printf '\n'
-printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-username"]'
-printf '%s' "$P" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-app-password"]'
+if [ -n "$U" ] && [ -n "$P" ]; then
+  sops set "$F" '["mcp_hub_accounts"]["accounts"][0]["enabled"]' 'true'
+  printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-username"]'
+  printf '%s' "$P" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["icloud-app-password"]'
+else
+  echo 'Empty input: nothing was written. Run the block again.'
+fi
 unset U P
 ```
 
 Then commit the re-encrypted file through a pull request (as for step (f)), run playbook 59 (step (h)) and restart the hub (step (n)).
 
-**Go-live result (2026-10-02).** Stage b was completed on 2026-10-02. After the last step, about 30 s after the pod start, the hub log showed `status_check_cycle` with `outcome: ok` and `result_count: 2`, and `list_accounts` showed both capabilities (mail, calendar) working; use the same two checks after any later registry or credential change. Lesson: a mistyped value needed a second SOPS commit (`homelab#189`). The two `sops set --value-stdin` commands above can simply be repeated to overwrite the values; then commit through a pull request, re-run playbook 59 and delete the hub pod again (step (n)).
+**Go-live result (2026-10-02).** Stage b was switched on on 2026-10-02. After the last step, about 30 s after the pod start, the hub log showed `status_check_cycle` with `outcome: ok` and `result_count: 2`, and `list_accounts` showed both capabilities (mail, calendar) working; use the same two checks after any later registry or credential change. Lesson: a mistyped value needed a second SOPS commit (`homelab#189`). The two `sops set --value-stdin` commands above can simply be repeated to overwrite the values; then commit through a pull request, re-run playbook 59 and delete the hub pod again (step (n)).
 
 **User names for mail and calendar.** Apple documents the Apple Account e-mail as the CalDAV user name and the iCloud Mail address (or its name part) as the IMAP user name; when the Apple Account is not an iCloud address, the two differ. The registry allows a separate credential key per capability (`mail.username_ref`, `calendar.username_ref`). If `list_accounts` shows `auth_expired` for one capability and `ok` for the other after the first status check, add a second user-name key to `mcp_hub_credentials`, point that capability's `username_ref` to it in `mcp_hub_accounts`, run playbook 59 and delete the hub pod (step (n); a registry change). At go-live (2026-10-02) one username key served both mail and calendar, so this fallback was not needed.
 
