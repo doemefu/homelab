@@ -140,7 +140,7 @@ Internet
 
 ### mcp-hub
 
-**Domain (added 2026-09-28, ADR 0003):** read-only mail and calendar access for Claude (claude.ai custom connector) through one MCP endpoint, `https://mcp.furchert.ch/mcp` once the tunnel route (#177, second PR) is applied (Epic `homelab#168`, contract [`080-mcp-hub.md`](080-mcp-hub.md)). Python 3.13, own repository `homelab-mcp-hub`.
+**Domain (added 2026-09-28, ADR 0003):** read-only mail and calendar access for Claude (claude.ai custom connector) through one MCP endpoint, `https://mcp.furchert.ch/mcp` (live since 2026-10-01, #177; Epic `homelab#168`, contract [`080-mcp-hub.md`](080-mcp-hub.md)). Python 3.13, own repository `homelab-mcp-hub`.
 
 **Responsibilities:**
 - MCP tools `list_accounts`, `list_unread`, `get_message`, `get_events` (read-only; no provider writes)
@@ -153,7 +153,7 @@ Internet
 - Forward Claude's token to any provider or service
 
 **Database:** none at first go-live; PostgreSQL `mcp_hub` (role `mcp_hub`, encrypted provider refresh tokens) from #171.
-**Ports:** 8083 (MCP, tunnel route `mcp.furchert.ch` (#177, second PR)), 8084 (health/metrics, internal).
+**Ports:** 8083 (MCP, tunnel route `mcp.furchert.ch` (#177)), 8084 (health/metrics, internal).
 **Egress:** iCloud IMAP/CalDAV (#170), Gmail IMAP (#172), Microsoft Graph and login (#171); cluster-internal auth-service (JWKS).
 
 ---
