@@ -2038,6 +2038,7 @@ ssh -t -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared acce
 | `decrypt_failed` | The key changed without (k) | Run (g) |
 | `upstream_error` with cause `KeyUnavailable`; `token_refresh` field `exception` = `KeyUnreadable`, `KeyLength` or `SameKey` | The key file is missing, unreadable or not strict base64 (`KeyUnreadable`), the key is not exactly 32 bytes (`KeyLength`), or current = previous (`SameKey`) | Fix SOPS, (d) |
 | `upstream_error`; `token_refresh` field `exception` = `OperationalError` | No connection to the token store: the database is missing, the credentials are wrong or PostgreSQL is unreachable (the driver reports all three the same way) | Check `postgresql-0` and (e); a missing database → (m); wrong credentials → (d) |
+| `token_refresh` with `outcome=error` and field `exception` = `ConnectError`, `ConnectTimeout`, `TokenEndpointStatus` or similar, or `CallDeadline` / `TokenLock` | Microsoft's token endpoint is unreachable, slow or failing (egress, Microsoft outage); `CallDeadline` / `TokenLock`: the call ran out of time before or while waiting for a refresh | Check egress from the pod and Microsoft's service status; no owner action unless it persists |
 | `Throttled` | Microsoft back-off | Wait ≤ 5 min |
 | `check-registry` "registry error …" | The registry entry is malformed | Fix SOPS; do not delete the pod |
 
