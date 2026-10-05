@@ -153,7 +153,7 @@ Internet
 - Forward Claude's token to any provider or service
 
 **Database:** none at first go-live; PostgreSQL `mcp_hub` (role `mcp_hub`, encrypted provider refresh tokens) from #171.
-**Ports:** 8083 (MCP, tunnel route `mcp.furchert.ch` (#177)), 8084 (health/metrics, internal).
+**Ports:** 8083 (MCP, tunnel route `mcp.furchert.ch` (live)), 8084 (health/metrics, internal).
 **Egress:** iCloud IMAP/CalDAV (#170), Gmail IMAP (#172), Microsoft Graph and login (#171); cluster-internal auth-service (JWKS).
 
 ---
