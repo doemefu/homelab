@@ -1623,6 +1623,7 @@ Restart Flux-managed Deployments by deleting the pod: `kubectl -n apps delete po
 | credential keys (`icloud-username`, …) | when a provider connection opens; presence checked per `list_accounts` call | nothing, as long as the key names in `accounts.json` stay the same; a renamed or new key is a registry change |
 | `db-username`, `db-password`, `token-encryption-key` (#171) | per database connection or token refresh | nothing; a key change outside the rotation (k) of "mcp-hub token store and the Outlook account" means a re-login of every Graph account |
 | `token-encryption-key-previous` (#171, rotation only) | per use | nothing; remove it only through (k) |
+| `db-password` change (#171, deliberate password rotation) | per database connection | nothing, but playbook 59 runs `ALTER ROLE` before the Secret file is refreshed on the node: expect token-store errors (`OperationalError`) for about 2 min |
 
 #### Owner prerequisites
 
@@ -1910,25 +1911,25 @@ Then ask Claude to list the accounts once more (stage a); the tool call must sti
 ```bash
 kubectl config current-context
 # must be a LAN context: default (~/.kube/homelab.yaml) or home. Off-LAN see (d): kubectl config use-context tunnel
-gh pr list -R doemefu/homelab-mcp-hub --state merged --search "Graph in:title" --json number,title,mergedAt
+gh pr list -R doemefu/homelab-mcp-hub --state merged --search "Graph mail adapter in:title" --json number,title,mergedAt
 kubectl -n apps get deploy mcp-hub -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}' --request-timeout=10s
 kubectl -n apps exec deploy/mcp-hub -c mcp-hub --request-timeout=10s -- mcp-hub login; echo "exit $?"
-# expect: both hub PRs merged; the image tag main-YYYYMMDDTHHMMSS (UTC) is LATER than the mergedAt of the
-# "Graph mail adapter" PR (otherwise Flux has not rolled PR B yet: wait and repeat); usage text and exit 2
+# expect: one row, the merged "Graph mail adapter" PR; the image tag main-YYYYMMDDTHHMMSS (UTC) is LATER than its
+# mergedAt (otherwise Flux has not rolled PR B yet: wait and repeat); usage text and exit 2 (the login command is present)
 ```
 
 **(b) App registration** (one registration, shared with the later `uzh` account, spec 080 D68). In your own Entra tenant: App registrations → New registration (or the existing shared registration), Supported account types **Any Entra ID Tenant + Personal Microsoft accounts**, no redirect URI, no client secret; API permissions: remove `User.Read`, add Microsoft Graph delegated `Mail.Read`, `Calendars.Read` and `offline_access` (the `outlook` login requests only `Mail.Read` and `offline_access`); Authentication: **Allow public client flows = Yes**. Keep the Application (client) ID in the password manager; it goes into SOPS below and nowhere else. Do not upgrade the Azure free subscription and create no Azure resources (spec 080 §6.3, R28).
 
-**(c) SOPS values (editor-free).** Run in your checkout, on `main`, up to date. The password and the key are generated only if absent and never displayed; the key changes only through (k). The `read` line prompts for the client ID from (b); a value that is not a GUID writes nothing. The registry entry is appended only if the registry is exactly `[icloud]`, so a second run never overwrites an entry.
+**(c) SOPS values (editor-free).** Run in your checkout, on `main`, up to date. The password and the key are generated only if absent and never displayed; the key changes only through (k). The `read` line prompts for the client ID from (b); a value that is not a GUID writes nothing. The registry entry is appended only after the client ID was written and only if the registry is exactly `[icloud]`, so a second run never overwrites an entry.
 
 ```bash
 cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only
 F=infra/inventory/group_vars/all.sops.yml
 sops decrypt --extract '["mcp_hub_db_password"]' "$F" >/dev/null 2>&1 || openssl rand -hex 24 | tr -d '\n' | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_db_password"]'
 sops decrypt --extract '["mcp_hub_token_encryption_key"]' "$F" >/dev/null 2>&1 || openssl rand -base64 32 | tr -d '\n' | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_token_encryption_key"]'
-printf 'Outlook app (client) ID: '; IFS= read -r CID; CID=$(printf '%s' "$CID" | tr 'A-F' 'a-f')
-if printf '%s' "$CID" | grep -Eq '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$'; then printf '%s' "$CID" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["outlook-ms-client-id"]'; else echo 'Not a client ID: nothing written. Run this block again.'; fi; unset CID
-if [ "$(sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '[.[].id]')" = '["icloud"]' ]; then sops set "$F" '["mcp_hub_accounts"]["accounts"][1]' '{"id":"outlook","label":"Outlook.com","provider":"microsoft","enabled":true,"capabilities":{"mail":true,"calendar":false},"graph":{"tenant":"consumers","client_id_ref":"outlook-ms-client-id","scopes":["Mail.Read","offline_access"]},"mail":{"protocol":"graph"}}'; else echo 'Registry is not exactly [icloud]: nothing appended. Stop and check the registry.'; fi
+OK=0; printf 'Outlook app (client) ID: '; IFS= read -r CID; CID=$(printf '%s' "$CID" | tr 'A-F' 'a-f')
+if printf '%s' "$CID" | grep -Eq '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$'; then printf '%s' "$CID" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["outlook-ms-client-id"]' && OK=1; else echo 'Not a client ID: nothing written. Run this block again.'; fi; unset CID
+if [ "$OK" != 1 ]; then echo 'Fix the client ID first: nothing appended.'; else IDS=$(sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '[.[].id]'); if [ "$IDS" = '["icloud"]' ]; then sops set "$F" '["mcp_hub_accounts"]["accounts"][1]' '{"id":"outlook","label":"Outlook.com","provider":"microsoft","enabled":true,"capabilities":{"mail":true,"calendar":false},"graph":{"tenant":"consumers","client_id_ref":"outlook-ms-client-id","scopes":["Mail.Read","offline_access"]},"mail":{"protocol":"graph"}}'; elif [ "$IDS" = '["icloud","outlook"]' ]; then echo 'outlook already present: nothing appended.'; else echo 'Registry is not exactly [icloud]: nothing appended. Stop and check the registry.'; fi; unset IDS; fi; unset OK
 sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '[.[].id]'
 # expect: ["icloud","outlook"]
 ```
@@ -2035,8 +2036,8 @@ ssh -t -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared acce
 | `upstream_error` `Forbidden` | Permission or licence on the Microsoft side; a re-login does not help | Check the registration's permissions |
 | `persist_failed` (ERROR) | PostgreSQL problem; the previous token normally still works | Check `postgresql-0`, retry |
 | `decrypt_failed` | The key changed without (k) | Run (g) |
-| `KeyUnavailable` | The key file is missing or malformed, or current = previous | Fix SOPS, (d) |
-| `upstream_error` with cause `OperationalError` | No connection to the token store: the database is missing, the credentials are wrong or PostgreSQL is unreachable (the driver reports all three the same way) | Check `postgresql-0` and (e); a missing database → (m); wrong credentials → (d) |
+| `upstream_error` with cause `KeyUnavailable`; `token_refresh` field `exception` = `KeyUnreadable`, `KeyLength` or `SameKey` | The key file is missing, unreadable or not strict base64 (`KeyUnreadable`), the key is not exactly 32 bytes (`KeyLength`), or current = previous (`SameKey`) | Fix SOPS, (d) |
+| `upstream_error`; `token_refresh` field `exception` = `OperationalError` | No connection to the token store: the database is missing, the credentials are wrong or PostgreSQL is unreachable (the driver reports all three the same way) | Check `postgresql-0` and (e); a missing database → (m); wrong credentials → (d) |
 | `Throttled` | Microsoft back-off | Wait ≤ 5 min |
 | `check-registry` "registry error …" | The registry entry is malformed | Fix SOPS; do not delete the pod |
 
@@ -2088,10 +2089,12 @@ kubectl -n apps exec postgresql-0 -c postgresql --request-timeout=10s -- psql -U
 
 ```bash
 cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only && F=infra/inventory/group_vars/all.sops.yml && sops unset "$F" '["mcp_hub_token_encryption_key_previous"]' && git switch -c chore/sops-mcp-hub-key-rotation-done && git add infra/inventory/group_vars/all.sops.yml && git commit -m "chore(sops): finish the mcp-hub token key rotation (#171)" && git push -u origin chore/sops-mcp-hub-key-rotation-done && gh pr create -R doemefu/homelab --fill
-# merge it in GitHub; playbook 59 does not delete Secret keys, so remove it by hand after a key-name check:
-kubectl -n apps get secret mcp-hub-secrets -o json --request-timeout=10s | jq -r '.data | has("token-encryption-key-previous")'
-# true →
-kubectl -n apps patch secret mcp-hub-secrets --type=json -p '[{"op":"remove","path":"/data/token-encryption-key-previous"}]'
+```
+
+Merge the PR in GitHub, then (playbook 59 does not delete Secret keys, so the key is removed by hand after a key-name check):
+
+```bash
+if [ "$(kubectl -n apps get secret mcp-hub-secrets -o json --request-timeout=10s | jq -r '.data | has("token-encryption-key-previous")')" = true ]; then kubectl -n apps patch secret mcp-hub-secrets --type=json -p '[{"op":"remove","path":"/data/token-encryption-key-previous"}]'; else echo 'token-encryption-key-previous not found (or the Secret was not read): nothing removed.'; fi
 kubectl -n apps get secret mcp-hub-secrets -o json --request-timeout=10s | jq -r '.data | keys[]'
 # expect: token-encryption-key-previous is gone
 ```
@@ -2109,7 +2112,8 @@ Then PR + merge, (d), (e2), and the pod delete. The token row stays (ciphertext)
 **(m) Restore after a PostgreSQL instance loss.**
 
 - Database `mcp_hub` is excluded from the app-data dumps by design ("App-data backups to the operator's Mac (#64)"): a stored ciphertext plus the key is most likely a live mailbox credential.
-- While it is missing, the hub answers `upstream_error` for `outlook` (log `token_refresh` with cause `OperationalError` — the driver reports a missing database like any other failed connection), `list_accounts` shows `outlook` mail `error`, and the login exits 1 ("could not be stored").
+- While it is missing, the hub answers `upstream_error` for `outlook` (log `token_refresh` with field `exception` = `OperationalError` — the driver reports a missing database like any other failed connection), `list_accounts` shows `outlook` mail `error`, and the login exits 1 ("could not be stored").
+- `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run the fix below (playbook 59, then the login).
 - Fix: run playbook 59 as in (d), then the login (g). Playbook 59 creates the database (the role comes back with the `pg_dumpall` globals or is created; the password is reset). The first hub use migrates; `list_accounts` then shows `auth_expired` until the login.
 - Longhorn snapshots still hold the ciphertext; a snapshot restore brings back an older refresh token that most likely still works (Microsoft does not revoke previous tokens on use). Never store the key next to any copy of the database.
 
@@ -2593,7 +2597,7 @@ backups and for every restore.
 
 | Component | Artifacts | Consistency |
 |-----------|-----------|-------------|
-| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
+| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)). `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run (m) (playbook 59, then the login) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
 | `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`); the run fails if a shard directory on disk has no matching shard archive |
 | `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
 | `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
