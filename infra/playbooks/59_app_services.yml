@@ -241,7 +241,8 @@
       ansible.builtin.debug:
         msg: >-
           mcp_hub_db_password and mcp_hub_token_encryption_key are not set: skipping the mcp_hub database and the
-          token-store keys. Graph accounts stay disabled until both are set (DEPLOYMENT.md "mcp-hub token store").
+          token-store keys. A database and keys created by an earlier run are NOT removed (cut-off = the kill switch in spec 080 §4.6);
+          on a first-time setup Graph accounts stay disabled until both are set (DEPLOYMENT.md "mcp-hub token store").
       when: >-
         mcp_hub_db_password is not defined
         and mcp_hub_token_encryption_key is not defined
