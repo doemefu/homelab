@@ -37,7 +37,8 @@ readonly PG_CONTAINER="postgresql"
 # Databases are dumped individually on top of pg_dumpall (custom format = selective restore).
 # The list is read from the server at runtime, so a database created later is never silently
 # missed. Template databases and the "postgres" maintenance database are covered by pg_dumpall.
-readonly PG_DATABASE_QUERY="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
+# mcp_hub (#171) is excluded by design: a stored refresh-token ciphertext plus the key is a live credential, and the token is re-created by a login (docs/080 §7.2).
+readonly PG_DATABASE_QUERY="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres' AND datname <> 'mcp_hub'"
 
 readonly INFLUX_POD="influxdb2-0"
 
@@ -88,9 +89,11 @@ Options:
   --help              show this help.
 
 What lands in <dest>/<YYYY-MM-DD_HHMMSS>/:
-  pg-dumpall.sql.gz          all databases, roles and grants (pg_dumpall --clean --if-exists)
+  pg-dumpall.sql.gz          all databases except mcp_hub, roles and grants (pg_dumpall
+                             --clean --if-exists --exclude-database=mcp_hub)
   pg-<db>.dump               custom-format dump per database for selective pg_restore; the
-                             database list is read from the server at run time
+                             database list is read from the server at run time (mcp_hub is
+                             excluded, #171)
   influxdb2-backup.tgz       "influx backup" output (bolt + engine + SQL metadata store)
   n8n-workflows.json         all workflows (n8n export:workflow --all)
   n8n-credentials.json       all credentials, ENCRYPTED — restoring them needs the same
@@ -461,18 +464,21 @@ helper_pod_tar() {
 comp_postgresql() {
   local rc=0 db db_list
   local databases=()
-  log "      pg_dumpall (all databases, roles and grants)"
+  log "      pg_dumpall (all databases except mcp_hub, roles and grants)"
   # The password is expanded inside the pod only; it never reaches this shell or any log line.
   # shellcheck disable=SC2016  # $POSTGRES_PASSWORD must be expanded by the pod's shell
   if stream_gzip_to_file "${RUN_DIR}/pg-dumpall.sql.gz" \
        exec -n "$APPS_NS" "$PG_POD" -c "$PG_CONTAINER" -- \
-       sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dumpall -U postgres --clean --if-exists'; then
+       sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dumpall -U postgres --clean --if-exists --exclude-database=mcp_hub'; then
     verify_artifact postgresql "${RUN_DIR}/pg-dumpall.sql.gz" gzip || rc=1
   else
     record postgresql "pg-dumpall.sql.gz" "0" "FAILED"; rc=1
   fi
+  log "      mcp_hub excluded by design (#171)"
+  record postgresql "pg-mcp_hub.dump" "-" "EXCLUDED"
 
   if [[ "$DRY_RUN" == true ]]; then
+    plan "mcp_hub excluded from pg_dumpall and the per-database dumps (#171)"
     plan "kubectl exec ${PG_POD} -- psql -Atc \"${PG_DATABASE_QUERY}\""
     plan "kubectl exec ${PG_POD} -- pg_dump -Fc <db> > pg-<db>.dump   (one per database)"
     verify_artifact postgresql "${RUN_DIR}/pg-<db>.dump" pgdump

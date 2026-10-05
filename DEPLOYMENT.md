@@ -1620,9 +1620,12 @@ Restart Flux-managed Deployments by deleting the pod: `kubectl -n apps delete po
 
 | Key | Read by the hub | After a change |
 |-----|-----------------|----------------|
-| `accounts.json` (registry) | once, at start-up | **delete the hub pod** (step (n)) — every registry change: stage b, a new account (`gmail` #172, `outlook` #171, `uzh` #173), `enabled` on or off |
+| `accounts.json` (registry) | once, at start-up | **delete the hub pod** (step (n)) — every registry change: stage b, a new account (`gmail` #172, `outlook` #171, `uzh` #173), `enabled` on or off. Once the hub has `check-registry` (#171), run the registry check (e2) of "mcp-hub token store and the Outlook account" before the pod deletion |
 | `allowed-subjects` | re-read at least every 60 s | nothing (kill switch L2 adds a pod delete only to be faster) |
 | credential keys (`icloud-username`, …) | when a provider connection opens; presence checked per `list_accounts` call | nothing, as long as the key names in `accounts.json` stay the same; a renamed or new key is a registry change |
+| `db-username`, `db-password`, `token-encryption-key` (#171) | per database connection or token refresh | nothing; a key change outside the rotation (k) of "mcp-hub token store and the Outlook account" means a re-login of every Graph account |
+| `token-encryption-key-previous` (#171, rotation only) | per use | nothing; remove it only through (k) |
+| `db-password` change (#171, deliberate password rotation) | per database connection | nothing, but playbook 59 runs `ALTER ROLE` before the Secret file is refreshed on the node: expect token-store errors (`OperationalError`) for about 2 min |
 
 #### Owner prerequisites
 
@@ -1875,7 +1878,7 @@ Playbook 40 (tunnel route, step (l)):
 - "Cloudflared deployen" fails because the chart archive cannot be fetched (on 2026-10-01 GitHub answered 504 for `cloudflare-tunnel-remote-0.1.2.tgz`, although the chart was cached): apply the route without the Helm step with `ansible-playbook infra/playbooks/40_platform.yml --start-at-task "CF Ingress-Konfiguration als Variable setzen"` — the tasks from there on depend only on variables. Run the whole playbook again later.
 - The cloudflared restart drops an SSH forward that runs through the tunnel (off-LAN `kubectl`/Ansible), so a task after it can fail with "connection refused". Re-establish the forward ("Off-LAN kubectl / Ansible Access") and run the same command again; the playbook is idempotent.
 
-Backups need no change now; `mcp_hub` (a database added with #171) will be dumped by `scripts/backup-app-data.sh` automatically.
+Backups: the token-store database `mcp_hub` (#171) is excluded from `scripts/backup-app-data.sh` by design — see "App-data backups to the operator's Mac (#64)" and (m) of "mcp-hub token store and the Outlook account".
 
 #### Cloudflare rules (owner, dashboard; recreate from these settings)
 
@@ -1900,6 +1903,224 @@ Method is a rate-limiting field only from the Business plan on. On a Pro zone us
 | Action | Block |
 
 Then ask Claude to list the accounts once more (stage a); the tool call must still work. Not applied to `auth.furchert.ch`.
+
+### mcp-hub token store and the Outlook account (#171 onboarding)
+
+`outlook` (Outlook.com mail through Microsoft Graph, no calendar) needs the hub's token store: the PostgreSQL database `mcp_hub` (role `mcp_hub`, schema `mcp_hub`) and the `mcp-hub-secrets` keys `db-username`, `db-password` and `token-encryption-key`, created by playbook 59 once the SOPS variables `mcp_hub_db_password` and `mcp_hub_token_encryption_key` are set (set both or neither; they need the three `mcp_hub_*` hub variables). The refresh token is stored encrypted; the hub derives the key id from the key, so a key rotation (k) needs no hub change. Contract: `docs/080-mcp-hub.md` §6.3, §7.2, §7.3, §9.6. Run every command from the repository root unless it starts with `cd`. Every step that changes the cluster, Microsoft or SOPS is an owner action. Order: (a) → (b) → (c) → (c2) → (d) → (e) → (e2) → (f) → (g) → (h) → (i).
+
+**(a) Preconditions** (read-only):
+
+```bash
+kubectl config current-context
+# must be a LAN context: default (~/.kube/homelab.yaml) or home. Off-LAN see (d): kubectl config use-context tunnel
+gh pr list -R doemefu/homelab-mcp-hub --state merged --search "Graph mail adapter in:title" --json number,title,mergedAt
+kubectl -n apps get deploy mcp-hub -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}' --request-timeout=10s
+kubectl -n apps exec deploy/mcp-hub -c mcp-hub --request-timeout=10s -- mcp-hub login; echo "exit $?"
+# expect: one row, the merged "Graph mail adapter" PR; the image tag main-YYYYMMDDTHHMMSS (UTC) is LATER than its
+# mergedAt (otherwise Flux has not rolled PR B yet: wait and repeat); usage text and exit 2 (the login command is present)
+```
+
+**(b) App registration** (one registration, shared with the later `uzh` account, spec 080 D68). In your own Entra tenant: App registrations → New registration (or the existing shared registration), Supported account types **Any Entra ID Tenant + Personal Microsoft accounts**, no redirect URI, no client secret; API permissions: remove `User.Read`, add Microsoft Graph delegated `Mail.Read`, `Calendars.Read` and `offline_access` (the `outlook` login requests only `Mail.Read` and `offline_access`); Authentication: **Allow public client flows = Yes**. Keep the Application (client) ID in the password manager; it goes into SOPS below and nowhere else. Do not upgrade the Azure free subscription and create no Azure resources (spec 080 §6.3, R28).
+
+**(c) SOPS values (editor-free).** Run in your checkout, on `main`, up to date. The password and the key are generated only if absent and never displayed; the key changes only through (k). The `read` line prompts for the client ID from (b); a value that is not a GUID writes nothing. The registry entry is appended only after the client ID was written and only if the registry is exactly `[icloud]`, so a second run never overwrites an entry.
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only
+F=infra/inventory/group_vars/all.sops.yml
+sops decrypt --extract '["mcp_hub_db_password"]' "$F" >/dev/null 2>&1 || openssl rand -hex 24 | tr -d '\n' | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_db_password"]'
+sops decrypt --extract '["mcp_hub_token_encryption_key"]' "$F" >/dev/null 2>&1 || openssl rand -base64 32 | tr -d '\n' | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_token_encryption_key"]'
+OK=0; printf 'Outlook app (client) ID: '; IFS= read -r CID; CID=$(printf '%s' "$CID" | tr 'A-F' 'a-f')
+if printf '%s' "$CID" | grep -Eq '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$'; then printf '%s' "$CID" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["outlook-ms-client-id"]' && OK=1; else echo 'Not a client ID: nothing written. Run this block again.'; fi; unset CID
+if [ "$OK" != 1 ]; then echo 'Fix the client ID first: nothing appended.'; else IDS=$(sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '[.[].id]'); if [ "$IDS" = '["icloud"]' ]; then sops set "$F" '["mcp_hub_accounts"]["accounts"][1]' '{"id":"outlook","label":"Outlook.com","provider":"microsoft","enabled":true,"capabilities":{"mail":true,"calendar":false},"graph":{"tenant":"consumers","client_id_ref":"outlook-ms-client-id","scopes":["Mail.Read","offline_access"]},"mail":{"protocol":"graph"}}'; elif [ "$IDS" = '["icloud","outlook"]' ]; then echo 'outlook already present: nothing appended.'; else echo 'Registry is not exactly [icloud]: nothing appended. Stop and check the registry.'; fi; unset IDS; fi; unset OK
+sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '[.[].id]'
+# expect: ["icloud","outlook"]
+```
+
+Then commit the SOPS change through a pull request (as `#188`):
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch -c chore/sops-mcp-hub-outlook && git add infra/inventory/group_vars/all.sops.yml && git commit -m "chore(sops): mcp-hub token store and the outlook account (#171)" && git push -u origin chore/sops-mcp-hub-outlook && gh pr create -R doemefu/homelab --fill
+```
+
+**(c2) Merge the SOPS PR, then check presence (value-free).** Merge the PR in GitHub, then:
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only && F=infra/inventory/group_vars/all.sops.yml && for k in mcp_hub_db_password mcp_hub_token_encryption_key; do sops decrypt --extract "[\"$k\"]" "$F" >/dev/null 2>&1 && echo "$k present" || echo "$k MISSING - stop"; done; sops decrypt --extract '["mcp_hub_credentials"]' --output-type json "$F" | jq -r 'keys[]' | grep -x outlook-ms-client-id || echo "outlook-ms-client-id MISSING - stop"
+```
+
+**(d) Playbook 59** — check mode, then twice. On the LAN:
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && ansible-playbook infra/playbooks/59_app_services.yml --check --diff
+# expect: the asserts pass; the kubectl exec tasks are skipped in check mode; the Secret tasks show a hidden (no_log) change
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+# expect run 1: "Mcp-hub token store — create PostgreSQL role" and "… create PostgreSQL database" changed, the Secret task changed;
+# expect run 2: no mcp-hub task changed (the password tasks always report ok)
+```
+
+Off-LAN: the playbook's tasks run `kubectl` locally with the LAN kubeconfig. Start the port-forward of "Off-LAN kubectl / Ansible Access" first, run `kubectl config use-context tunnel`, then run the same commands with ` -e kubeconfig="$HOME/.kube/config"` appended (see the gotcha "playbooks hardcode the LAN kubeconfig" in that section).
+
+A partial setup (only one of the two variables, or the token-store variables without the three hub variables, or a malformed value) fails in the playbook's Guards section, before any database or Secret task of any service.
+
+**(e) Checks** (read-only):
+
+```bash
+kubectl -n apps get secret mcp-hub-secrets -o json --request-timeout=10s | jq -r '.data | keys[]'
+# expect additionally: db-password, db-username, outlook-ms-client-id, token-encryption-key
+kubectl -n apps exec postgresql-0 -c postgresql --request-timeout=10s -- psql -U postgres -tAc "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='mcp_hub'"
+# expect: mcp_hub|mcp_hub
+kubectl -n apps exec postgresql-0 -c postgresql --request-timeout=10s -- psql -U postgres -tAc "SELECT rolcanlogin, rolpassword IS NOT NULL, rolsuper FROM pg_authid WHERE rolname='mcp_hub'"
+# expect: t|t|f
+```
+
+**(e2) Registry check BEFORE the restart** (spec 080 §9.6, D66). The hub Deployment uses `Recreate`: a fatal registry error in the new pod would stop `icloud` too. The expected hash is computed from the Secret's own `accounts.json`; only the hash is printed:
+
+```bash
+S=$(kubectl -n apps get secret mcp-hub-secrets -o jsonpath='{.data.accounts\.json}' --request-timeout=10s | base64 -d | shasum -a 256 | cut -c1-12); echo "expected registry sha: $S"
+if [ -z "$S" ] || [ "$S" = e3b0c44298fc ]; then echo 'Secret not read - check the kubectl context (kubectl config current-context)'; else kubectl -n apps exec deploy/mcp-hub -c mcp-hub --request-timeout=30s -- mcp-hub check-registry --expect-sha "$S"; echo "exit $?"; fi
+# expect: "registry sha=… projected=…" with the same 12 hex as above, "registry ok", "account icloud mail imap ok",
+#         "account icloud calendar caldav ok", "account outlook mail graph ok", "account outlook key ok",
+#         "account outlook token none", exit 0.
+# "not the expected one yet": the kubelet has not refreshed the volume (up to about 2 min) - wait a minute and repeat.
+# Any "registry error …" or "missing …": do NOT delete the pod; fix SOPS ((c)), merge, rerun (d), repeat (e2).
+```
+
+Run (e2) **directly after (d)**: it protects only the planned pod deletion. An unplanned restart in between (a Flux image roll, a node reset, a liveness restart) would start on an unchecked registry.
+
+**(f) Restart the hub** (the registry changed): `kubectl -n apps delete pod -l app=mcp-hub`. About 30 s later, in claude.ai `list_accounts` shows `outlook` mail **auth_expired** (no token yet) — expected. Hub log:
+
+```bash
+kubectl -n apps logs deploy/mcp-hub --since=5m --request-timeout=10s | grep -E '"event": "(token_store_migrated|token_refresh)"'
+# expect token_store_migrated once and token_refresh with "outcome": "no_token"
+```
+
+**(g) Login** (owner's go for the cluster action; the command refuses to run without `-it`):
+
+```bash
+kubectl -n apps exec -it deploy/mcp-hub -c mcp-hub -- mcp-hub login outlook
+# off-LAN, one shot:
+ssh -t -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access ssh --hostname %h" ansible@ssh.furchert.ch 'sudo k3s kubectl -n apps exec -it deploy/mcp-hub -c mcp-hub -- mcp-hub login outlook'
+```
+
+- The command prints an address and a code. Open the address in a private browser window, enter the code and sign in with the Outlook.com account.
+- **Before you approve:** the app name must be the one you registered, and the list must contain only mail read and "Maintain access to data you have given it access to". Anything else, or a code you did not just see in this terminal → close the window and do not approve.
+- Exit 0 = stored; 1 = declined, expired or refused (run again; "Refused host: …" → report the host); 2 = configuration (token-store keys or registry missing, or no terminal).
+
+**(h) Verify.** In claude.ai, ask "What's unread in Outlook since yesterday?". Then open one listed mail (`get_message`, mandatory). Then ask "What's on my calendar tomorrow?": `outlook` is skipped without an error. The hub log shows `token_refresh` with `"outcome": "ok"` and `tool_call` lines with outcome `ok`. `list_accounts` turns `ok` at the next status check (≤ 30 min) or after the call.
+
+**(i) Definition-of-done checks:**
+
+- Daily for 7 days (session lead); the count must be > 0 each day:
+
+  ```bash
+  kubectl -n apps logs deploy/mcp-hub --since=24h --request-timeout=10s | grep '"event": "token_refresh"' | grep -c '"outcome": "ok"'
+  ```
+
+- **Mandatory revocation test:**
+  1. Remove the app's access in the Microsoft account's app-permissions settings (the account privacy settings list it under apps that can access your data).
+  2. Run `kubectl -n apps delete pod -l app=mcp-hub`.
+  3. Wait about 60 s: `list_accounts` shows `outlook` mail `auth_expired`, and the log shows `token_refresh` with `"outcome": "invalid_grant"` and an `error_code`.
+  4. Restore with (g).
+
+  If refreshes still succeed after the removal, report it: the cut-off order (spec 080 §4.6, "Cutting off a Graph account") then needs a password change.
+- **Tenant checks** on day 31 and day 35 after the Azure sign-up (session lead): the same `grep` and `list_accounts`.
+
+**(j) Troubleshooting:**
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| login exit 2 "token store is not configured" | (c)–(e) not done | Do (c)–(e) |
+| login exit 2 "interactive terminal" | `-it` missing | Rerun with `-it` |
+| `token_refresh` `no_token` | No login yet | Run (g) |
+| `invalid_grant` / `invalid_grant_recorded` | Microsoft rejected the refresh token | Run (g) |
+| `upstream_error` with exception `ClientRejected`, or login "Microsoft refused the app registration" | Client id wrong, or public client flows off | Fix (b) |
+| `upstream_error` `Forbidden` | Permission or licence on the Microsoft side; a re-login does not help | Check the registration's permissions |
+| `persist_failed` (ERROR) | PostgreSQL problem; the previous token normally still works | Check `postgresql-0`, retry |
+| `decrypt_failed` | The key changed without (k) | Run (g) |
+| `upstream_error` with cause `KeyUnavailable`; `token_refresh` field `exception` = `KeyUnreadable`, `KeyLength` or `SameKey` | The key file is missing, unreadable or not strict base64 (`KeyUnreadable`), the key is not exactly 32 bytes (`KeyLength`), or current = previous (`SameKey`) | Fix SOPS, (d) |
+| `upstream_error`; `token_refresh` field `exception` = `OperationalError` | No connection to the token store: the database is missing, the credentials are wrong or PostgreSQL is unreachable (the driver reports all three the same way) | Check `postgresql-0` and (e); a missing database → (m); wrong credentials → (d) |
+| `token_refresh` with `outcome=error` and field `exception` = `ConnectError`, `ConnectTimeout`, `TokenEndpointStatus` or similar, or `CallDeadline` / `TokenLock` | Microsoft's token endpoint is unreachable, slow or failing (egress, Microsoft outage); `CallDeadline` / `TokenLock`: the call ran out of time before or while waiting for a refresh | Check egress from the pod and Microsoft's service status; no owner action unless it persists |
+| `Throttled` | Microsoft back-off | Wait ≤ 5 min |
+| `check-registry` "registry error …" | The registry entry is malformed | Fix SOPS; do not delete the pod |
+
+**(k) Key rotation** (the key id is derived from the key, so the hub manifest does not change):
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only && F=infra/inventory/group_vars/all.sops.yml
+# 0. the kubectl context must be a LAN context (default in ~/.kube/homelab.yaml, or home)
+kubectl config current-context
+# 1. ONE guarded command — safe to run twice, never drops the original key:
+#    previous absent → copy current to previous, then write a new current; previous == current (an interrupted
+#    start) → only write a new current; previous present and different → rotation already started, change nothing.
+none=$(printf '' | shasum); cur=$(sops decrypt --extract '["mcp_hub_token_encryption_key"]' "$F" 2>/dev/null | shasum); prev=$(sops decrypt --extract '["mcp_hub_token_encryption_key_previous"]' "$F" 2>/dev/null | shasum)
+if [ "$cur" = "$none" ]; then echo 'Current key not readable: nothing changed. Stop.'; elif [ "$prev" = "$none" ]; then sops decrypt --extract '["mcp_hub_token_encryption_key"]' "$F" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_token_encryption_key_previous"]' && openssl rand -base64 32 | tr -d '\n' | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_token_encryption_key"]' && echo 'Rotation started: previous = old key, new current key written.'; elif [ "$prev" = "$cur" ]; then openssl rand -base64 32 | tr -d '\n' | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_token_encryption_key"]' && echo 'Interrupted start completed: new current key written.'; else echo 'Rotation already in progress (previous differs from current): nothing changed. Continue with step 2.'; fi; unset none cur prev
+# 2. own branch and PR, merge it in GitHub, then pull and note the time BEFORE playbook 59
+git switch -c chore/sops-mcp-hub-key-rotation && git add infra/inventory/group_vars/all.sops.yml && git commit -m "chore(sops): rotate the mcp-hub token encryption key (#171)" && git push -u origin chore/sops-mcp-hub-key-rotation && gh pr create -R doemefu/homelab --fill
+```
+
+Merge the PR in GitHub, then:
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only && F=infra/inventory/group_vars/all.sops.yml && T0=$(date -u +%Y-%m-%dT%H:%M:%SZ) && echo "playbook started at $T0" && ansible-playbook infra/playbooks/59_app_services.yml
+# 3. gate on the projection time: the volume must have been refreshed AFTER T0
+S=$(kubectl -n apps get secret mcp-hub-secrets -o jsonpath='{.data.accounts\.json}' --request-timeout=10s | base64 -d | shasum -a 256 | cut -c1-12)
+if [ -z "$S" ] || [ "$S" = e3b0c44298fc ]; then echo 'Secret not read - check the kubectl context (kubectl config current-context)'; else P=$(kubectl -n apps exec deploy/mcp-hub -c mcp-hub --request-timeout=30s -- mcp-hub check-registry --expect-sha "$S" | sed -n 's/^registry sha=[0-9a-f]* projected=\([^ ]*\)$/\1/p'); if [[ "$P" != 20??-??-??T??:??:??Z ]]; then echo "projected time not readable ($P): wait a minute and repeat this step"; elif [[ "$P" > "$T0" ]]; then echo "projected $P after $T0: continue"; else echo "projected $P not after $T0: wait a minute and repeat this step"; fi; fi
+# (the date-format check keeps "projected=unknown" from passing the comparison)
+# continue only after "continue"; "token previous" or "token current" are both fine at this point
+# 4. force a refresh (drops the cached access token; the first status check 30 s later re-encrypts the row)
+kubectl -n apps delete pod -l app=mcp-hub
+# 5. about 60 s later, every ENABLED Graph account must show "token current":
+kubectl -n apps exec deploy/mcp-hub -c mcp-hub --request-timeout=30s -- mcp-hub check-registry --expect-sha "$S"
+# 5b. value-free database gate: check-registry skips disabled accounts and cannot see rows of
+#     accounts no longer in the registry. Every stored row must carry the current key's derived id.
+E=$(sops decrypt --extract '["mcp_hub_token_encryption_key"]' "$F" | base64 -d | shasum -a 256 | cut -c1-16); echo "current key id: $E"
+kubectl -n apps exec postgresql-0 -c postgresql --request-timeout=10s -- psql -U postgres -d mcp_hub -tAc "SELECT account_id, key_id FROM mcp_hub.provider_tokens UNION ALL SELECT '#end', ''" | awk -F'|' -v e="$E" '$1 == "#end" {ok = 1; next} NF == 2 && $2 != e {print "NOT CURRENT: " $1} END {print ok ? "rows checked" : "NO RESULT - check the kubectl context and the database"}'
+# expect only "rows checked"; the sentinel row "#end" proves the query ran (a failed kubectl/psql prints NO RESULT)
+```
+
+- If step 5 shows `previous`, or step 5b prints a `NOT CURRENT: …` line:
+  - an **enabled** account (a recorded invalid grant, no refresh yet) → run (g) for it; the login re-encrypts the row;
+  - a **disabled** account or a row of an account no longer in the registry → delete that row (re-enabling the account later needs a login anyway):
+
+    ```bash
+    printf 'account id whose row is deleted: '; IFS= read -r A; if printf '%s' "$A" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'; then kubectl -n apps exec postgresql-0 -c postgresql --request-timeout=10s -- psql -U postgres -d mcp_hub -c "DELETE FROM mcp_hub.provider_tokens WHERE account_id='$A'"; else echo 'Not an account id: nothing deleted.'; fi; unset A
+    ```
+
+    Then repeat steps 5 and 5b.
+- **Only when step 5 shows `current` for every enabled Graph account and step 5b prints only "rows checked":**
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only && F=infra/inventory/group_vars/all.sops.yml && sops unset "$F" '["mcp_hub_token_encryption_key_previous"]' && git switch -c chore/sops-mcp-hub-key-rotation-done && git add infra/inventory/group_vars/all.sops.yml && git commit -m "chore(sops): finish the mcp-hub token key rotation (#171)" && git push -u origin chore/sops-mcp-hub-key-rotation-done && gh pr create -R doemefu/homelab --fill
+```
+
+Merge the PR in GitHub, then (playbook 59 does not delete Secret keys, so the key is removed by hand after a key-name check):
+
+```bash
+if [ "$(kubectl -n apps get secret mcp-hub-secrets -o json --request-timeout=10s | jq -r '.data | has("token-encryption-key-previous")')" = true ]; then kubectl -n apps patch secret mcp-hub-secrets --type=json -p '[{"op":"remove","path":"/data/token-encryption-key-previous"}]'; else echo 'token-encryption-key-previous not found (or the Secret was not read): nothing removed.'; fi
+kubectl -n apps get secret mcp-hub-secrets -o json --request-timeout=10s | jq -r '.data | keys[]'
+# expect: token-encryption-key-previous is gone
+```
+
+A rotation protects only ciphertexts written afterwards; it revokes no refresh token (spec 080 §7.2, threat model).
+
+**(l) Turning Outlook off** (guarded like (c)):
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && F=infra/inventory/group_vars/all.sops.yml && if [ "$(sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '.[1].id')" = '"outlook"' ]; then sops set "$F" '["mcp_hub_accounts"]["accounts"][1]["enabled"]' 'false'; else echo 'Entry 1 is not outlook: nothing changed.'; fi
+```
+
+Then PR + merge, (d), (e2), and the pod delete. The token row stays (ciphertext); to cut the account off for good, follow spec 080 §4.6 "Cutting off a Graph account" (remove consent, then a password change if needed, then delete the row).
+
+**(m) Restore after a PostgreSQL instance loss.**
+
+- Database `mcp_hub` is excluded from the app-data dumps by design ("App-data backups to the operator's Mac (#64)"): a stored ciphertext plus the key is most likely a live mailbox credential.
+- While it is missing, the hub answers `upstream_error` for `outlook` (log `token_refresh` with field `exception` = `OperationalError` — the driver reports a missing database like any other failed connection), `list_accounts` shows `outlook` mail `error`, and the login exits 1 ("could not be stored").
+- `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run the fix below (playbook 59, then the login).
+- Fix: run playbook 59 as in (d), then the login (g). Playbook 59 creates the database (the role comes back with the `pg_dumpall` globals or is created; the password is reset). The first hub use migrates; `list_accounts` then shows `auth_expired` until the login.
+- Longhorn snapshots still hold the ciphertext; a snapshot restore brings back an older refresh token that most likely still works (Microsoft does not revoke previous tokens on use). Never store the key next to any copy of the database.
+
+**One client ID for `outlook` and the later `uzh`** (D68). The shared registration has one client ID. It is stored once, as `mcp_hub_credentials["outlook-ms-client-id"]` (the spec 080 §8.1/§8.2 key for `#171`). Playbook 59 writes every key of `mcp_hub_credentials` into `mcp-hub-secrets`, and the registry's `client_id_ref` values are plain file names (§8.2), so a later `uzh` entry can name the same file (`"client_id_ref": "outlook-ms-client-id"`) without a second SOPS value. A neutral key name, or the decision to point `uzh` at the existing key, belongs in `#173`'s spec change; if the key is renamed then, the rename moves the value with `sops set` and changes the `outlook` entry's `client_id_ref` in the same SOPS commit, followed by (e2).
 
 ### mcp-hub incident runbook — cutting access
 
@@ -2237,8 +2458,10 @@ kubectl -n apps scale deploy/n8n --replicas=1
 
 #### PostgreSQL (all databases, before an image bump)
 
+`mcp_hub` is left out by design (#171, D65): the token store is re-created by a login, and a dump copy would be a live credential.
+
 ```bash
-kubectl -n apps exec postgresql-0 -c postgresql -- pg_dumpall -U postgres > ~/homelab-backups/$(date +%F)/pg-all.sql
+kubectl -n apps exec postgresql-0 -c postgresql -- pg_dumpall -U postgres --exclude-database=mcp_hub > ~/homelab-backups/$(date +%F)/pg-all.sql
 grep -c '^CREATE DATABASE' ~/homelab-backups/$(date +%F)/pg-all.sql
 kubectl -n apps exec postgresql-0 -c postgresql -- pg_dump -U postgres -Fc club_assistant > ~/homelab-backups/$(date +%F)/club_assistant.dump
 pg_restore -l ~/homelab-backups/$(date +%F)/club_assistant.dump | head -5
@@ -2377,7 +2600,7 @@ backups and for every restore.
 
 | Component | Artifacts | Consistency |
 |-----------|-----------|-------------|
-| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`) | application-consistent (`pg_dumpall --clean --if-exists`, `pg_dump -Fc`) |
+| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)). `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run (m) (playbook 59, then the login) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
 | `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`); the run fails if a shard directory on disk has no matching shard archive |
 | `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
 | `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
@@ -2443,7 +2666,7 @@ contains every workflow. To re-check an existing run directory:
 
 ```bash
 RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
-cat "$RUN/MANIFEST.txt"                        # every row must read OK
+cat "$RUN/MANIFEST.txt"                        # every row must read OK, except pg-mcp_hub.dump EXCLUDED (#171)
 (cd "$RUN" && shasum -a 256 -c SHA256SUMS)     # every line must read OK
 gzip -t "$RUN/pg-dumpall.sql.gz"
 tar -tzf "$RUN/n8n-data.tgz" >/dev/null
