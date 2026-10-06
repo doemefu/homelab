@@ -35,16 +35,22 @@ data:
       # See club_assist/k8s/litellm-values/config-additions.yaml for full evidence/rationale.
       # Provider routes: max_budget here is a BACKSTOP only — the club-* aliases below
       # carry the primary, tighter per-alias budgets for normal traffic.
+      # M4 Q4 review (2026-10-06, D-M4, OD-4 = O-H2; club_assist worklog 20261006-001500-m4-model-routing-q4-18db): both provider routes follow the Gemini
+      # lineup. gemini-flash -> Gemini 3.8 Flash. gemini-pro -> gemini-3.1-pro-preview, a PREVIEW model that Google can
+      # withdraw (gemini-3-pro-preview already carried a past deprecation_date). Fallback if it is withdrawn:
+      # gemini/gemini-3.8-flash (or gemini/gemini-2.5-pro while it is still served). RULE: no club-* alias may target
+      # gemini-pro or any preview model. Re-check the Gemini deprecations page monthly; the quarterly model review
+      # re-verifies this route.
       - model_name: gemini-flash
         litellm_params:
-          model: gemini/gemini-3.5-flash
+          model: gemini/gemini-3.8-flash
           api_key: os.environ/GEMINI_API_KEY
           max_budget: 5
           budget_duration: 30d
 
       - model_name: gemini-pro
         litellm_params:
-          model: gemini/gemini-2.5-pro
+          model: gemini/gemini-3.1-pro-preview
           api_key: os.environ/GEMINI_API_KEY
           max_budget: 5
           budget_duration: 30d
