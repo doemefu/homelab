@@ -90,18 +90,22 @@ data:
           max_budget: 2
           budget_duration: 30d
 
+      # M4 (2026-10-06, D-M4; club_assist worklog 20261006-001500-m4-model-routing-q4-18db), TEMPORARY budget raise (F3): one Evaluate-all is 60 rows
+      # (45 scenario + 15 ladder). club-draft carries the v1.1 baseline AND the v1.2 A/B arm A in one 30d window
+      # (about 25 USD); club-draft-long carries arm B and the drafting gate. Restored to 5 / 3 in the club-draft
+      # 3.8 Flash commit, when the A/B is over.
       - model_name: club-draft
         litellm_params:
           model: gemini/gemini-3.5-flash
           api_key: os.environ/GEMINI_API_KEY
-          max_budget: 5
+          max_budget: 35  # temporary, was 5
           budget_duration: 30d
 
       - model_name: club-draft-long
         litellm_params:
           model: gemini/gemini-2.5-pro
           api_key: os.environ/GEMINI_API_KEY
-          max_budget: 3
+          max_budget: 11  # temporary, was 3
           budget_duration: 30d
 
       # D21 (2026-07-06): complex reasoning on Mistral 3.5 ("Vibe" — Mistral's most
