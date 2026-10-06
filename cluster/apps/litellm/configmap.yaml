@@ -101,9 +101,12 @@ data:
           max_budget: 35  # temporary, was 5
           budget_duration: 30d
 
+      # M4 Q4 review (2026-10-06, D-M4; club_assist worklog 20261006-001500-m4-model-routing-q4-18db):
+      # club-draft-long leaves gemini-2.5-pro (Pro tier retired) for Gemini 3.8 Flash (GA, 1,048,576 ctx,
+      # 65,536 out; intro price $0.75/$3.75 per Mtok until 2026-12-31, then $1.50/$7.50).
       - model_name: club-draft-long
         litellm_params:
-          model: gemini/gemini-2.5-pro
+          model: gemini/gemini-3.8-flash
           api_key: os.environ/GEMINI_API_KEY
           max_budget: 11  # temporary, was 3
           budget_duration: 30d
