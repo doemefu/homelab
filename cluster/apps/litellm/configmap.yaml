@@ -133,9 +133,13 @@ data:
       # Sonnet 5 rejects sampling parameters (400 "temperature is deprecated for this model", observed live
       # 2026-08-25 on the first chat turn); the global LITELLM_DROP_PARAMS only drops provider-unsupported keys,
       # so the route drops them explicitly — clients (the n8n OpenAI Chat Model node) may still send them.
+      # M4 Q4 review (2026-10-06, D-M4; club_assist worklog 20261006-001500-m4-model-routing-q4-18db): Sonnet 5 -> Sonnet 5.5 (same price, $2/$10 per Mtok).
+      # Sonnet 5.5 also rejects `thinking: disabled`, non-default sampling parameters and forced `tool_choice`;
+      # keep additional_drop_params below. `reasoning_effort` stays UNSET (OD-5; never `none` on this model);
+      # tuning knob only if truncation shows in the AC-3.2 / RT-C runs.
       - model_name: club-sparring
         litellm_params:
-          model: anthropic/claude-sonnet-5
+          model: anthropic/claude-sonnet-5-5
           api_key: os.environ/ANTHROPIC_API_KEY
           max_budget: 15
           budget_duration: 30d
