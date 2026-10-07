@@ -124,7 +124,7 @@ All services are discoverable via Kubernetes internal DNS.
 
 **data-service outbound destinations** (`docs/060-network-monitoring.md` §10): `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`, plus cluster-internal auth-service (:8080), Prometheus (`kube-prometheus-stack-prometheus.monitoring`:9090) and PostgreSQL (:5432). Blocklists are fetched only by data-service.
 
-**mcp-hub outbound destinations** (`docs/080-mcp-hub.md` §9.7): `imap.mail.me.com:993`, `caldav.icloud.com:443` and its `pNN-caldav.icloud.com:443` partition hosts (#170); Gmail IMAP `:993` (#172); `graph.microsoft.com:443`, `login.microsoftonline.com:443` (#171); the university's published-calendar host only if #173 uses a published calendar; cluster-internal auth-service (:8080, JWKS) and PostgreSQL (:5432, database `mcp_hub`). No NetworkPolicy yet (homelab#127).
+**mcp-hub outbound destinations** (`docs/080-mcp-hub.md` §9.7): `imap.mail.me.com:993`, `caldav.icloud.com:443` and its `pNN-caldav.icloud.com:443` partition hosts (#170); Gmail IMAP `imap.gmail.com:993` (#172); `graph.microsoft.com:443`, `login.microsoftonline.com:443` (#171); the university's published-calendar host only if #173 uses a published calendar; cluster-internal auth-service (:8080, JWKS) and PostgreSQL (:5432, database `mcp_hub`). No NetworkPolicy yet (homelab#127).
 
 ### Platform Services
 
