@@ -2215,6 +2215,8 @@ if [ -z "$S" ] || [ "$S" = e3b0c44298fc ]; then echo 'Secret not read - check th
 # expect: "registry sha=… projected=…" with the same 12 hex as above, "registry ok", "account icloud mail imap ok",
 #         "account icloud calendar caldav ok", "account outlook mail graph ok", "account outlook key ok",
 #         "account outlook token current", "account gmail mail imap ok", exit 0.
+# Note: check-registry validates configuration only, it does not log in. It also passes with credentials from the wrong Google account;
+#       V3 is the real login test.
 # "not the expected one yet": the kubelet has not refreshed the volume (up to about 2 min) - wait a minute and repeat.
 # Any "registry error …" or "missing …": do NOT delete the pod; fix SOPS ((c)), merge, rerun (d), repeat (e2).
 ```
@@ -2242,6 +2244,8 @@ Notes: Gmail's INBOX over IMAP includes every category tab (Promotions, Social, 
 |---|---|---|
 | `gmail` shows `error` right after onboarding, hub log `status_check_failed` / `provider_call_failed` with `LoginError` | Google refused the login: the normal account password was used (`[ALERT] Application-specific password required`), or Google wants a browser sign-in (`[ALERT] … web browser`, suspicious-login protection). The hub maps these to `upstream_error` (status `error`, not `auth_expired`; follow-up `doemefu/homelab-mcp-hub#29`) | Sign in at gmail.com in a browser, check the Google account's Security alerts, create a new app password (a), repeat (c) for the password key, (d), (e2); no restart is needed |
 | `gmail` shows `auth_expired` | The app password was revoked, or the Google account password changed | New app password into `gmail-app-password` in SOPS, merge, playbook 59 (d); the key name stays the same, so no restart; the status returns to `ok` at the next check (≤ 30 min) |
+| `auth_expired` right after onboarding | The app password was created under a different Google account than the one in `gmail-username` | Create the app password while signed in to the account whose address is `gmail-username`, update SOPS, merge, playbook 59 (d); no restart needed |
+| `upstream_timeout` on the first calls (`list_unread`, `get_message`) | Gmail is slow on the first IMAP access to a large, long-unused mailbox (observed 2026-10-07: several seconds for single commands, normal after about 30 minutes) | Retry after some minutes; it settles. Nothing to change |
 | `gmail` shows `disabled` | A credential key is missing from the Secret | Check (e); redo (c)–(d) and restart (f) |
 | `check-registry` "registry error …" | The registry entry is malformed | Fix SOPS; do not delete the pod |
 
