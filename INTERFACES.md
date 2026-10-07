@@ -13,7 +13,7 @@ This document defines all **integration interfaces** this infrastructure platfor
 |-----------|----------|----------|-----------------|
 | **Public URL Interface** | External clients, end users | Public hostnames routed via Cloudflare Tunnel | `infra/playbooks/40_platform.yml` |
 | **Internal Service Discovery** | In-cluster workloads | Kubernetes DNS: `<service>.<namespace>.svc.cluster.local` | Kubernetes Service objects |
-| **GitOps Interface (Flux)** | App repositories (auth-service, device-service, furchert-ch, data-service) | Flux reconciliation from `cluster/apps/<app>/` | `cluster/apps/`, `cluster/flux-system/apps-sync.yaml` |
+| **GitOps Interface (Flux)** | App repositories (auth-service, device-service, furchert-ch, data-service, mcp-hub) | Flux reconciliation from `cluster/apps/<app>/` | `cluster/apps/`, `cluster/flux-system/apps-sync.yaml` |
 | **Ansible App Interface** | Ansible-managed apps (n8n, LiteLLM, Open WebUI, Home Assistant) | Playbook-applied manifests from `cluster/apps/<app>/` (n8n, LiteLLM, Open WebUI) or Helm values from `cluster/values/` (Home Assistant) | `infra/playbooks/52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml`, `51_homeassistant.yml`, `59_app_services.yml` |
 | **Storage Interface** | Stateful workloads | Longhorn default StorageClass (RF=2), local-path for ephemeral | `infra/playbooks/30_longhorn.yml` |
 | **Secrets Interface** | Workloads needing credentials | SOPS-encrypted vars → Kubernetes Secrets | `infra/inventory/group_vars/all.sops.yml`, `infra/playbooks/59_app_services.yml` |
@@ -52,6 +52,7 @@ All external access goes through Cloudflare Tunnel. Public hostnames are **centr
 | `n8n.furchert.ch` | `http://n8n.apps.svc.cluster.local:80` | HTTP | n8n | Workflow automation (container: 5678) |
 | `ai.furchert.ch` | `http://litellm.apps.svc.cluster.local:4000` | HTTP | LiteLLM | AI gateway, OpenAI-compatible |
 | `club.furchert.ch` | `http://open-webui.apps.svc.cluster.local:80` | HTTP | Open WebUI (Club Assistant) | Chat UI (container: 8080) |
+| `mcp.furchert.ch` | `http://mcp-hub.apps.svc.cluster.local:8083` | HTTP | mcp-hub | MCP endpoint `/mcp` for the claude.ai custom connector (OAuth access tokens from auth-service client `claude-mcp-hub`); internal port 8084 is never routed; WAF allows only Anthropic's egress range (`docs/080-mcp-hub.md` §4.7) |
 
 ### Adding a New Public Endpoint
 
@@ -104,7 +105,7 @@ All services are discoverable via Kubernetes internal DNS.
 
 | Service | FQDN | Port | Metrics Port | Authentication | Notes |
 |---------|------|------|---------------|----------------|-------|
-| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`) |
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171; excluded from the app-data dumps by design) |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |
@@ -119,8 +120,11 @@ All services are discoverable via Kubernetes internal DNS.
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | IoT device management |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Public site (Next.js) + OIDC-gated /dashboard |
 | data-service | `data-service.apps.svc.cluster.local` | 8082 | Analytical data plane (ADR 0002): network-telemetry read API `/api/netmon/*` (JWT with `SCOPE_netmon:read` **and** `sub` in `netmon.api.allowed-clients`, default `furchert-ch`; `ROLE_ADMIN` not accepted in v1 — 060 §7.5), cluster-internal only — no tunnel route; contract `docs/060-network-monitoring.md` |
+| mcp-hub | `mcp-hub.apps.svc.cluster.local` | 8083 (MCP), 8084 (health/metrics, internal) | Read-only mail and calendar tools for Claude; resource server for auth-service tokens (audience `https://mcp.furchert.ch/mcp`, scopes `mail:read calendar:read`); contract `docs/080-mcp-hub.md` |
 
 **data-service outbound destinations** (`docs/060-network-monitoring.md` §10): `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`, plus cluster-internal auth-service (:8080), Prometheus (`kube-prometheus-stack-prometheus.monitoring`:9090) and PostgreSQL (:5432). Blocklists are fetched only by data-service.
+
+**mcp-hub outbound destinations** (`docs/080-mcp-hub.md` §9.7): `imap.mail.me.com:993`, `caldav.icloud.com:443` and its `pNN-caldav.icloud.com:443` partition hosts (#170); Gmail IMAP `:993` (#172); `graph.microsoft.com:443`, `login.microsoftonline.com:443` (#171); the university's published-calendar host only if #173 uses a published calendar; cluster-internal auth-service (:8080, JWKS) and PostgreSQL (:5432, database `mcp_hub`). No NetworkPolicy yet (homelab#127).
 
 ### Platform Services
 
@@ -181,6 +185,7 @@ All services are discoverable via Kubernetes internal DNS.
 - `device-service` — for device-service authentication
 - `furchert-ch` — for the furchert-ch `/dashboard` SSO; also `client_credentials` with scope `netmon:read` for server-side calls to data-service (auth-service migration V6)
 - `data-service` — `client_credentials` only, scope `login-events:read`, no redirect URIs; data-service pulls auth-service's login-event outbox (`GET /api/v1/login-events`, NM-4, `docs/060-network-monitoring.md` §7.6). Seeded only once `data-service-client-secret` exists (optional NM-4 keys below)
+- `claude-mcp-hub` — confidential client for the claude.ai connector: `authorization_code` + `refresh_token` (rotation), PKCE, consent, owner-only allowlist, scopes `mail:read calendar:read`, access tokens only for audience `https://mcp.furchert.ch/mcp` (`docs/080-mcp-hub.md` §4.1–§4.2). Seeded only once `claude-mcp-hub-client-secret` exists (optional keys below)
 
 > **Full API contract**: See [homelab-auth-service repository](https://github.com/doemefu/homelab-auth-service)
 
@@ -200,7 +205,7 @@ Real-time IoT device management service.
 
 ### Flux-Managed Applications
 
-**Applications**: `auth-service`, `device-service`, `furchert-ch`, `data-service`
+**Applications**: `auth-service`, `device-service`, `furchert-ch`, `data-service`, `mcp-hub`
 
 **Reconciliation Flow**:
 1. App repository contains `k8s/` directory with Kubernetes manifests
@@ -289,10 +294,11 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 
 | Secret | Namespace | Contains | Used By | Rotation Notes |
 |--------|-----------|---------|---------|-----------------|
-| `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service, furchert-ch); optional NM-4 keys `data-service-client-secret` (`{noop}`-prefixed, env `DATA_SERVICE_CLIENT_SECRET`) and `login-event-hmac-key` (≥ 32 chars, env `LOGIN_EVENT_HMAC_KEY`), created only when both NM-4 SOPS variables are set (`docs/060-network-monitoring.md` §9) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention). Restart auth-service after adding the NM-4 keys. Rotating `data-service-client-secret` also needs the `oauth2_registered_client` row updated (the seeder never updates an existing client); rotating `login-event-hmac-key` breaks HMAC continuity of stored login events |
+| `homelab-auth-secrets` | `apps` | OIDC client secrets (n8n, litellm, grafana, ha, device-service, furchert-ch); optional NM-4 keys `data-service-client-secret` (`{noop}`-prefixed, env `DATA_SERVICE_CLIENT_SECRET`) and `login-event-hmac-key` (≥ 32 chars, env `LOGIN_EVENT_HMAC_KEY`), created only when both NM-4 SOPS variables are set (`docs/060-network-monitoring.md` §9) | auth-service, n8n, LiteLLM | Some keys require `{noop}` prefix (auth-service convention). Restart auth-service after adding the NM-4 keys. Rotating `data-service-client-secret` also needs the `oauth2_registered_client` row updated (the seeder never updates an existing client); rotating `login-event-hmac-key` breaks HMAC continuity of stored login events; optional keys `claude-mcp-hub-client-secret` (a `{bcrypt}` hash written verbatim, env `CLAUDE_MCP_HUB_CLIENT_SECRET`) and `claude-mcp-hub-allowed-users` (env `CLAUDE_MCP_HUB_ALLOWED_USERS`), created only when both SOPS variables are set; rotating the client secret also needs the `oauth2_registered_client` row updated (DEPLOYMENT.md "mcp-hub incident runbook", L5) |
 | `n8n-secrets` | `apps` | n8n encryption key | n8n | Rotate via `59_app_services.yml`, restart n8n deployment |
 | `litellm-secrets` | `apps` | LiteLLM master key, salt key, DB password, Mistral API keys | LiteLLM | **`litellm_salt_key` MUST NEVER rotate** — invalidates all virtual keys in DB |
 | `data-service-secrets` | `apps` | Postgres credentials for DB `data_service` (`db-username` = literal `data_service`, `db-password`); Cloudflare GraphQL Analytics access `cloudflare-api-token`, `cloudflare-zone-id` (NM-1, #116; env `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID`); optional `auth-client-secret` (NM-4, plain value of `auth_service_data_service_client_secret`, env `AUTH_CLIENT_SECRET`, created only when both NM-4 SOPS variables are set); optional `abuseipdb-api-key` (NM-1 follow-up, from SOPS `data_service_abuseipdb_key`, env `ABUSEIPDB_API_KEY`, created only when the variable is set) (`docs/060-network-monitoring.md` §9) | data-service | Rotate via `59_app_services.yml` (re-sets the role password and the Secret), then `kubectl -n apps delete pod -l app=data-service` — env vars are read at pod start, and Flux reverts `rollout restart` |
+| `mcp-hub-secrets` | `apps` | Account registry (`accounts.json`), subject allowlist (`allowed-subjects`, one username per line; empty = every token rejected), one key per provider credential (`docs/080-mcp-hub.md` §7.1, §8.1); optional token-store keys `db-username` (literal `mcp_hub`), `db-password`, `token-encryption-key`, `token-encryption-key-previous` (rotation only), created only when `mcp_hub_db_password` and `mcp_hub_token_encryption_key` are set; read by the hub per use; the key id is derived from the key (§7.2) | mcp-hub (mounted read-only at `/etc/mcp-hub/secrets`) | Rotate via `59_app_services.yml`; the kubelet refreshes the files in about 1–2 min. Credential rotation (same key names) and `allowed-subjects`: no restart. Registry (`accounts.json`) changes: delete the hub pod (`kubectl -n apps delete pod -l app=mcp-hub`), because the hub reads it only at start-up. Keys removed from SOPS stay until removed by hand. Kill switch: DEPLOYMENT.md "mcp-hub incident runbook", L2 |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
 | `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), SMTP password (`smtp-password`, contact-form delivery, furchert-ch#46) | furchert-ch | Rotate via `59_app_services.yml`; `smtp-password` is an Infomaniak application password, independently revocable from the mailbox login password |
@@ -324,6 +330,9 @@ From `59_app_services.yml` (app secrets):
 **Optional** in `59_app_services.yml` (set both or neither; one alone fails the play):
 - `auth_service_data_service_client_secret` (plain, no `{noop}`; e.g. `openssl rand -hex 32` — NM-4 login events)
 - `auth_service_login_event_hmac_key` (at least 32 characters, e.g. `openssl rand -base64 48` — NM-4 login events)
+- `mcp_hub_accounts`, `mcp_hub_credentials` (`{}` valid), `mcp_hub_allowed_subjects` (`[]` = nobody; the kill switch) — set all three or none; with none, playbook 59 skips `mcp-hub-secrets`
+- `mcp_hub_db_password`, `mcp_hub_token_encryption_key` (set both or neither; need the three hub variables), `mcp_hub_token_encryption_key_previous` (rotation only) — the token store (#171)
+- `auth_service_claude_mcp_hub_client_secret` (`{bcrypt}` hash, cost 10), `auth_service_claude_mcp_hub_allowed_users` (set both or neither)
 
 From `50_apps_infra.yml` (shared infrastructure):
 - `postgresql_password`

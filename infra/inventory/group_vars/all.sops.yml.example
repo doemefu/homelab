@@ -171,3 +171,17 @@ data_service_cloudflare_zone_id: "CHANGE_ME_cloudflare_zone_id"
 #   Generate: openssl rand -base64 48
 # auth_service_data_service_client_secret: "CHANGE_ME_openssl_rand_hex_32"
 # auth_service_login_event_hmac_key: "CHANGE_ME_openssl_rand_base64_48_min_32_chars"
+
+# mcp-hub (docs/080-mcp-hub.md §7.1) — set all three or none; see DEPLOYMENT.md "mcp-hub (Flux, #170 onboarding)"
+mcp_hub_accounts:
+  version: 1
+  accounts: []            # account registry, structure only (no addresses); example in DEPLOYMENT.md
+mcp_hub_credentials: {}   # Secret key name -> value, e.g. icloud-username, icloud-app-password
+mcp_hub_allowed_subjects: []   # auth-service usernames, exact case; [] = nobody (kill switch)
+# mcp-hub token store (#171) — optional, set both or neither; needs the three mcp_hub_* variables above
+# mcp_hub_db_password: 'CHANGE_ME'                     # openssl rand -hex 24
+# mcp_hub_token_encryption_key: 'CHANGE_ME'            # openssl rand -base64 32 (44 characters)
+# mcp_hub_token_encryption_key_previous: 'CHANGE_ME'   # only during a key rotation (DEPLOYMENT.md (k))
+# auth-service client claude-mcp-hub — optional, set both or neither
+# auth_service_claude_mcp_hub_client_secret: '{bcrypt}CHANGE_ME'   # command in DEPLOYMENT.md
+# auth_service_claude_mcp_hub_allowed_users: 'CHANGE_ME'           # auth-service username, exact case

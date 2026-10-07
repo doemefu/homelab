@@ -46,7 +46,7 @@ Follow this loop for **every change** to this repository:
 | LiteLLM runtime | `infra/playbooks/53_litellm.yml`, `cluster/apps/litellm/` | `53_litellm.yml` |
 | Open WebUI / Club Assistant runtime | `infra/playbooks/54_club_assistant.yml`, `cluster/apps/open-webui/` | `54_club_assistant.yml` |
 | App secrets / DB bootstrap | `infra/playbooks/59_app_services.yml` | `59_app_services.yml` |
-| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch,data-service}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
+| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch,data-service,mcp-hub}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
 | Node inventory / IPs | `infra/inventory/hosts.yml` | - |
 | Common variables (non-secret) | `infra/inventory/group_vars/all.yml` | - |
 | Secrets (SOPS) | `infra/inventory/group_vars/all.sops.yml` | - |
@@ -683,7 +683,7 @@ ansible-lint infra/
 # Kubernetes schema validation
 brew install kustomize kubeconform
 for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps/mcp-hub cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
     -summary -verbose \
@@ -695,7 +695,7 @@ done
 brew install conftest
 conftest verify --policy policy/kubernetes/
 for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps/mcp-hub cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -
 done

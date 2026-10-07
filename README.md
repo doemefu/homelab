@@ -47,7 +47,7 @@ directly to the backing Service per the rules in 40_platform.yml.
 ### Provisioning & Configuration
 - **Provisioning**: Ansible (idempotent, self-discovering playbooks)
 - **Secrets Management**: SOPS + age (no plaintext secrets in git)
-- **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch, data-service)
+- **GitOps**: Flux CD (image automation for auth-service, device-service, furchert-ch, data-service, mcp-hub)
 
 ### Kubernetes Platform
 - **Distribution**: k3s v1.32.2+k3s1 (lightweight, embedded SQLite datastore on the single control plane, ServiceLB)
@@ -107,10 +107,8 @@ directly to the backing Service per the rules in 40_platform.yml.
 | **Shared Infrastructure** | PostgreSQL 17, InfluxDB 2, Mosquitto 2 (+ exporters) | `infra/playbooks/50_apps_infra.yml`, `cluster/values/{postgresql,influxdb2}.yaml` |
 | **App Runtimes** | Home Assistant, n8n, LiteLLM, Open WebUI (Club Assistant) | `infra/playbooks/51_homeassistant.yml`, `52_n8n.yml`, `53_litellm.yml`, `54_club_assistant.yml` |
 | **App Secrets/Bootstrap** | Auth/device/n8n/litellm secrets + DB bootstrap | `infra/playbooks/59_app_services.yml` |
-| **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch}` |
+| **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch/data-service/mcp-hub | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch,data-service,mcp-hub}` |
 | **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`, Prometheus TSDB excluded into the `metrics` group, trimmed nightly instead — #101, #106) + manual app-data dumps to the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `scripts/backup-app-data.sh` |
-| **GitOps** | Flux CD sync + image automation for auth-service/device-service/furchert-ch/data-service | `cluster/flux-system/apps-sync.yaml`, `cluster/apps/{auth-service,device-service,furchert-ch,data-service}` |
-| **Backup** | Restic node backups (daily 03:00) + Longhorn recurring volume snapshots (daily 02:00, retain 7, `groups: [default]`, Prometheus TSDB excluded — #101) + manual app-data dumps to the operator's Mac (#64) | `infra/roles/storage/`, `infra/playbooks/10_base.yml`, `infra/playbooks/30_longhorn.yml`, `scripts/backup-app-data.sh` |
 
 ---
 
@@ -129,6 +127,7 @@ All external access is via Cloudflare Tunnel. Canonical hostnames are configured
 | `https://n8n.furchert.ch` | Web UI + Webhooks | `n8n.apps.svc:80` | 80 | Workflow automation platform (container: 5678) |
 | `https://ai.furchert.ch` | OpenAI-compatible API + UI | `litellm.apps.svc:4000` | 4000 | LiteLLM AI gateway |
 | `https://club.furchert.ch` | Web UI | `open-webui.apps.svc:80` | 80 | Club Assistant (Open WebUI) chat UI (container: 8080) |
+| `https://mcp.furchert.ch/mcp` | MCP endpoint | `mcp-hub.apps.svc:8083` | 8083 | Read-only mail and calendar tools for the claude.ai connector (OAuth via auth-service) |
 | `https://furchert.ch` | Web UI | `furchert-ch.apps.svc:3000` | 3000 | Public site (Next.js); apex only — `www.furchert.ch` is a Cloudflare 301 redirect to apex, not a tunnel route |
 
 ### OIDC/OAuth2 Endpoints (Auth Service)
@@ -179,6 +178,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | device-service | `device-service.apps.svc.cluster.local` | 8081 | Deployed, Flux-managed |
 | furchert-ch | `furchert-ch.apps.svc.cluster.local` | 3000 | Deployed, Flux-managed |
 | data-service | `data-service.apps.svc.cluster.local` | 8082 | Deployed, Flux-managed (no tunnel route) |
+| mcp-hub | `mcp-hub.apps.svc.cluster.local` | 8083 | Deployed, Flux-managed; public as `mcp.furchert.ch` |
 
 ### Home Assistant
 
@@ -283,6 +283,7 @@ cluster/
     device-service/            # Same structure as auth-service
     furchert-ch/               # Same structure as auth-service
     data-service/              # Same structure as auth-service
+    mcp-hub/                   # Same structure as auth-service
     n8n/                       # Ansible-managed manifests
       deployment.yaml
       service.yaml
@@ -321,6 +322,8 @@ docs/                        # Architecture and planning documents
   050-iot-app-rewrite.md      # IoT app migration plan
   051-architecture-current.md # Legacy monolith architecture
   052-architecture-target.md  # Target microservices architecture
+  080-mcp-hub.md              # MCP hub cross-repo contract (canonical)
+  adr/                        # ADRs (0003 MCP hub authorization; 0001/0002 in the parent workspace)
   plans/                      # Feature plans
   specs/                      # Architecture specifications
 
@@ -346,6 +349,7 @@ This repository provides the **platform infrastructure**. Application services t
 | [homelab-device-service](https://github.com/doemefu/homelab-device-service) | Real-time IoT device management — MQTT, InfluxDB writer, WebSocket, scheduling | Deployed | Flux-managed |
 | [furchert-ch](https://github.com/doemefu/furchert-ch) | Public site (Next.js, DE/EN) + OIDC-gated `/dashboard` | Deployed | Flux-managed |
 | [homelab-data-service](https://github.com/doemefu/homelab-data-service) | Analytical data plane (ADR 0002): network telemetry in Postgres DB `data_service` (schema `netmon`) + historical sensor data (InfluxDB); schedules live in device-service (ADR 0001) — contract `docs/060-network-monitoring.md` | Deployed | Flux-managed |
+| [homelab-mcp-hub](https://github.com/doemefu/homelab-mcp-hub) | Read-only mail and calendar MCP endpoint for Claude (`docs/080-mcp-hub.md`) | Deployed | Flux-managed |
 
 Architecture and migration planning documents are in `docs/`.
 
