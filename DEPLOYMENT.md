@@ -2153,6 +2153,7 @@ kubectl -n apps logs deploy/mcp-hub --since=24h --request-timeout=10s | grep '"e
 cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only
 F=infra/inventory/group_vars/all.sops.yml; OK=0
 printf 'Gmail address: '; IFS= read -r U
+U=$(printf '%s' "$U" | tr -d '[:space:]')
 printf 'Gmail app password: '; IFS= read -rs P; printf '\n'; P=$(printf '%s' "$P" | tr -d ' ')
 if [ -n "$U" ] && [ "${#P}" = 16 ]; then
   printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["gmail-username"]' \
@@ -2234,7 +2235,7 @@ if [ -z "$S" ] || [ "$S" = e3b0c44298fc ]; then echo 'Secret not read - check th
 
 - **V4** `get_events` without `account` skips `gmail` with no `account_errors` entry; `get_events account=gmail` returns `capability_unavailable`.
 - **V5** After `get_message`, the mail is still unread in the Gmail web interface (`BODY.PEEK`, no `\Seen`).
-- Once V2–V5 pass, record "host `imap.gmail.com:993` confirmed at onboarding" in spec 080 O21 (follow-up commit on the PR branch), then merge the PR.
+- Passing V2–V5 confirms the host `imap.gmail.com:993`; nothing more to record in the spec.
 
 Notes: Gmail's INBOX over IMAP includes every category tab (Promotions, Social, Updates), so `list_unread` returns promotional mail too (bounded by the output budget); the filtering belongs to the morning-brief prompt (#174). A later `X-GM-RAW category:primary` filter would need a spec change.
 
@@ -2246,7 +2247,7 @@ Notes: Gmail's INBOX over IMAP includes every category tab (Promotions, Social, 
 | `gmail` shows `auth_expired` | The app password was revoked, or the Google account password changed | New app password into `gmail-app-password` in SOPS, merge, playbook 59 (d); the key name stays the same, so no restart; the status returns to `ok` at the next check (≤ 30 min) |
 | `auth_expired` right after onboarding | The app password was created under a different Google account than the one in `gmail-username` | Create the app password while signed in to the account whose address is `gmail-username`, update SOPS, merge, playbook 59 (d); no restart needed |
 | `upstream_timeout` on the first calls (`list_unread`, `get_message`) | Gmail is slow on the first IMAP access to a large, long-unused mailbox (observed 2026-10-07: several seconds for single commands, normal after about 30 minutes) | Retry after some minutes; it settles. Nothing to change |
-| `gmail` shows `disabled` | A credential key is missing from the Secret | Check (e); redo (c)–(d) and restart (f) |
+| `gmail` shows `disabled` | A credential key is missing from the Secret, or the registry entry has `"enabled": false` | Missing key: check (e), redo (c)–(d); no pod restart needed, the credential files are read on every call. `"enabled": false`: fix the registry entry in SOPS, run playbook 59 and restart the hub, since the registry is read only at start-up |
 | `check-registry` "registry error …" | The registry entry is malformed | Fix SOPS; do not delete the pod |
 
 ### mcp-hub incident runbook — cutting access
