@@ -2122,6 +2122,129 @@ Then PR + merge, (d), (e2), and the pod delete. The token row stays (ciphertext)
 
 **One client ID for `outlook` and the later `uzh`** (D68). The shared registration has one client ID. It is stored once, as `mcp_hub_credentials["outlook-ms-client-id"]` (the spec 080 §8.1/§8.2 key for `#171`). Playbook 59 writes every key of `mcp_hub_credentials` into `mcp-hub-secrets`, and the registry's `client_id_ref` values are plain file names (§8.2), so a later `uzh` entry can name the same file (`"client_id_ref": "outlook-ms-client-id"`) without a second SOPS value. A neutral key name, or the decision to point `uzh` at the existing key, belongs in `#173`'s spec change; if the key is renamed then, the rename moves the value with `sops set` and changes the `outlook` entry's `client_id_ref` in the same SOPS commit, followed by (e2).
 
+### mcp-hub: Gmail account (#172)
+
+`gmail` (a personal Gmail account, mail only, no calendar) is pure configuration: the hub's IMAP adapter is reused unchanged (spec 080 §6.2) and playbook 59 already writes every `mcp_hub_credentials` key into `mcp-hub-secrets`. No hub image, manifest, egress or Cloudflare change (Gmail IMAP `:993` is already listed in `INTERFACES.md`). Run every command from the repository root unless it starts with `cd`. Every step that changes SOPS or the cluster is an owner action. The account order in the registry (`icloud`, `outlook`, `gmail`) does not matter to the hub. Order: (a) → (b) → (c) → (c2) → (d) → (e) → (e2) → (f) → (g).
+
+**(a) Prerequisites** (owner, in the Google account; never write the address or the app password into the repository):
+
+- A personal Google account (not Workspace) with 2-Step Verification on. App passwords are not offered with Advanced Protection or with security-key-only 2-Step Verification.
+- Create an app password at `https://myaccount.google.com/apppasswords` (any name). Google shows 16 letters in groups of four; keep it in the password manager.
+- IMAP is always on for personal accounts; there is no setting to switch.
+- Changing the Google account password revokes every app password: afterwards create a new one and repeat (c) for the password key only.
+- Read-only preconditions:
+
+```bash
+kubectl config current-context
+# must be a LAN context: default (~/.kube/homelab.yaml) or home. Off-LAN: see (d) and "Off-LAN kubectl / Ansible Access"
+kubectl -n apps exec deploy/mcp-hub -c mcp-hub --request-timeout=30s -- mcp-hub check-registry; echo "exit $?"
+# expect: "registry ok" and the existing accounts (icloud, outlook), exit 0, no "gmail" line yet
+```
+
+**(b) #171 acceptance count first** (only while the 7-day window of the Outlook definition-of-done check (i) is still open, until 2026-10-13). The pod deletion in (f) resets the hub's in-memory state and the 24 h log window shows the restart, so record that day's count before it:
+
+```bash
+kubectl -n apps logs deploy/mcp-hub --since=24h --request-timeout=10s | grep '"event": "token_refresh"' | grep -c '"outcome": "ok"'
+```
+
+**(c) SOPS values (editor-free).** In your checkout, on `main`, up to date. Paste the commands one at a time (the `if … fi` blocks count as one command each; paste the second block only after the first one answered). The address is read visibly, the app password is not echoed (press Enter after typing it); spaces in the password are removed, and a value that is not 16 characters writes nothing. The registry entry is appended only after both values were written and only if the id `gmail` is not yet in `mcp_hub_accounts.accounts`; the index is the current length, so no list of the other ids is assumed (reuse this guard for `uzh` in #173 with its own id and entry).
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only
+F=infra/inventory/group_vars/all.sops.yml; OK=0
+printf 'Gmail address: '; IFS= read -r U
+printf 'Gmail app password: '; IFS= read -rs P; printf '\n'; P=$(printf '%s' "$P" | tr -d ' ')
+if [ -n "$U" ] && [ "${#P}" = 16 ]; then
+  printf '%s' "$U" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["gmail-username"]' \
+    && printf '%s' "$P" | jq -Rs . | sops set --value-stdin "$F" '["mcp_hub_credentials"]["gmail-app-password"]' \
+    && OK=1
+else
+  echo 'Empty address or password that is not 16 characters: nothing written. Run this block again.'
+fi
+unset U P
+```
+
+```bash
+if [ "$OK" != 1 ]; then echo 'Credentials not written: nothing appended.'; else
+  IDS=$(sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '[.[].id]')
+  if [ -z "$IDS" ]; then echo 'Registry not readable: nothing appended. Stop.'
+  elif [ "$(printf '%s' "$IDS" | jq 'index("gmail") == null')" != true ]; then echo 'gmail already present: nothing appended. Stop and check the registry.'
+  else
+    N=$(printf '%s' "$IDS" | jq 'length')
+    sops set "$F" "[\"mcp_hub_accounts\"][\"accounts\"][$N]" '{"id":"gmail","label":"Gmail","provider":"google","enabled":true,"capabilities":{"mail":true,"calendar":false},"mail":{"protocol":"imap","host":"imap.gmail.com","port":993,"username_ref":"gmail-username","password_ref":"gmail-app-password","inbox":"INBOX"}}'
+  fi; unset IDS N
+fi; unset OK
+sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '[.[].id]'
+# expect: ["icloud","outlook","gmail"]
+```
+
+Then commit the SOPS change through a pull request:
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch -c chore/sops-mcp-hub-gmail && git add infra/inventory/group_vars/all.sops.yml && git commit -m "chore(sops): mcp-hub gmail account (#172)" && git push -u origin chore/sops-mcp-hub-gmail && gh pr create -R doemefu/homelab --fill
+```
+
+**(c2) Merge the SOPS PR, then check presence (value-free).** Merge the PR in GitHub, then:
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && git switch main && git pull --ff-only && F=infra/inventory/group_vars/all.sops.yml && for k in gmail-username gmail-app-password; do sops decrypt --extract '["mcp_hub_credentials"]' --output-type json "$F" | jq -r 'keys[]' | grep -x "$k" || echo "$k MISSING - stop"; done
+```
+
+**(d) Playbook 59** — check mode, then twice (LAN; off-LAN use the flags of step (d) in "mcp-hub token store and the Outlook account"):
+
+```bash
+cd /Users/dominic/informatik/homelab/infrastructure && ansible-playbook infra/playbooks/59_app_services.yml --check --diff
+# expect: the asserts pass; the Secret task shows a hidden (no_log) change
+ansible-playbook infra/playbooks/59_app_services.yml
+ansible-playbook infra/playbooks/59_app_services.yml
+# expect run 1: the Secret task changed; run 2: no mcp-hub task changed
+```
+
+**(e) Secret keys** (read-only):
+
+```bash
+kubectl -n apps get secret mcp-hub-secrets -o json --request-timeout=10s | jq -r '.data | keys[]'
+# expect additionally: gmail-app-password, gmail-username (the existing keys stay)
+```
+
+**(e2) Registry check BEFORE the restart** (D66; the Deployment uses `Recreate`, a fatal registry error in the new pod would stop `icloud` and `outlook` too). Run it **directly after (d)**; the expected hash comes from the Secret's own `accounts.json`, only the hash is printed:
+
+```bash
+S=$(kubectl -n apps get secret mcp-hub-secrets -o jsonpath='{.data.accounts\.json}' --request-timeout=10s | base64 -d | shasum -a 256 | cut -c1-12); echo "expected registry sha: $S"
+if [ -z "$S" ] || [ "$S" = e3b0c44298fc ]; then echo 'Secret not read - check the kubectl context (kubectl config current-context)'; else kubectl -n apps exec deploy/mcp-hub -c mcp-hub --request-timeout=30s -- mcp-hub check-registry --expect-sha "$S"; echo "exit $?"; fi
+# expect: "registry sha=… projected=…" with the same 12 hex as above, "registry ok", "account icloud mail imap ok",
+#         "account icloud calendar caldav ok", "account outlook mail graph ok", "account outlook key ok",
+#         "account outlook token current", "account gmail mail imap ok", exit 0.
+# "not the expected one yet": the kubelet has not refreshed the volume (up to about 2 min) - wait a minute and repeat.
+# Any "registry error …" or "missing …": do NOT delete the pod; fix SOPS ((c)), merge, rerun (d), repeat (e2).
+```
+
+**(f) Restart the hub** (the registry changed, the hub reads it only at start-up; `icloud` and `outlook` are unavailable for the few seconds of the restart): `kubectl -n apps delete pod -l app=mcp-hub`.
+
+**(g) Verify** (in claude.ai; V1 is (e2)):
+
+- **V2** `list_accounts` shows `gmail` with `mail` only. Its status is `unknown` until the first background check about 30 s after the pod start, then `ok`.
+- **V3** Ask "What's unread in Gmail since yesterday?" (`list_unread account=gmail`), then open one listed mail (`get_message`, mandatory). The hub log shows `tool_call` lines with `account` `gmail` and outcome `ok`, no ERROR line, only the spec 080 §9.7 fields:
+
+  ```bash
+  kubectl -n apps logs deploy/mcp-hub --since=10m --request-timeout=10s | grep gmail
+  ```
+
+- **V4** `get_events` without `account` skips `gmail` with no `account_errors` entry; `get_events account=gmail` returns `capability_unavailable`.
+- **V5** After `get_message`, the mail is still unread in the Gmail web interface (`BODY.PEEK`, no `\Seen`).
+- Once V2–V5 pass, record "host `imap.gmail.com:993` confirmed at onboarding" in spec 080 O21 (follow-up commit on the PR branch), then merge the PR.
+
+Notes: Gmail's INBOX over IMAP includes every category tab (Promotions, Social, Updates), so `list_unread` returns promotional mail too (bounded by the output budget); the filtering belongs to the morning-brief prompt (#174). A later `X-GM-RAW category:primary` filter would need a spec change.
+
+**Troubleshooting:**
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `gmail` shows `error` right after onboarding, hub log `status_check_failed` / `provider_call_failed` with `LoginError` | Google refused the login: the normal account password was used (`[ALERT] Application-specific password required`), or Google wants a browser sign-in (`[ALERT] … web browser`, suspicious-login protection). The hub maps these to `upstream_error` (status `error`, not `auth_expired`; follow-up `doemefu/homelab-mcp-hub#29`) | Sign in at gmail.com in a browser, check the Google account's Security alerts, create a new app password (a), repeat (c) for the password key, (d), (e2); no restart is needed |
+| `gmail` shows `auth_expired` | The app password was revoked, or the Google account password changed | New app password into `gmail-app-password` in SOPS, merge, playbook 59 (d); the key name stays the same, so no restart; the status returns to `ok` at the next check (≤ 30 min) |
+| `gmail` shows `disabled` | A credential key is missing from the Secret | Check (e); redo (c)–(d) and restart (f) |
+| `check-registry` "registry error …" | The registry entry is malformed | Fix SOPS; do not delete the pod |
+
 ### mcp-hub incident runbook — cutting access
 
 **Access is always cut on the homelab side.** Removing the connector in claude.ai sends no revocation and is not a lever; the refresh token held by claude.ai stays valid until L4 or L5. The `claude-mcp-hub` allowlist in auth-service is not a lever either: it covers new logins only. Source: `docs/080-mcp-hub.md` §4.6. Every lever below except L1 changes the cluster or the database and needs the owner's go. Off-LAN, run the `kubectl` lines through "One-shot kubectl over SSH" (the off-LAN form of L2 step 1 is given below).
