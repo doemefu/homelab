@@ -32,10 +32,10 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 
 ## Non-Negotiables
 
-- Do **not** touch secrets, credentials, age keys, or `.sops.yaml` files — ever.
+- Do **not** read or edit secrets, credentials, age keys, or `*.sops.*` files — ever.
 - Do **not** use `latest` for any Helm chart, container image, or k3s version. Always pin versions.
 - Do **not** introduce new Ansible roles or Helm dependencies without explicit user approval.
-- Commit, push and open PRs on feature branches without asking (standing permission, 2026-08-28). Merging, force-pushes, playbook runs, cluster mutations and anything touching SOPS/secrets need an explicit go for that task.
+- Commit, push and open PRs on feature branches without asking. Merging PRs is always the user's. Rolling out changes the user has already merged needs no extra go; force-pushes, playbook runs and other cluster mutations need an explicit go. SOPS files are never read or edited by Claude — the user edits them.
 - Before any merge, wait for the Copilot review and trigger CodeRabbit with a PR comment `@coderabbitai review`; fix or answer every comment.
 - Minimize diff size: no drive-by refactors, no style-only churn, no renames unless required.
 - Every Ansible role **must be idempotent** — running a playbook twice must produce zero changes on the second run.
