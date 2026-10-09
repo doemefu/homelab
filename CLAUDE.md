@@ -27,9 +27,8 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 
 ## Scope & Precedence
 
-- Claude Code reads `CLAUDE.md` before starting work. Nested `CLAUDE.md` files in subdirectories override the closest parent.
 - The parent-level config at `../CLAUDE.md` covers cross-repo concerns; this file covers infrastructure-internal work.
-- Optional overrides: `CLAUDE.override.md` (same precedence layer, takes priority over `CLAUDE.md`).
+- Where this file and `../CLAUDE.md` differ, this file wins for infrastructure-internal work.
 
 ## Non-Negotiables
 
