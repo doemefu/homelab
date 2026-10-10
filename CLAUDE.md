@@ -23,6 +23,8 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 **Repo-level platform spec:** `docs/01-homelab-platform.md`.
 **MQTT device auth spec:** `docs/053-mqtt-device-authentication.md`.
 **LiteLLM gateway spec:** `docs/06-litellm-gateway.md`.
+**Network monitoring spec:** `docs/060-network-monitoring.md` (data-service contract; ADR `../docs/adr/0002-network-telemetry-ownership.md`).
+**MCP hub spec:** `docs/080-mcp-hub.md` + `docs/adr/0003-mcp-hub-authorization.md` (parent `../docs/080-mcp-hub.md` is a mirror; edit both together).
 **Operational runbooks:** `DEPLOYMENT.md` — see "Off-LAN kubectl", "Backup & rollback for image updates", "App-data backups to the operator's Mac" and "Backup (Restic)".
 
 ## Scope & Precedence
