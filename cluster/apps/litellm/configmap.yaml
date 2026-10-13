@@ -150,6 +150,33 @@ data:
             - location: message
               role: system
 
+      # M4b (2026-10-13, D58; club_assist worklog 20261013-114037-m4b-opus-judge-3d8e): LLM judge for the
+      # m8_eval_drafting Evaluation only (task class `judge`; m2_llm_call refuses it for any other caller and
+      # refuses this alias for any other task class). Opus 5.5 rejects sampling params, forced tool_choice and
+      # disabled thinking. Pricing sits in litellm_params (LiteLLM custom pricing; never 0 — a zero price waives
+      # budget checks) and the capability flags in model_info, so cost tracking never depends on the remote price
+      # map and json_schema never turns into a forced tool call (400) when that map, fetched at pod start,
+      # misses the model (C0 probes, 2026-10-13). Residual: on such a miss a configured reasoning_effort is
+      # silently dropped (model default medium) — the post-restart map check in the M4b snippets catches it.
+      # reasoning_effort per the M4b spike rule OD-4 (unset = model default medium; never `none`, never xhigh).
+      - model_name: club-judge
+        litellm_params:
+          model: anthropic/claude-opus-5-5
+          api_key: os.environ/ANTHROPIC_API_KEY
+          max_budget: 10
+          budget_duration: 30d
+          additional_drop_params: ["temperature", "top_p"]
+          input_cost_per_token: 0.000004
+          output_cost_per_token: 0.00002
+          # reasoning_effort: high
+        model_info:
+          supports_native_structured_output: true
+          supports_output_config: true
+          supports_adaptive_thinking: true
+          supports_reasoning: true
+          thinking_always_on: true
+          supports_sampling_params: false
+
       # placeholder until D5 embedding freeze in Phase 1; dimension 1024 (mistral-embed) —
       # NOTE: sql/*.sql migrations currently assume vector(1536); reconcile at D5.
       - model_name: club-embed
