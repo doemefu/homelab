@@ -100,9 +100,11 @@ data:
       # (45 scenario + 15 ladder). club-draft carries the v1.1 baseline AND the v1.2 A/B arm A in one 30d window
       # (about 25 USD); club-draft-long carries arm B and the drafting gate. Restored to 5 / 3 in the club-draft
       # 3.8 Flash commit, when the A/B is over.
+      # 2026-10-13 (Dominic): gemini-3.5-flash is deprecated (Google auto-routes it to 3.6 Flash) -> newest pinned
+      # Flash, gemini-3.8-flash; A/B gate waived by Dominic. Budgets stay raised until the M1b eval series is done.
       - model_name: club-draft
         litellm_params:
-          model: gemini/gemini-3.5-flash
+          model: gemini/gemini-3.8-flash
           api_key: os.environ/GEMINI_API_KEY
           max_budget: 35  # temporary, was 5
           budget_duration: 30d
