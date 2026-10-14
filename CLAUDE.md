@@ -23,20 +23,21 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 **Repo-level platform spec:** `docs/01-homelab-platform.md`.
 **MQTT device auth spec:** `docs/053-mqtt-device-authentication.md`.
 **LiteLLM gateway spec:** `docs/06-litellm-gateway.md`.
+**Network monitoring spec:** `docs/060-network-monitoring.md` (data-service contract; ADR `../docs/adr/0002-network-telemetry-ownership.md`).
+**MCP hub spec:** `docs/080-mcp-hub.md` + `docs/adr/0003-mcp-hub-authorization.md` (parent `../docs/080-mcp-hub.md` is a mirror; edit both together).
 **Operational runbooks:** `DEPLOYMENT.md` — see "Off-LAN kubectl", "Backup & rollback for image updates", "App-data backups to the operator's Mac" and "Backup (Restic)".
 
 ## Scope & Precedence
 
-- Claude Code reads `CLAUDE.md` before starting work. Nested `CLAUDE.md` files in subdirectories override the closest parent.
 - The parent-level config at `../CLAUDE.md` covers cross-repo concerns; this file covers infrastructure-internal work.
-- Optional overrides: `CLAUDE.override.md` (same precedence layer, takes priority over `CLAUDE.md`).
+- Where this file and `../CLAUDE.md` differ, this file wins for infrastructure-internal work.
 
 ## Non-Negotiables
 
-- Do **not** touch secrets, credentials, age keys, or `.sops.yaml` files — ever.
+- Do **not** read or edit secrets, credentials, age keys, or `*.sops.*` files — ever.
 - Do **not** use `latest` for any Helm chart, container image, or k3s version. Always pin versions.
 - Do **not** introduce new Ansible roles or Helm dependencies without explicit user approval.
-- Commit, push and open PRs on feature branches without asking (standing permission, 2026-08-28). Merging, force-pushes, playbook runs, cluster mutations and anything touching SOPS/secrets need an explicit go for that task.
+- Commit, push and open PRs on feature branches without asking. Merging PRs is always the user's. Rolling out changes the user has already merged needs no extra go; force-pushes, playbook runs and other cluster mutations need an explicit go. SOPS files are never read or edited by Claude — the user edits them.
 - Before any merge, wait for the Copilot review and trigger CodeRabbit with a PR comment `@coderabbitai review`; fix or answer every comment.
 - Minimize diff size: no drive-by refactors, no style-only churn, no renames unless required.
 - Every Ansible role **must be idempotent** — running a playbook twice must produce zero changes on the second run.
@@ -47,12 +48,12 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 ## Cluster context (quick reference)
 
 - k3s v1.32.2+k3s1: control plane `raspi5` (arm64, 192.168.1.61), workers `raspi4` (arm64), `mba1`/`mba2` (amd64). Ubuntu 24.04.
-- Namespaces: `apps`, `platform` (cert-manager, cloudflared), `monitoring` (kube-prometheus-stack), `longhorn-system` (Longhorn, replication 2; `daily-snapshot` 02:00 local-only; Prometheus TSDB PVC excluded into the `metrics` group (#101); no BackupTarget — app data is dumped manually to the operator's Mac, restic 03:00 on raspi5 covers k3s config/token + a SQLite datastore copy — #64), `flux-system` (Flux CD image automation), `homeassistant`.
-- `apps` workloads: auth-service, device-service, furchert-ch, data-service, open-webui, litellm, n8n, postgresql (pgvector), influxdb2, mosquitto — see hostnames/ports in `DEPLOYMENT.md`.
+- Namespaces: `apps`, `platform` (cert-manager, cloudflared), `monitoring` (kube-prometheus-stack), `longhorn-system` (Longhorn, replication 2; `daily-snapshot` 02:00 local-only; Prometheus TSDB PVC excluded into the `metrics` group, which trims nightly instead of snapshotting (#101, #106); no BackupTarget — app data is dumped manually to the operator's Mac, restic 03:00 on raspi5 covers k3s config/token + a SQLite datastore copy — #64), `flux-system` (Flux CD image automation), `homeassistant`.
+- `apps` workloads: auth-service, device-service, furchert-ch, data-service, mcp-hub, open-webui, litellm, n8n, postgresql (pgvector), influxdb2, mosquitto — see hostnames/ports in `DEPLOYMENT.md`.
 - Home Assistant runs in k3s (namespace `homeassistant`, `51_homeassistant.yml`, pajikos Helm chart) — not in Docker.
 - Ingress: Traefik (bundled with k3s) + cert-manager (Let's Encrypt). External access only via Cloudflare Tunnel.
 - Playbooks (`infra/playbooks/`): `00_bootstrap 10_base 20_k3s 30_longhorn 40_platform 41_monitoring 50_apps_infra 51_homeassistant 52_n8n 53_litellm 54_club_assistant 59_app_services`.
-- `cluster/apps/` manifests: Flux-managed `auth-service device-service furchert-ch data-service` (Kustomization `apps` + image automation); Ansible-applied `n8n` (`52_n8n.yml`), `litellm` (`53_litellm.yml`), `open-webui` (`54_club_assistant.yml`) — a merge alone does not deploy those three, run the playbook.
+- `cluster/apps/` manifests: Flux-managed `auth-service device-service furchert-ch data-service mcp-hub` (Kustomization `apps` + image automation); Ansible-applied `n8n` (`52_n8n.yml`), `litellm` (`53_litellm.yml`), `open-webui` (`54_club_assistant.yml`) — a merge alone does not deploy those three, run the playbook.
 - Secrets: SOPS + age, age key outside repo.
 
 ## Agent Team

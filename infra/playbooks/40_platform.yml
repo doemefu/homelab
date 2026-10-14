@@ -170,6 +170,10 @@
                 service: "http://furchert-ch.apps.svc.cluster.local:3000"
               - hostname: "club.furchert.ch"
                 service: "http://open-webui.apps.svc.cluster.local:80"
+              # MCP endpoint for the claude.ai custom connector (docs/080-mcp-hub.md §4.7). Port 8083 only;
+              # the hub's internal port 8084 (health, metrics) is never routed.
+              - hostname: "mcp.furchert.ch"
+                service: "http://mcp-hub.apps.svc.cluster.local:8083"
               - service: "http_status:404"
 
     - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)

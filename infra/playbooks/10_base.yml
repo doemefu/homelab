@@ -34,5 +34,6 @@
 - name: Mac-Tweaks — Lid-close, T2-Kernel-Module (nur x86_64)
   hosts: mac
   become: true
+  tags: [mac_tweaks]
   roles:
     - role: mac_tweaks

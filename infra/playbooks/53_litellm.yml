@@ -28,6 +28,45 @@
     apps_namespace: apps
 
   tasks:
+    # Config-change guard: club routing changes have been applied from feature branches, so the live
+    # ConfigMap can be ahead of this checkout — a run from an older tree would silently revert it.
+    # A run whose config.yaml differs from the live one fails unless the operator acknowledges the
+    # exact new content by its sha256 (printed in the failure message; DEPLOYMENT.md "LiteLLM"):
+    #   ansible-playbook infra/playbooks/53_litellm.yml -e litellm_config_change_ack=<sha256>
+    # Pass the ack on the command line only — never put it into inventory/group_vars. A k8s_info error
+    # fails the play (fail-closed); only a successful lookup without a ConfigMap counts as "not deployed".
+    # The ConfigMap holds only os.environ/ references, no key material; the message prints hashes only.
+    - name: LiteLLM Live-ConfigMap lesen (Config-Guard)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: ConfigMap
+        namespace: "{{ apps_namespace }}"
+        name: litellm-config
+      register: litellm_live_configmap
+      no_log: true
+      delegate_to: localhost
+
+    - name: LiteLLM Config-Wechsel nur mit Bestätigung (Config-Guard)
+      vars:
+        litellm_manifest_config_sha256: >-
+          {{ ((lookup('file', playbook_dir + '/../../cluster/apps/litellm/configmap.yaml', rstrip=False) | from_yaml)
+              .data['config.yaml'] | default('')) | hash('sha256') }}
+        litellm_live_config_sha256: >-
+          {{ ((litellm_live_configmap.resources[0].data | default({}))['config.yaml'] | default('')) | hash('sha256')
+             if litellm_live_configmap.resources | length > 0 else litellm_manifest_config_sha256 }}
+      ansible.builtin.assert:
+        that:
+          - litellm_manifest_config_sha256 != ('' | hash('sha256'))
+          - litellm_live_config_sha256 == litellm_manifest_config_sha256 or
+            (litellm_config_change_ack | default('')) == litellm_manifest_config_sha256
+        fail_msg: >-
+          LiteLLM config change live sha256 {{ litellm_live_config_sha256 }} -> checkout sha256
+          {{ litellm_manifest_config_sha256 }} is not acknowledged. Check that this checkout contains every
+          change that is live (diff the live ConfigMap first, DEPLOYMENT.md "LiteLLM"), then re-run with
+          -e litellm_config_change_ack={{ litellm_manifest_config_sha256 }}
+        quiet: true
+      delegate_to: localhost
+
     - name: Apps Namespace sicherstellen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"

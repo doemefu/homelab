@@ -207,6 +207,7 @@ jobs:
           for d in cluster/apps/auth-service \
                    cluster/apps/device-service \
                    cluster/apps/data-service \
+                   cluster/apps/mcp-hub \
                    cluster/apps/litellm \
                    cluster/apps/n8n \
                    cluster/apps/open-webui \
@@ -275,6 +276,7 @@ jobs:
           for d in cluster/apps/auth-service \
                    cluster/apps/device-service \
                    cluster/apps/data-service \
+                   cluster/apps/mcp-hub \
                    cluster/apps/litellm \
                    cluster/apps/n8n \
                    cluster/apps/open-webui \

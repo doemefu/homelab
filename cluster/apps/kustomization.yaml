@@ -5,3 +5,4 @@ resources:
   - auth-service
   - furchert-ch
   - data-service
+  - mcp-hub

@@ -30,7 +30,7 @@ Follow this loop for **every change** to this repository:
 | k3s installation / configuration | `infra/playbooks/20_k3s.yml`, `infra/roles/k3s/` | `20_k3s.yml` |
 | k3s version pinning | `infra/roles/k3s/defaults/main.yml` (`k3s_version`) | `20_k3s.yml` |
 | Longhorn storage | `infra/playbooks/30_longhorn.yml`, `cluster/values/longhorn.yaml` | `30_longhorn.yml` |
-| Longhorn recurring snapshot schedule/retention | `infra/playbooks/30_longhorn.yml` (`daily-snapshot` RecurringJob task) | `30_longhorn.yml` |
+| Longhorn recurring snapshot/trim schedule and retention | `infra/playbooks/30_longhorn.yml` (the `daily-snapshot`, `metrics-snapshot-cleanup` and `metrics-filesystem-trim` RecurringJob tasks) | `30_longhorn.yml` |
 | Longhorn recurring snapshot per-volume exclusions (PVC labels) | the playbook owning the PVC — today `infra/playbooks/41_monitoring.yml` (Prometheus PVC) | `41_monitoring.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
 | App-data backup script (components, retention, verification) | `scripts/backup-app-data.sh` | none (run the script) |
@@ -46,7 +46,7 @@ Follow this loop for **every change** to this repository:
 | LiteLLM runtime | `infra/playbooks/53_litellm.yml`, `cluster/apps/litellm/` | `53_litellm.yml` |
 | Open WebUI / Club Assistant runtime | `infra/playbooks/54_club_assistant.yml`, `cluster/apps/open-webui/` | `54_club_assistant.yml` |
 | App secrets / DB bootstrap | `infra/playbooks/59_app_services.yml` | `59_app_services.yml` |
-| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch,data-service}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
+| Flux GitOps | `cluster/apps/{auth-service,device-service,furchert-ch,data-service,mcp-hub}/`, `cluster/flux-system/apps-sync.yaml` | manual `kubectl apply` |
 | Node inventory / IPs | `infra/inventory/hosts.yml` | - |
 | Common variables (non-secret) | `infra/inventory/group_vars/all.yml` | - |
 | Secrets (SOPS) | `infra/inventory/group_vars/all.sops.yml` | - |
@@ -683,7 +683,7 @@ ansible-lint infra/
 # Kubernetes schema validation
 brew install kustomize kubeconform
 for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps/mcp-hub cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
     -summary -verbose \
@@ -695,7 +695,7 @@ done
 brew install conftest
 conftest verify --policy policy/kubernetes/
 for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
-         cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
+         cluster/apps/mcp-hub cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
          cluster/apps; do
   kustomize build "$d" | conftest test --policy policy/kubernetes/ --all-namespaces -
 done

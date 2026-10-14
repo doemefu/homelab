@@ -40,6 +40,46 @@
 
   tasks:
 
+    # ── Version-change guard ───────────────────────────────────────────────────
+    # Same pattern as 52_n8n.yml: Open WebUI's alembic migrations are forward-only, so an image change
+    # (upgrade, or a rollback from an older checkout) must be a planned step. A run whose manifest image
+    # differs from the live one fails unless acknowledged with the full manifest `tag@digest`:
+    #   ansible-playbook infra/playbooks/54_club_assistant.yml -e open_webui_image_change_ack='<manifest image string>'
+    # Pass the ack on the command line only — never put it into inventory/group_vars. A k8s_info error
+    # fails the play (fail-closed); only a successful lookup without a Deployment counts as "not deployed".
+
+    - name: Open WebUI Live-Deployment lesen (Version-Guard)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: "{{ apps_namespace }}"
+        name: open-webui
+      register: open_webui_live_deployment
+      delegate_to: localhost
+
+    - name: Open WebUI Image-Wechsel nur mit Bestätigung (Version-Guard)
+      vars:
+        open_webui_manifest_image: >-
+          {{ ((lookup('file', playbook_dir + '/../../cluster/apps/open-webui/deployment.yaml') | from_yaml)
+              .spec.template.spec.containers | selectattr('name', 'equalto', 'open-webui') | map(attribute='image')
+              | first | default('')) }}
+        open_webui_live_image: >-
+          {{ (open_webui_live_deployment.resources[0].spec.template.spec.containers
+              | selectattr('name', 'equalto', 'open-webui') | map(attribute='image') | first
+              | default('<no open-webui container>'))
+             if open_webui_live_deployment.resources | length > 0 else open_webui_manifest_image }}
+      ansible.builtin.assert:
+        that:
+          - open_webui_manifest_image | length > 0
+          - open_webui_live_image == open_webui_manifest_image or
+            (open_webui_image_change_ack | default('')) == open_webui_manifest_image
+        fail_msg: >-
+          Open WebUI image change {{ open_webui_live_image }} -> {{ open_webui_manifest_image }} is not
+          acknowledged. Back up the PVC first (DEPLOYMENT.md "Backup & rollback for image updates"), then re-run with
+          -e open_webui_image_change_ack='{{ open_webui_manifest_image }}'.
+        quiet: true
+      delegate_to: localhost
+
     # ── Namespace ──────────────────────────────────────────────────────────────
 
     - name: Apps Namespace sicherstellen

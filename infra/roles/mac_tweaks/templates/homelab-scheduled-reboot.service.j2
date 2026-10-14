@@ -1,0 +1,8 @@
+# Managed by Ansible — do not edit manually
+[Unit]
+Description=Preventive reboot before the T2 5-day firmware reset (homelab#102)
+Documentation=https://github.com/doemefu/homelab/issues/102
+
+[Service]
+Type=oneshot
+ExecStart={{ mac_tweaks_reboot_script }}

@@ -22,12 +22,15 @@
     # homelab.furchert.ch/coroot-node-agent=enabled, every other node loses it, and the
     # DaemonSet schedules only on labelled nodes. Empty = the DaemonSet exists but runs no pod.
     # This list is the source of truth: nodes not listed lose the label on the next run.
-    # raspi5 + mba1 = the owner-approved spike nodes (2026-09-24); mba2 (different t2 kernel)
-    # and raspi4 (4 GB RAM) are later decisions, added by PR. Stop all agents with
+    # raspi5 + mba1 = the owner-approved spike nodes (2026-09-24); mba2 (t2 kernel 6.19, no BTF)
+    # joined on 2026-09-24 after their measurements (owner go, #118). raspi4 (4 GB RAM) joined on
+    # 2026-09-25 after 12 h of mba2 observation, so the gate covers all four nodes. Stop all agents with
     # -e '{"coroot_node_agent_nodes": []}'. Runbook: DEPLOYMENT.md "coroot-node-agent (NM-2)".
     coroot_node_agent_nodes:
       - raspi5
       - mba1
+      - mba2
+      - raspi4
     coroot_node_agent_label: homelab.furchert.ch/coroot-node-agent
     coroot_node_agent_dir: "{{ playbook_dir }}/../../cluster/monitoring/coroot-node-agent"
 
@@ -171,7 +174,8 @@
     # volume size and filled raspi4 (DiskPressure 2026-09-11). Labelling the
     # PVC as recurring-job "source" makes Longhorn sync the PVC's recurring-job
     # labels to the Volume, where they override the auto-added `default` label;
-    # group `metrics` only carries the snapshot-cleanup job defined in 30.
+    # group `metrics` takes no snapshots at all: it carries the
+    # snapshot-cleanup and filesystem-trim jobs defined in 30.
     # The PVC is created by the Prometheus Operator after the Helm release is
     # up, hence the wait (60 × 10 s covers a fresh cluster). In --check mode on
     # a fresh cluster this wait times out after about 10 minutes (60 × 10 s) —
