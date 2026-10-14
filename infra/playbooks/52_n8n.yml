@@ -16,6 +16,43 @@
     apps_namespace: apps
 
   tasks:
+    # Version-change guard: Dependabot merges image bumps into main, but n8n only changes on a run of
+    # this playbook. An image change (= forward-only SQLite migration) must be a planned upgrade, so a
+    # run whose manifest image differs from the live one fails unless the operator acknowledges it with
+    # the full manifest `tag@digest` (DEPLOYMENT.md "n8n → Upgrade"):
+    #   ansible-playbook infra/playbooks/52_n8n.yml -e n8n_image_change_ack='<manifest image string>'
+    # Pass the ack on the command line only — never put it into inventory/group_vars. A k8s_info error
+    # fails the play (fail-closed); only a successful lookup without a Deployment counts as "not deployed".
+    - name: N8n Live-Deployment lesen (Version-Guard)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: "{{ apps_namespace }}"
+        name: n8n
+      register: n8n_live_deployment
+      delegate_to: localhost
+
+    - name: N8n Image-Wechsel nur mit Bestätigung (Version-Guard)
+      vars:
+        n8n_manifest_image: >-
+          {{ ((lookup('file', playbook_dir + '/../../cluster/apps/n8n/deployment.yaml') | from_yaml)
+              .spec.template.spec.containers | selectattr('name', 'equalto', 'n8n') | map(attribute='image')
+              | first | default('')) }}
+        n8n_live_image: >-
+          {{ (n8n_live_deployment.resources[0].spec.template.spec.containers | selectattr('name', 'equalto', 'n8n')
+              | map(attribute='image') | first | default('<no n8n container>'))
+             if n8n_live_deployment.resources | length > 0 else n8n_manifest_image }}
+      ansible.builtin.assert:
+        that:
+          - n8n_manifest_image | length > 0
+          - n8n_live_image == n8n_manifest_image or (n8n_image_change_ack | default('')) == n8n_manifest_image
+        fail_msg: >-
+          n8n image change {{ n8n_live_image }} -> {{ n8n_manifest_image }} is not acknowledged. Follow
+          DEPLOYMENT.md "n8n → Upgrade" (PVC backup first), then re-run with
+          -e n8n_image_change_ack='{{ n8n_manifest_image }}'.
+        quiet: true
+      delegate_to: localhost
+
     - name: Apps Namespace anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"

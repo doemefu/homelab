@@ -23,17 +23,17 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: open-webui
-          # Pinned version: v0.11.1 (released 2026-08-25, verified 2026-08-28 via the GHCR
-          # anonymous-token API against ghcr.io/v2/open-webui/open-webui/manifests/v0.11.1,
-          # index digest sha256:6bb1fbe8ab0a3e0456067f493044ffb66a30a65a34be47f6a5862176a370dd16):
-          #   manifest list contains linux/amd64
-          #   (sha256:e3a36f3aefb2408ac01d8aa2bba24f75d2569ffb6de6e7d2865c0045a38592ac) and
-          #   linux/arm64 (sha256:1a9e26d236d5e02440a22c3c024a7fc865601ae28c2d6277c6b9e4ced64f7902)
-          #   image manifests for this exact tag.
-          # v0.11.0/v0.11.1 are security-fix releases (XSS, authz bypass in knowledge search,
-          # SSRF filter bypass, ReDoS, session revocation) — see research 2026-08-28. Image
-          # still runs as UID 0 (Dockerfile ARG UID=0) — the SECURITY DEVIATION block below
-          # remains valid.
+          # Pinned version: v0.11.4 (released 2026-09-21; Dependabot PR #144). OCI index digest
+          # sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f verified
+          # 2026-10-14 via the GHCR anonymous-token API (linux/amd64 + linux/arm64 entries).
+          # Security bump: v0.11.3 (live since 2026-09-09) is affected by 19 published advisories
+          # (4 high, e.g. GHSA-vpq8-f445-hcq7 session-token theft by any website,
+          # GHSA-f9xp-mfmq-x6cg session-token theft via DOCX preview); all 19 list v0.11.4 as
+          # patched and none affects v0.11.4 (GHSA API, 2026-10-14).
+          # Source: https://github.com/open-webui/open-webui/security/advisories . v0.12.0
+          # (2026-10-10) is a new minor — not adopted yet. Python 3.11 / pydantic / httpx unchanged
+          # since v0.10.2, so the club pipe function needs no change. Image still runs as UID 0
+          # (Dockerfile ARG UID=0) — the SECURITY DEVIATION block below remains valid.
           #
           # ┌─────────────────────────────────────────────────────────────────────────┐
           # │  SECURITY DEVIATION — CONTAINER RUNS AS ROOT (UID 0)                   │
@@ -53,7 +53,7 @@ spec:
           # │  docs/02 §11 (decision log) before Phase 1 close (AC-0.x pending).    │
           # │  Monitor upstream for a future release that ships non-root by default. │
           # └─────────────────────────────────────────────────────────────────────────┘
-          image: ghcr.io/open-webui/open-webui:v0.11.3@sha256:41daa0cf2561a5d4c8d1ff31ee2a98d93ab4d3ac2605cac69366ff6a3374a933
+          image: ghcr.io/open-webui/open-webui:v0.11.4@sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f
           ports:
             - containerPort: 8080
           env:
@@ -92,9 +92,9 @@ spec:
                 secretKeyRef:
                   name: club-assistant-secrets
                   key: LITELLM_CLUB_KEY
-          # Known regressions on v0.11.0/v0.11.1 (unfixed in any released tag, 2026-08-28): toggling a model's
-          # enable/disable switch in Admin > Models permanently deletes it (open-webui#29036 et al.) — manage models
-          # in LiteLLM instead; Workspace > Knowledge page hangs (open-webui#29104) — use chat/REST for RAG checks.
+          # The v0.11.0/v0.11.1 regressions noted here earlier (Admin > Models toggle deleting a model,
+          # open-webui#29036; Workspace > Knowledge page hang, #29104) were fixed in v0.11.2 (2026-08-31).
+          # Source: https://github.com/open-webui/open-webui/releases/tag/v0.11.2
           livenessProbe:
             # /health is the confirmed liveness endpoint; returns {"status": true}
             # Evidence: @app.get('/health') in backend/open_webui/main.py
