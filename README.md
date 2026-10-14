@@ -90,9 +90,9 @@ directly to the backing Service per the rules in 40_platform.yml.
 
 ### Application Runtimes
 - **Home Assistant**: Deployed in `homeassistant` namespace with hostNetwork
-- **n8n**: v2.36.8 (workflow automation, Ansible-managed)
-- **LiteLLM**: v1.98.0 (AI gateway, OpenAI-compatible, non-root image, Ansible-managed)
-- **Open WebUI (Club Assistant)**: v0.11.1 (chat UI, Ansible-managed via `54_club_assistant.yml`, public at `club.furchert.ch`)
+- **n8n**: v2.37.10 (workflow automation, Ansible-managed; image changes need `-e n8n_image_change_ack`, see DEPLOYMENT.md)
+- **LiteLLM**: v1.100.0 (AI gateway, OpenAI-compatible, non-root image, Ansible-managed)
+- **Open WebUI (Club Assistant)**: v0.11.4 (chat UI, Ansible-managed via `54_club_assistant.yml`, public at `club.furchert.ch`)
 
 ---
 

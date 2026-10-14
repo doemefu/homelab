@@ -809,7 +809,12 @@ ssh -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared access 
 This is an escape hatch for reads and for single-file hotfixes of **Ansible-applied** apps (n8n,
 litellm, open-webui and the platform charts): it applies exactly the manifest you pipe in and none of
 the playbook's other tasks (secrets, PVCs, ConfigMaps, waits), so run the owning playbook with
-`--check --diff` on the next LAN session (expect `changed=0`). Never use it for the Flux-managed apps
+`--check --diff` on the next LAN session (expect `changed=0`). It — like any direct `kubectl apply -f/-k`
+of `cluster/apps/{n8n,litellm,open-webui}` — also bypasses the playbooks' version guards (`52_n8n.yml`
+and `54_club_assistant.yml` image guards, `53_litellm.yml` config guard): never use it to change the
+n8n image or the LiteLLM config, and change the Open WebUI image this way only as the planned step of an
+upgrade (backup first). An `*_change_ack` value is part of the operator's own go for that change; an
+agent never supplies one on its own. Never use it for the Flux-managed apps
 (auth-service, device-service, furchert-ch): change the app repo and let Flux reconcile — a manual
 apply there is overwritten by the next reconciliation (see the Flux contract in INTERFACES.md). For
 anything beyond a read or a single-file hotfix, run the owning playbook through the port-forward
@@ -1232,8 +1237,14 @@ kubectl rollout restart deployment/n8n -n apps
 #### Upgrade
 
 1. Update the image tag in `cluster/apps/n8n/deployment.yaml` to the new pinned version
-2. Re-run: `ansible-playbook infra/playbooks/52_n8n.yml`
+2. Re-run with the version-change acknowledgement (the playbook refuses any image change without it,
+   so a merged Dependabot bump can never be rolled out by an unrelated run):
+   `ansible-playbook infra/playbooks/52_n8n.yml -e n8n_image_change_ack='<exact image string from the manifest>'`
 3. Confirm: `kubectl -n apps rollout status deployment/n8n --timeout=10m`
+
+The club-assistant runs on this n8n; agree an upgrade window with its operator and run its post-upgrade
+re-tests and interim controls (club-assistant repo
+`.claude/worklogs/20261013-233437-platform-drift-parent-8d37.md`, section "Apply runbook", R-N).
 
 n8n's TypeORM migrations against its SQLite database are forward-only in practice — back up the
 `n8n-data` PVC per the n8n backup steps in the [Backup & rollback](#backup--rollback-for-image-updates-open-webui-litellm-n8n-postgresql-cloudflared)
@@ -1267,6 +1278,22 @@ ansible-playbook infra/playbooks/53_litellm.yml
 # Update Cloudflare Tunnel
 ansible-playbook infra/playbooks/40_platform.yml
 ```
+
+**Config-change guard:** `53_litellm.yml` refuses to run when the checkout's `config.yaml` differs
+from the live ConfigMap, because club routing changes have been rolled out from feature branches and a
+run from an older checkout would silently revert them. Before acknowledging, compare the live config
+with the checkout and make sure every live change is contained in it:
+
+```bash
+kubectl -n apps get configmap litellm-config -o jsonpath='{.data.config\.yaml}' > /tmp/litellm-live.yaml
+python3 -c "import yaml;print(yaml.safe_load(open('cluster/apps/litellm/configmap.yaml'))['data']['config.yaml'],end='')" \
+  | diff /tmp/litellm-live.yaml -
+# intended change only -> re-run with the sha256 the failure message prints:
+ansible-playbook infra/playbooks/53_litellm.yml -e litellm_config_change_ack=<sha256>
+```
+
+The ack goes on the command line only, never into inventory/group_vars. A playbook run with an
+unchanged config needs no ack.
 
 #### Verify
 
@@ -2498,10 +2525,12 @@ per-component blocks below for targeted, one-off backups and for every restore.
 
 #### Open WebUI (SQLite DB + vector DB + uploads)
 
-Known regressions on Open WebUI v0.11.x (unfixed in any released tag, 2026-08-28): toggling a
-model's enable/disable switch in Admin > Models permanently deletes it (open-webui#29036 et al.)
-— manage models in LiteLLM instead; Workspace > Knowledge page hangs (open-webui#29104) — use
-chat/REST for RAG checks.
+The v0.11.0/v0.11.1 regressions noted here earlier (Admin > Models toggle deleting a model,
+open-webui#29036; Workspace > Knowledge page hang, #29104) were fixed in v0.11.2 (2026-08-31).
+
+`54_club_assistant.yml` refuses an Open WebUI image change (upgrade, or rollback from an older checkout)
+unless run with `-e open_webui_image_change_ack='<exact image string from the manifest>'` — take this
+backup first.
 
 Quiesce before backing up the PVC — a live pod can still be writing to SQLite/`vector_db` mid-copy:
 
