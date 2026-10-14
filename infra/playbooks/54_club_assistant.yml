@@ -19,6 +19,9 @@
 #   n8n_club_api_key:             <n8n public API key>     # n8n public API key WITH an expiry date set,
 #                                                           # used by export/backup tooling to call the
 #                                                           # n8n public API (workflow export, backups)
+#   n8n_club_eval_webhook_key:    <secrets.token_urlsafe(32)> # shared secret for the headless eval-runner webhook
+#                                                           # (header X-Club-Eval-Key); >= 43 chars, random, MUST differ
+#                                                           # from the club-chat-webhook value (n8n UI credential only)
 #
 # Run order:
 #   1. ansible-playbook infra/playbooks/59_app_services.yml   # prerequisite secrets baseline
@@ -86,11 +89,15 @@
           - litellm_club_key is defined and litellm_club_key | length > 0
           - litellm_club_key is match('^sk-')
           - n8n_club_api_key is defined and n8n_club_api_key | length > 0
+          - n8n_club_eval_webhook_key is defined and n8n_club_eval_webhook_key | length >= 43
         fail_msg: >-
           One or more required club_assistant SOPS variables are missing or invalid.
           litellm_club_key must start with 'sk-'.
           n8n_club_api_key must be a real n8n public API key created WITH an expiry date
           (n8n Settings → API), not a long-lived/no-expiry key.
+          n8n_club_eval_webhook_key must be a random token of at least 43 characters
+          (python3 -c "import secrets;print(secrets.token_urlsafe(32))"), distinct from the
+          club-chat-webhook secret.
           Add them to infra/inventory/group_vars/all.sops.yml via:
             sops infra/inventory/group_vars/all.sops.yml
       delegate_to: localhost
@@ -171,7 +178,7 @@
     # dashboard/API in Phase 0b) and MUST NEVER be the LiteLLM master key.
     # A master key here would hand a root-running, publicly-routed Open WebUI
     # full gateway/admin access — ship-blocking at apply time.
-    - name: Club Assistant secrets anlegen (DATABASE_URL + LITELLM_CLUB_KEY + N8N_API_KEY)
+    - name: Club Assistant secrets anlegen (DATABASE_URL + LITELLM_CLUB_KEY + N8N_API_KEY + N8N_EVAL_WEBHOOK_KEY)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -185,6 +192,7 @@
             DATABASE_URL: "postgresql://club_assistant:{{ club_assistant_db_password }}@postgresql.apps.svc.cluster.local:5432/club_assistant"
             LITELLM_CLUB_KEY: "{{ litellm_club_key }}"
             N8N_API_KEY: "{{ n8n_club_api_key }}"
+            N8N_EVAL_WEBHOOK_KEY: "{{ n8n_club_eval_webhook_key }}"
       no_log: true
       delegate_to: localhost
 
