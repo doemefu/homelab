@@ -33,7 +33,7 @@ spec:
           # 2.39.6/2.40.1 and 2.41.4/2.42.1, e.g. GHSA-728h-pmr2-7cgh, GHSA-597w-c3jh-g8fg,
           # GHSA-9rhv-fhr8-7q5r); planned target 2.42.7 in an agreed window. SQLite migrations
           # are forward-only: never point an older image at a PVC a newer image has migrated.
-          image: n8nio/n8n:2.37.10@sha256:307d6065be25619aa24cfc63a7c2f04ca56d084a08c05c8e9f189a89f353b1ec
+          image: n8nio/n8n:2.43.4@sha256:c34ee9107a42b837e25cec0c8a927ab90a45b776aa2ccbf15e5b9cda466fad2c
           ports:
             - containerPort: 5678
           env:
