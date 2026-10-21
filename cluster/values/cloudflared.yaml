@@ -2,8 +2,9 @@
 # cloudflared Helm Values
 # Chart: cloudflare/cloudflare-tunnel-remote 0.1.2
 # Image: cloudflare/cloudflared 2026.10.3 (2026-10-21, amd64+arm64). Chart 0.1.2 is still the latest
-# (index checked 2026-08-28). 2026.10.2 = Go 1.27.3 + distroless bump (release notes); the cloudflared update named in Cloudflare's 2026-10-20
-# blog post on the eMudhra intermediate-CA compromise. 2026.10.3 bumps Go and the base image again. Since 2026.4.0
+# (index checked 2026-08-28). 2026.10.2 = Go 1.27.3 + distroless bump (release notes); it is the cloudflared update
+# named in Cloudflare's 2026-10-20 blog post on the eMudhra intermediate-CA compromise. 2026.10.3 bumps Go and the
+# base image again. Since 2026.4.0
 # --edge-ip-version defaults to auto (chart exposes no extraArgs to pin it).
 # Repo:  https://cloudflare.github.io/helm-charts
 #
