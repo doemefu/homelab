@@ -119,6 +119,7 @@ mcp_hub_accounts:
                 - ENC[AES256_GCM,data:wg9CVvMxWtESRxJrGmQ=,iv:q/otu81E8fUYkr4hUzHNLSaoetj4zRld4W4V6h8DQ7k=,tag:cJYMxMA02X1S17WIavR6qA==,type:str]
           mail:
             protocol: ENC[AES256_GCM,data:F12eJjE=,iv:q+xOtpox7OyIMAxsR1+6H7CIMUaNGjQMbf7tW+RY3EY=,tag:8DhxAFlI4ImjF/IGarvLaA==,type:str]
+            own_addresses_ref: ENC[AES256_GCM,data:g2a8Vqpssc0YjWxBQ5M8lVc7Zx86,iv:+muzXCP9AAs443KReXgqcDJjwd8ZJUPBRoLNHL9wFJk=,tag:GU+0/g9q/2xiR6d+FZwiBw==,type:str]
         - id: ENC[AES256_GCM,data:4Ii+8vw=,iv:9jUQ1qfHjaPfGv6csY4nDGejMxfkUy0+fWOfN9yR4Gg=,tag:wA7BoTFinUIo4L7G5sYBcQ==,type:str]
           label: ENC[AES256_GCM,data:j87wuCI=,iv:QaaHY+Pg+ghDRp+2rkLLMgvp+uEVYoZGJNRVdFjrZ+M=,tag:L6lRgeE7YW4HnnNS5v3zqA==,type:str]
           provider: ENC[AES256_GCM,data:vm9picDV,iv:xpjDxpPWTKLj/o88BgMSohHIzER93O/Q0Qy0FEbCZeA=,tag:Opw0A6kmXPcryh1+Jg2gkQ==,type:str]
@@ -133,6 +134,7 @@ mcp_hub_accounts:
             username_ref: ENC[AES256_GCM,data:Y99eeGAlqzJtspmf6MQ=,iv:ssJHaZk2ZNIDzkT54fJBSkIMKMkCSEJcShqpBzEDTko=,tag:HYjwAzfzMgwxUrMzf6IK8w==,type:str]
             password_ref: ENC[AES256_GCM,data:Ss+UkxAmQMMm8P8S5MTBt+bx,iv:vgv5wRSBUJdh4weg1PLbL2hun7TjAeVPP1QB7+3xVuA=,tag:T7sH5HtTSstCF7Y/JWAa9g==,type:str]
             inbox: ENC[AES256_GCM,data:oAJZIuk=,iv:uuskHz/B/S57FJUusp/6YPMKA77VJbdttUQcabzcLE4=,tag:3Y05zBW08mWP42Zz+dS2vQ==,type:str]
+            own_addresses_ref: ENC[AES256_GCM,data:FVHto/5pMRFnzFuP+GgS5ZogTw==,iv:cdMs0B8C4PsXyJeQQE5AgvZCAmZnuHFkCAp1rF60+bs=,tag:zpTX+OpbBgEum4v5gWozmQ==,type:str]
 mcp_hub_credentials:
     icloud-username: ENC[AES256_GCM,data:JAOnqs5oK8i6EL7ud/l6PmPrO82n,iv:z4vcHMv4d07PR/EMjPuj34ifQ9hozFS40emQ1QgK9JU=,tag:BVIq+HS9ksfFZfCt1NpJHw==,type:str]
     icloud-app-password: ENC[AES256_GCM,data:ZxJSCTt8F8w231U7sjGpCFTzBg==,iv:mvrKs94rduma1iJZ2KcNdCOnDZcCAcA3lFelcvmXNQQ=,tag:ST0QTAqIg8HptrqtSwHSNQ==,type:str]
@@ -140,6 +142,8 @@ mcp_hub_credentials:
     gmail-username: ENC[AES256_GCM,data:enowDp+bEtE9bRaDVDyt5H34mGQ=,iv:/CPFgLZr2DSkL7HeOq/doUbsTeW9cMDSBAJ53quhHMk=,tag:481EGTDmt8zQ581332hYUQ==,type:str]
     gmail-app-password: ENC[AES256_GCM,data:IinUgoX5p+Xda+a6FgcQXA==,iv:I+eZoVQr1xvp1xK6hI7Pn28Uq9u7mUUt4B5I7xDXANw=,tag:XtBqzS2tOxfv1dJaqA92sA==,type:str]
     icloud-own-addresses: ENC[AES256_GCM,data:e7Hyxx9lbsJ2rfxFcQyLfDtRlcSHAq4Gr10+Ety5lBU7KegngXzQIgZ1oUPnMEbJ,iv:cUtZa3lHqiwPBU+VG1UMsUy1p3/F8auzR1NNXudY69Q=,tag:BHSDrTAH/cRry+A1d1PjBg==,type:str]
+    gmail-own-addresses: ENC[AES256_GCM,data:T5Yf74Nus3MTxjI/tVN7uOcI+8PFZ5QACaaCfOVmuxHTA21sUw==,iv:yF6RlmOPOVT/qVGgJgV99ib66Z3bViKbQNh3Ye5CzZA=,tag:VKWNRl0tP8dHtDYAryhUCg==,type:str]
+    outlook-own-addresses: ENC[AES256_GCM,data:KHFi8AkAcIOhQs+rfN2zJ0oxm0E=,iv:IDNwAAS6zT2FYZenHyNWFRZ5kVeBTMX30ZKP0SdP23E=,tag:TeyEekF8OAUO7keGfWqs9Q==,type:str]
 mcp_hub_allowed_subjects:
     - ENC[AES256_GCM,data:dMDcSAmLXw==,iv:yMx0nfSOmJ6x0JaJrKBZurgiAa/QN0noSOy8hg84GhQ=,tag:RL1z8QIUUzLD97E0Mi/PqQ==,type:str]
 auth_service_claude_mcp_hub_client_secret: ENC[AES256_GCM,data:lytAHXNcwER003uSVvw7Z9fbhF22twRlLwwUQ4jGzFvmlrnDPb70r8KiHe2uJiiMLXNiASangj50Rn8ue2LW2F5m64A=,iv:xmLpFxI1/i2ZBIbr6pFm4k+zQc18u+NBly2uaWWp1Rw=,tag:2GxdpnAYoi2LFIs/36TRyQ==,type:str]
@@ -159,7 +163,7 @@ sops:
             w5D8nHLp26OhSxYiImEVbyoIZUPZ8jFshtKMlrH3L/jxmO28KVWxww==
             -----END AGE ENCRYPTED FILE-----
           recipient: age1hemf3e85hjhvsv8r5wx5s844uemug5jtaqpjfx8sefsu0kng0vwsyv5xlf
-    lastmodified: "2026-10-22T13:26:48Z"
-    mac: ENC[AES256_GCM,data:G64ntfNR4i9IK4oMMycZnXqelwAknGW9Izf1FGh1OyE2mS5iWAZJd8EMfYLAIUSeWt/aXjW+L4s2e04Yzrlo+MdrMEebKE7Ibn3wgjrkdeUOrGhZYO7e1EGct1AFou0HDWC9Z+u5MgdnNrw1968GwdHP3Kpcvpgqz/4DuwxQCN4=,iv:wqMfYmc+4wn7XHG8FwpxuBzfamdzX8s0eJX8gZ9xSHc=,tag:/VqLFaCsbbCegPm90H5hGQ==,type:str]
+    lastmodified: "2026-10-22T13:42:59Z"
+    mac: ENC[AES256_GCM,data:n1irkf984u4EQbOQhl7OTA9Uo6q0vQFkmDWBfpUH8St+iNrYvA3CqOEtWuurbu1RpXfagQ478J4rkKo10qDVNfXsYo69BRjPD0EMk5eSAJlOXDSnV9N+5Y39COhs2la913Wh9Arh6+IR9UcOa2lrSOvj59d+hEQpztK0JELDklA=,iv:j1y4/O3XWij1M8QFytpEjMIHCVBh2ma/R6bdkjKc+Ug=,tag:PmuSRNcmMzxztrlvrFxlZA==,type:str]
     unencrypted_suffix: _unencrypted
     version: 3.13.3
