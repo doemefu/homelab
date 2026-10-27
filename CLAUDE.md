@@ -1,8 +1,6 @@
 # CLAUDE.md — homelab (infrastructure)
 
-> **Session start:** Read `.claude/memory/MEMORY.md` completely. The topmost entry shows the current state. If there is an entry with `status: in_progress`, read the linked worklog and ask the user: *"I see we were interrupted at [SLUG]. Continue?"* — before doing anything else.
-
-> **After each completed change:** Insert a new block **at the top** of `.claude/memory/MEMORY.md`. The file grows top-down — newest entries always visible first.
+In-progress worklogs are listed at session start by the `homelab-workflow` plugin; start work with `/homelab-workflow:start-task`. Durable facts go to auto memory.
 
 > `.claude/` is mostly gitignored: only `settings.json`, `agent-context.md`, `rules/` and `hooks/` are tracked. Memory, worklogs, worktrees and `settings.local.json` exist only on this machine; cross-check `git log`/GitHub when they look stale.
 
@@ -71,7 +69,7 @@ Process comes from the plugin skills: `/homelab-workflow:start-task`, `workflow`
 | `code-style-conventions.md` | Ansible, Kubernetes/Helm, secrets, boundaries (loads for `infra/`, `cluster/`, `policy/` files) |
 | `documentation-files.md` | `README.md`, `CONTRIBUTING.md`, `APP-DEPLOYMENT.md`, `DEPLOYMENT.md`, `INTERFACES.md`, `docs/` |
 
-Worklogs live in `.claude/worklogs/`. Memory lives in `.claude/memory/MEMORY.md` (newest entry always at the top).
+Worklogs live in `.claude/worklogs/`.
 
 ## Commands
 
