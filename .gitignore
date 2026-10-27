@@ -3,8 +3,13 @@
 .AppleDouble
 .LSOverride
 
-# Claude Code — local-only settings (never share)
-.claude/
+# Claude Code — share only the files negated below; memory, worklogs, worktrees and local settings stay local
+/.claude/*
+!/.claude/settings.json
+!/.claude/agent-context.md
+!/.claude/rules/
+!/.claude/hooks/
+.claude/**/.DS_Store
 
 # Ansible
 *.retry
