@@ -23,6 +23,10 @@
       {{ ((lookup('file', club_mcp_manifest_dir + '/deployment.yaml') | from_yaml)
           .spec.template.spec.containers | selectattr('name', 'equalto', 'club-mcp') | map(attribute='image')
           | first | default('')) }}
+    club_mcp_version_env: >-
+      {{ ((lookup('file', club_mcp_manifest_dir + '/deployment.yaml') | from_yaml)
+          .spec.template.spec.containers | selectattr('name', 'equalto', 'club-mcp') | map(attribute='env') | first
+          | selectattr('name', 'equalto', 'CLUB_MCP_VERSION') | map(attribute='value') | first | default('')) }}
 
   tasks:
     # The manifest ships an unresolved placeholder (tag main-UNRESOLVED, all-zero digest) until the first CI build
@@ -57,6 +61,19 @@
         name: ghcr-pull
       register: club_mcp_pull_secret
       no_log: true
+      delegate_to: localhost
+
+    # CLUB_MCP_VERSION is reported to the gateway as server_version and must be the image's tag, so audit rows name the
+    # running build. Simplest robust option: assert equality instead of templating the manifest.
+    - name: Club-mcp CLUB_MCP_VERSION muss dem Image-Tag entsprechen
+      ansible.builtin.assert:
+        that:
+          - club_mcp_version_env != 'main-UNRESOLVED'
+          - club_mcp_version_env == (club_mcp_image | regex_replace('^[^:]+:([^@]+)@.*$', '\\1'))
+        fail_msg: >-
+          CLUB_MCP_VERSION ({{ club_mcp_version_env }}) in cluster/apps/club-mcp/deployment.yaml must equal the
+          tag part of the image ({{ club_mcp_image }}). Bump both together.
+        quiet: true
       delegate_to: localhost
 
     - name: Club-mcp Secrets müssen existieren (59_app_services.yml zuerst)
