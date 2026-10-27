@@ -90,6 +90,24 @@
 #       delete the auth-service pod after a change. The seeder creates the client once and never updates it —
 #       rotation needs SQL (DEPLOYMENT.md "mcp-hub incident runbook", L5).
 #
+# club-mcp (club-assistant MCP connector, DEPLOYMENT.md "club-mcp") — set all four or none:
+#   With none, the play skips the club-mcp block (an existing club-mcp-secrets and the auth-service keys are NOT
+#   changed); with only some, it fails. Kill switch = club_mcp_allowed_subjects: [] — never remove the variables.
+#   club_mcp_allowed_subjects: <list of auth-service usernames, exact case; [] is valid and means "nobody">
+#       written as club-mcp-secrets/allowed-subjects (one per line)
+#   club_mcp_gateway_key: <openssl rand -hex 32>   # 64 lower-case hex characters
+#       written as club-mcp-secrets/gateway-key; the same value is the n8n header-auth credential
+#       club-mcp-webhook (X-Club-MCP-Key), entered by the owner in the n8n UI
+#   auth_service_claude_club_mcp_client_secret: <'{bcrypt}$2y$10$...' — bcrypt (cost 10) hash of the client secret;
+#       written verbatim to homelab-auth-secrets/claude-club-mcp-client-secret; the plaintext exists only in the
+#       owner's password manager and in claude.ai>
+#   auth_service_claude_club_mcp_allowed_users: <comma-separated auth-service usernames, exact case>
+#       written to homelab-auth-secrets/claude-club-mcp-allowed-users. auth-service reads both at start-up:
+#       delete the auth-service pod after a change.
+#   ghcr_pull_token: <GitHub PAT with read:packages only> — OPTIONAL, independent of the four above
+#       written as docker-registry Secret ghcr-pull (user ghcr_pull_username, default doemefu) in apps; the
+#       club-mcp image is a private GHCR package. Without it, no ghcr-pull is created or changed.
+#
 # One-time RSA key generation (run once, then paste output into SOPS):
 #   openssl genrsa -out /tmp/auth-rsa.pem 2048
 #   openssl rsa -in /tmp/auth-rsa.pem -pubout -out /tmp/auth-rsa-pub.pem
@@ -132,6 +150,14 @@
       - db-password
       - token-encryption-key
       - token-encryption-key-previous
+
+    # club-mcp: the block runs only when all four variables exist; none = skipped, some = the play fails.
+    club_mcp_configured: >-
+      {{ club_mcp_allowed_subjects is defined
+         and club_mcp_gateway_key is defined
+         and auth_service_claude_club_mcp_client_secret is defined
+         and auth_service_claude_club_mcp_allowed_users is defined }}
+    club_mcp_newline: "\n"
 
   tasks:
 
@@ -852,6 +878,131 @@
         # Jinja literal into a newline, so join('\n') would write a backslash and an n.
         mcp_hub_newline: "\n"
       when: mcp_hub_configured
+      no_log: true
+      delegate_to: localhost
+
+    # --- club-mcp: Secret club-mcp-secrets, auth-service client keys, GHCR pull secret (DEPLOYMENT.md "club-mcp") ---
+    # The server mounts club-mcp-secrets read-only as files (allowed-subjects, gateway-key). Guarded like mcp-hub:
+    # all four variables or none, so a missing club-mcp value never fails the secrets of the other services.
+
+    - name: Club-mcp — report that the block is skipped
+      ansible.builtin.debug:
+        msg: >-
+          club_mcp_allowed_subjects, club_mcp_gateway_key, auth_service_claude_club_mcp_client_secret and
+          auth_service_claude_club_mcp_allowed_users are not set: skipping club-mcp-secrets and the claude-club-mcp
+          keys in homelab-auth-secrets. Existing values are NOT changed. To cut access, set
+          club_mcp_allowed_subjects to [] instead of removing the variables (DEPLOYMENT.md "club-mcp").
+      when: >-
+        club_mcp_allowed_subjects is not defined
+        and club_mcp_gateway_key is not defined
+        and auth_service_claude_club_mcp_client_secret is not defined
+        and auth_service_claude_club_mcp_allowed_users is not defined
+      delegate_to: localhost
+
+    - name: Club-mcp — assert that all four SOPS variables are set and valid
+      ansible.builtin.assert:
+        that:
+          # Kill switch: "defined" and a list of strings; [] is valid and means "nobody".
+          - club_mcp_allowed_subjects is defined
+          - club_mcp_allowed_subjects is iterable
+          - club_mcp_allowed_subjects is not string and club_mcp_allowed_subjects is not mapping
+          - club_mcp_allowed_subjects | reject('string') | list | length == 0
+          - club_mcp_allowed_subjects | map('trim') | select('equalto', '') | list | length == 0
+          - club_mcp_allowed_subjects | select('search', '[\r\n]') | list | length == 0
+          - club_mcp_gateway_key is defined
+          - club_mcp_gateway_key is string
+          - club_mcp_gateway_key is match('^[0-9a-f]{64}\Z')
+          - auth_service_claude_club_mcp_client_secret is defined
+          - auth_service_claude_club_mcp_client_secret is string
+          - auth_service_claude_club_mcp_client_secret is match('^[{]bcrypt[}][$]2[aby][$]10[$][./A-Za-z0-9]{53}\Z')
+          - auth_service_claude_club_mcp_allowed_users is defined
+          - auth_service_claude_club_mcp_allowed_users is string
+          - auth_service_claude_club_mcp_allowed_users | trim | length > 0
+          - auth_service_claude_club_mcp_allowed_users is not search('[\r\n]')
+        fail_msg: >-
+          A club-mcp SOPS variable is missing or invalid. club_mcp_allowed_subjects must be a list of usernames
+          ([] is valid and means "nobody" — never a plain string); club_mcp_gateway_key 64 lower-case hex characters
+          (openssl rand -hex 32); auth_service_claude_club_mcp_client_secret the '{bcrypt}' hash with cost 10, not the
+          plaintext; auth_service_claude_club_mcp_allowed_users a non-empty single-line string. Set all four or none.
+          See the header comment in this playbook.
+      when: >-
+        club_mcp_allowed_subjects is defined
+        or club_mcp_gateway_key is defined
+        or auth_service_claude_club_mcp_client_secret is defined
+        or auth_service_claude_club_mcp_allowed_users is defined
+      no_log: true
+      delegate_to: localhost
+
+    - name: Club-mcp — create club-mcp-secrets (subject allowlist, gateway key)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: club-mcp-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          # One file per key under /etc/club-mcp/secrets. allowed-subjects: one username per line; an empty list
+          # writes an empty file, so the server rejects every token (kill switch).
+          stringData:
+            allowed-subjects: "{{ club_mcp_allowed_subjects | map('trim') | join(club_mcp_newline) }}"
+            gateway-key: "{{ club_mcp_gateway_key }}"
+      when: club_mcp_configured
+      no_log: true
+      delegate_to: localhost
+
+    # Patches the two keys into the existing homelab-auth-secrets (no force), like the claude-mcp-hub keys.
+    - name: Homelab-auth-secrets — add the claude-club-mcp client keys (client secret hash, allowed users)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: homelab-auth-secrets
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            # Read by auth-service as CLAUDE_CLUB_MCP_CLIENT_SECRET / CLAUDE_CLUB_MCP_ALLOWED_USERS (optional
+            # secretKeyRefs, auth-service PR feat/club-mcp-client). The client secret is already a {bcrypt} hash and
+            # is written verbatim. Both are read at start-up: delete the auth-service pod after a change.
+            claude-club-mcp-client-secret: "{{ auth_service_claude_club_mcp_client_secret }}"
+            claude-club-mcp-allowed-users: "{{ auth_service_claude_club_mcp_allowed_users | trim }}"
+      when: club_mcp_configured
+      no_log: true
+      delegate_to: localhost
+
+    - name: Ghcr-pull — assert the token is a plain single-line string
+      ansible.builtin.assert:
+        that:
+          - ghcr_pull_token is string
+          - ghcr_pull_token | length > 0
+          - ghcr_pull_token is not search('\s')
+          - (ghcr_pull_username | default('doemefu')) is match('^[A-Za-z0-9-]{1,39}\Z')
+        fail_msg: ghcr_pull_token must be a non-empty string without whitespace (GitHub PAT, read:packages only).
+      when: ghcr_pull_token is defined
+      no_log: true
+      delegate_to: localhost
+
+    - name: Ghcr-pull — create the docker-registry pull secret for the private club-mcp image
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ghcr-pull
+            namespace: "{{ apps_namespace }}"
+          type: kubernetes.io/dockerconfigjson
+          stringData:
+            .dockerconfigjson: >-
+              {{ {'auths': {'ghcr.io': {
+                    'username': ghcr_pull_username | default('doemefu'),
+                    'password': ghcr_pull_token,
+                    'auth': ((ghcr_pull_username | default('doemefu')) ~ ':' ~ ghcr_pull_token) | b64encode}}}
+                  | to_json(sort_keys=True) }}
+      when: ghcr_pull_token is defined
       no_log: true
       delegate_to: localhost
 

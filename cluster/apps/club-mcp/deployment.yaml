@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: club-mcp
+  namespace: apps
+  labels:
+    app: club-mcp
+spec:
+  replicas: 1
+  # Stateless; Recreate keeps a single pod during a bump (the per-sub concurrency cap lives in process memory).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: club-mcp
+  template:
+    metadata:
+      labels:
+        app: club-mcp
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Private GHCR package: docker-registry Secret written by playbook 59 (SOPS var ghcr_pull_token).
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: club-mcp
+          # Playbook 55 refuses to apply while the tag is not main-<UTC ts>, the digest is not a real sha256,
+          # or CLUB_MCP_VERSION differs from the tag. Bump both by PR after each CI build of the club-assistant repo
+          # (club-mcp-build.yml): tag + multi-arch index digest (linux/amd64 + linux/arm64) from the merge job.
+          # Format: ghcr.io/doemefu/club-assistant-mcp:main-<YYYYMMDDTHHMMSS>@sha256:<index digest>
+          image: ghcr.io/doemefu/club-assistant-mcp:main-20261027T202452@sha256:52668051bd1faffdee443283f1e2ddd9bc3ea3b117c6513179771003779d7978
+          ports:
+            - name: mcp
+              containerPort: 8083
+            - name: metrics
+              containerPort: 8084
+          env:
+            - name: TZ
+              value: "Europe/Zurich"
+            # Must equal the image tag above (reported to the gateway as server_version, contract §2).
+            - name: CLUB_MCP_VERSION
+              value: "main-20261027T202452"
+            - name: CLUB_MCP_PUBLIC_HOST
+              value: "club-mcp.furchert.ch"
+            - name: CLUB_MCP_RESOURCE
+              value: "https://club-mcp.furchert.ch/mcp"
+            - name: CLUB_MCP_PORT
+              value: "8083"
+            - name: CLUB_MCP_INTERNAL_PORT
+              value: "8084"
+            - name: AUTH_ISSUER
+              value: "https://auth.furchert.ch"
+            - name: AUTH_JWKS_URL
+              value: "http://auth-service.apps.svc.cluster.local:8080/oauth2/jwks"
+            - name: AUTH_EXPECTED_CLIENT_ID
+              value: "claude-club-mcp"
+            - name: AUTH_CLOCK_SKEW_SECONDS
+              value: "60"
+            - name: CLUB_MCP_SECRETS_DIR
+              value: "/etc/club-mcp/secrets"
+            - name: CLUB_MCP_GATEWAY_URL
+              value: "http://n8n.apps.svc.cluster.local/webhook/club-mcp-gateway"
+            - name: LOG_LEVEL
+              value: "INFO"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Health and metrics are served on the internal port 8084, which is never routed publicly.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: secrets
+              mountPath: /etc/club-mcp/secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Secret club-mcp-secrets is written by playbook 59 (files allowed-subjects, gateway-key).
+        # Mounted as a whole volume (never subPath) so allowlist changes reach the pod.
+        - name: secrets
+          secret:
+            secretName: club-mcp-secrets
+            defaultMode: 0400
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
