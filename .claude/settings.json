@@ -24,6 +24,12 @@
       "Edit(/**/?*.sops.yaml)",
       "Read(/**/?*.sops.json)",
       "Edit(/**/?*.sops.json)",
+      "Read(/**/?*.sops.env)",
+      "Edit(/**/?*.sops.env)",
+      "Read(/**/?*.sops.ini)",
+      "Edit(/**/?*.sops.ini)",
+      "Read(/**/?*.sops.binary)",
+      "Edit(/**/?*.sops.binary)",
       "Read(/**/*.age)",
       "Edit(/**/*.age)",
       "Edit(/.sops.yaml)",
@@ -34,7 +40,25 @@
       "Bash(git push * -f *)",
       "Bash(git push * -f)",
       "Bash(git push * +*)",
-      "Bash(git push +*)"
+      "Bash(git push * --mirror*)",
+      "Bash(git push --mirror*)"
+    ],
+    "ask": [
+      "Bash(gh pr merge *)",
+      "Bash(gh api -X*)",
+      "Bash(gh api * -X*)",
+      "Bash(gh api --method*)",
+      "Bash(gh api * --method*)",
+      "Bash(gh api graphql *mutation*)",
+      "Bash(kubectl apply *)",
+      "Bash(kubectl * apply *)",
+      "Bash(kubectl delete *)",
+      "Bash(kubectl * delete *)",
+      "Bash(kubectl patch *)",
+      "Bash(kubectl * patch *)",
+      "Bash(kubectl exec *)",
+      "Bash(kubectl * exec *)",
+      "Bash(ansible-playbook *)"
     ]
   },
   "extraKnownMarketplaces": {
