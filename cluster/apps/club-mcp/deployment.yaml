@@ -32,11 +32,11 @@ spec:
         - name: ghcr-pull
       containers:
         - name: club-mcp
-          # UNRESOLVED PLACEHOLDER: playbook 55 refuses to apply while the tag is not main-<UTC ts> or the
-          # digest is not a real sha256. Bump by PR after each CI build of the club-assistant repo
+          # Playbook 55 refuses to apply while the tag is not main-<UTC ts>, the digest is not a real sha256,
+          # or CLUB_MCP_VERSION differs from the tag. Bump both by PR after each CI build of the club-assistant repo
           # (club-mcp-build.yml): tag + multi-arch index digest (linux/amd64 + linux/arm64) from the merge job.
           # Format: ghcr.io/doemefu/club-assistant-mcp:main-<YYYYMMDDTHHMMSS>@sha256:<index digest>
-          image: ghcr.io/doemefu/club-assistant-mcp:main-UNRESOLVED@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          image: ghcr.io/doemefu/club-assistant-mcp:main-20261027T202452@sha256:52668051bd1faffdee443283f1e2ddd9bc3ea3b117c6513179771003779d7978
           ports:
             - name: mcp
               containerPort: 8083
@@ -47,7 +47,7 @@ spec:
               value: "Europe/Zurich"
             # Must equal the image tag above (reported to the gateway as server_version, contract §2).
             - name: CLUB_MCP_VERSION
-              value: "main-UNRESOLVED"
+              value: "main-20261027T202452"
             - name: CLUB_MCP_PUBLIC_HOST
               value: "club-mcp.furchert.ch"
             - name: CLUB_MCP_RESOURCE
