@@ -4,7 +4,7 @@
 
 > **After each completed change:** Insert a new block **at the top** of `.claude/memory/MEMORY.md`. The file grows top-down — newest entries always visible first.
 
-> `.claude/` is fully gitignored in this repo — memory, worklogs, agents and rules exist only on this machine; cross-check `git log`/GitHub when they look stale.
+> `.claude/` is mostly gitignored: only `settings.json`, `agent-context.md`, `rules/` and `hooks/` are tracked. Memory, worklogs, worktrees and `settings.local.json` exist only on this machine; cross-check `git log`/GitHub when they look stale.
 
 ## Repo Overview
 
@@ -58,33 +58,36 @@ Infrastructure-as-Code for the doemefu homelab k3s cluster (Raspberry Pis + MacB
 
 ## Agent Team
 
-Seven project-level agents in `.claude/agents/` for bigger implementations (local-only — not tracked in git):
-
-| Agent | Model | Role |
-|-------|-------|------|
-| `architect` | opus | Defines role/Helm contracts before implementation |
-| `implementer` | sonnet | Builds Ansible roles, Helm values, playbook wiring |
-| `reviewer` | opus | Reviews for idempotency, security, version pinning |
-| `documenter` | sonnet | Keeps `README.md`, `CONTRIBUTING.md`, `APP-DEPLOYMENT.md`, `INTERFACES.md`, `DEPLOYMENT.md` accurate |
-| `devops` | sonnet | k3s/Helm/cluster wiring and rollout |
-| `plan-reviewer` | (inherit) | Phase 3 plan defect review |
-| `doc-auditor` | (inherit) | Phase 6 documentation gap audit |
+Agents come from the `homelab-workflow` plugin (`homelab-workflow:<role>`: `architect`, `implementer`, `reviewer`, `documenter`, `devops`, `plan-reviewer`, `doc-auditor`). Repo specifics for each role live in `.claude/agent-context.md`; there are no repo-only agents.
 
 ---
 
 ## Process & Conventions
 
-Detailed process rules live in `.claude/rules/` (auto-loaded by Claude Code; local-only — gitignored, not tracked in git):
+Process comes from the plugin skills: `/homelab-workflow:start-task`, `workflow` (phases, plans, worklogs), `review-gate`, `project-board`, `cross-repo`. Repo rules in `.claude/rules/` (path-scoped, tracked):
 
 | Rule file | Covers |
 |-----------|--------|
-| `workflow.md` | 6-phase milestone workflow (includes plan approval checklist) |
-| `worklog-conventions.md` | Worklog location, naming, header, structure |
-| `plan-structure.md` | 8-section plan template |
-| `commands.md` | Ansible, Helm, k3s, kubectl, SOPS commands |
-| `code-style-conventions.md` | Ansible, Kubernetes/Helm, secrets, boundaries |
-| `review-guidelines.md` | Idempotency, security, version pinning, diff hygiene |
+| `code-style-conventions.md` | Ansible, Kubernetes/Helm, secrets, boundaries (loads for `infra/`, `cluster/`, `policy/` files) |
 | `documentation-files.md` | `README.md`, `CONTRIBUTING.md`, `APP-DEPLOYMENT.md`, `DEPLOYMENT.md`, `INTERFACES.md`, `docs/` |
-| `github-project.md` | GitHub Project #5 status transitions |
 
-Worklog template: `.claude/worklog-template.md` — copy as the starting point for every new worklog. Worklogs live in `.claude/worklogs/`. Memory lives in `.claude/memory/MEMORY.md` (newest entry always at the top).
+Worklogs live in `.claude/worklogs/`. Memory lives in `.claude/memory/MEMORY.md` (newest entry always at the top).
+
+## Commands
+
+```bash
+# Setup: pip install ansible ansible-lint; brew install sops age helm kubectl
+ansible-lint infra/                                                   # lint
+yamllint -c .yamllint .                                               # YAML lint (CI scope)
+ansible-playbook infra/playbooks/<pb>.yml -l <node> --check --diff    # dry-run one node
+ansible-playbook infra/playbooks/<pb>.yml --check --diff              # dry-run all
+helm lint cluster/<chart>/ -f cluster/values/<chart>.yaml
+helm template <name> cluster/<chart>/ -f cluster/values/<chart>.yaml
+conftest verify --policy policy/kubernetes/                           # policy tests (as in CI)
+kubectl get nodes -o wide
+kubectl get pods -A
+kubectl -n longhorn-system get pods
+kubectl -n apps rollout status deployment/<name>
+# Stale Helm repo ("Repository already have a repository named X", kubernetes.core >=6.5.0 trailing slash):
+helm repo remove influxdata && helm repo add influxdata https://helm.influxdata.com
+```
