@@ -7,8 +7,11 @@
 /.claude/*
 !/.claude/settings.json
 !/.claude/agent-context.md
-!/.claude/rules/
-!/.claude/hooks/
+/.claude/rules/*
+!/.claude/rules/code-style-conventions.md
+!/.claude/rules/documentation-files.md
+/.claude/hooks/*
+!/.claude/hooks/yamllint.sh
 .claude/**/.DS_Store
 
 # Ansible

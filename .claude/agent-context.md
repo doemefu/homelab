@@ -14,7 +14,7 @@ Repo-specific additions for the `homelab-workflow` agents (Ansible + k3s + Helm 
   - Secret keys materialized into Kubernetes (name only, never values) and their SOPS source.
   - Resource limits and storage class expectations.
 - Backwards-incompatible changes: this repo ships first, consumer repos (auth-service, device-service, furchert-ch) adapt after; propose that migration order.
-- Namespaces are limited to the allowlist in `policy/kubernetes/namespace-allowlist.rego` (platform, monitoring, apps, longhorn-system, flux-system, homeassistant). A new namespace needs discussion with the user and a rego update.
+- Namespaces are limited to the allowlist in `policy/kubernetes/namespace-allowlist.rego`; read the current list there instead of relying on a copy. A new namespace needs discussion with the user and a rego update.
 
 ## implementer
 
@@ -28,7 +28,7 @@ Repo-specific additions for the `homelab-workflow` agents (Ansible + k3s + Helm 
 - Never touch `*.sops.*`, `*.age`, or any `*secret*`/`*key*`/`*token*` file. Do not touch the secrets section of `infra/inventory/group_vars/all.yml` without explicit instruction. The age key stays outside the repo.
 - Do not change the Longhorn replication factor below 2.
 - Resource limits are required on all workloads in the `apps` namespace; no `cluster-admin` for app ServiceAccounts; no cross-namespace dependencies from `apps`.
-- Out of scope: Multi-Control-Plane HA, service mesh (Istio/Linkerd), ArgoCD. App code and app-specific deployments belong in the app's own repo.
+- Out of scope: Multi-Control-Plane HA, service mesh (Istio/Linkerd), ArgoCD. Code and deployments of apps owned by other repos (auth-service, device-service, furchert-ch, ...) belong in those repos; this repo keeps the platform scaffolding and the manifests of the apps it deploys itself (n8n, litellm, open-webui, Home Assistant).
 - If `INTERFACES.md` is ambiguous or a new contract is needed, ask the architect before guessing. After reviewer approval, involve devops if the rollout is affected (new secret, new playbook step, new Flux bundle).
 
 ## reviewer
