@@ -2497,6 +2497,61 @@ Stage-a drill results (2026-10-01):
 
 ---
 
+### club-mcp (Pattern B, read-only MCP connector for the club assistant)
+
+`club-mcp` is the server behind the claude.ai custom connector `https://club-mcp.furchert.ch/mcp` (club-assistant repo, package `mcp/club-mcp/`, decision D67). It answers two read-only tools (`memory_search`, `corpus_search`) by calling the n8n gateway workflow `m6_mcp_gateway` in-cluster. It follows Pattern B like n8n and LiteLLM: raw manifests in `cluster/apps/club-mcp/`, applied by `infra/playbooks/55_club_mcp.yml`, **not** Flux (the image is built from the private club-assistant monorepo; a Flux deploy key would hold write access to that repo's `main`). A merge alone does not deploy it: run the playbook.
+
+| Item | Value |
+|------|-------|
+| Image | `ghcr.io/doemefu/club-assistant-mcp:main-<YYYYMMDDTHHMMSS>@sha256:<index digest>` — private package, built by the club-assistant repo's `club-mcp-build.yml` on push to `main`. The manifest ships an unresolved placeholder; playbook 55 refuses to run until it is bumped. |
+| Ports | `mcp` 8083 (routed through the tunnel), `metrics` 8084 (`/healthz`, `/readyz`, `/metrics`; never routed) |
+| Secrets | `club-mcp-secrets` (files `allowed-subjects`, `gateway-key`, mounted read-only at `/etc/club-mcp/secrets`), `ghcr-pull` (docker-registry), two keys in `homelab-auth-secrets` — all written by playbook 59 |
+| Resources | 50m/128Mi requests, 500m/256Mi limits, uid 10001, read-only root filesystem, no capabilities |
+| Route | `cf_ingress_body` in `40_platform.yml`: `club-mcp.furchert.ch` → `http://club-mcp.apps.svc.cluster.local:8083`; plus a rule that answers 404 for any `webhook*` path variant of `n8n.furchert.ch/…/club-mcp-gateway` (regex in `40_platform.yml`, case-insensitive, tolerates extra slashes; placed before the n8n entry; the server calls that webhook in-cluster) |
+| Monitoring | ServiceMonitor `club-mcp` in `monitoring` (port `metrics`); no alert rules yet |
+| NetworkPolicy | Ingress only: 8083 from the cloudflared pods, 8084 from Prometheus |
+
+#### Onboarding (owner steps; the order matters)
+
+1. **SOPS** (`sops infra/inventory/group_vars/all.sops.yml`, owner only): add `club_mcp_allowed_subjects` (list of auth-service usernames; `[]` = nobody), `club_mcp_gateway_key` (`openssl rand -hex 32`), `auth_service_claude_club_mcp_client_secret` (`{bcrypt}` cost-10 hash of a fresh 32-byte hex secret; keep the plaintext in the password manager, it is entered only in claude.ai), `auth_service_claude_club_mcp_allowed_users`, and `ghcr_pull_token` (fine-grained or classic PAT with `read:packages` only). The four `club_mcp_*`/`auth_service_claude_club_mcp_*` variables are all-or-none; the playbook fails on a partial set.
+2. **n8n credential** `club-mcp-webhook` (header auth, header `X-Club-MCP-Key`, value = the same string as `club_mcp_gateway_key`), created in the n8n UI.
+3. **Image**: after the first club-assistant CI build, bump `cluster/apps/club-mcp/deployment.yaml` by PR (`image` and `CLUB_MCP_VERSION` — always both, `CLUB_MCP_VERSION` = the image tag; playbook 55 refuses to run if they differ — from the build's merge job: tag + multi-arch index digest, `linux/amd64` + `linux/arm64`). Verify the digest with `docker buildx imagetools inspect <image>` before merging.
+4. **Cloudflare dashboard**: a proxied CNAME `club-mcp` → the same `<tunnel-id>.cfargotunnel.com` target as `auth` (never in the Zero Trust UI). The WAF rule `mcp-hub: only Anthropic egress` is edited **after the first successful production connection from claude.ai** to the host set `(http.host in {"mcp.furchert.ch" "club-mcp.furchert.ch"} and not ip.src in {160.79.104.0/21})`; this uses no extra custom-rule slot. Note that the reserved `mcp-hub: incident block` rule matches only the hub host; broaden its expression to the host set too, or use the L1 fallback below. The token/login rate limit is path-based and already covers the new client.
+5. **Verify the NetworkPolicy selector** before the first run of 55 (home network or tunnel context): `kubectl -n platform get pods --show-labels` must show `app.kubernetes.io/name=cloudflare-tunnel-remote` on the cloudflared pod. If the label differs, fix `cluster/apps/club-mcp/networkpolicy.yaml` first, otherwise the public route is cut off from the pod.
+6. **Playbook order**: `59_app_services.yml` → delete the auth-service pod (`kubectl -n apps delete pod -l app=auth-service`; it reads the client keys at start-up and seeds the `claude-club-mcp` client from the auth-service release that contains it) → `40_platform.yml` (route; briefly restarts cloudflared and drops an off-LAN SSH forward, run it on the home network, see "Off-LAN kubectl") → `55_club_mcp.yml`. Confirm: `kubectl -n apps rollout status deploy/club-mcp`, then `curl -si https://club-mcp.furchert.ch/mcp` answers 401 and `https://n8n.furchert.ch/webhook/club-mcp-gateway`, `…/webhook/club-mcp-gateway/`, `…/Webhook/Club-MCP-Gateway` and `…/webhook-test/club-mcp-gateway` all answer 404.
+7. Enabling the tools is a separate `config` change in the club-assistant database (`mcp_limits.enabled`, `mcp_limits.allowed_subjects`), made on the owner's explicit go.
+
+#### Image bump
+
+PR against `cluster/apps/club-mcp/deployment.yaml` (`image` + `CLUB_MCP_VERSION`, bumped together; 55 asserts they match), merge, then `ansible-playbook infra/playbooks/55_club_mcp.yml`. Rule from the club-assistant side: the red-team protocol RT-M passes before merging any PR that changes the connector's tool texts or snapshots. Dependabot does not watch this image (private package, other repository); the Dockerfile base-image digests are tracked by Dependabot in the club-assistant repo.
+
+#### Rotating `club_mcp_gateway_key`
+
+The key is shared between the server and the n8n credential, so rotate all three in this order, accepting a short window of `upstream_failed` answers: (1) set the new value in SOPS, (2) update the n8n credential `club-mcp-webhook` to the same value, (3) `ansible-playbook infra/playbooks/59_app_services.yml`, (4) `kubectl -n apps rollout restart deploy/club-mcp` (the server also re-reads the key file within about 60 s). Whoever holds the key can assert any allowed subject towards the gateway, so rotate it on any suspicion of exposure.
+
+#### club-mcp incident runbook — cutting access
+
+Every lever except L0 and L1 changes the cluster or the database and needs the owner's go. Removing the connector in claude.ai is not a lever; its refresh token stays valid until L4/L5 of the mcp-hub runbook above (same auth-service client mechanism, client id `claude-club-mcp`).
+
+| # | Lever | Effect | Speed |
+|---|-------|--------|-------|
+| L0 | `UPDATE config SET value = jsonb_set(value, '{enabled}', 'false') WHERE key = 'mcp_limits'` in the club-assistant database (owner-run) | the gateway refuses every call; read per call | immediate, **try this first** |
+| L1 | Cloudflare block rule on `club-mcp.furchert.ch` | nothing reaches the server | seconds; works without cluster access |
+| L2 | Empty allowlist, two steps | every token gets 401 | at most 2 minutes |
+| L3 | Stop the server | server down | seconds |
+
+**L2.** Step 1 (immediate), then step 2 (persistent — the next playbook-59 run reverts step 1 otherwise):
+
+```bash
+kubectl -n apps patch secret club-mcp-secrets --type merge -p '{"stringData":{"allowed-subjects":""}}'
+kubectl -n apps delete pod -l app=club-mcp
+# Step 2: set  club_mcp_allowed_subjects: []  in SOPS (owner), then run 59.
+```
+
+**L3.** Pattern B, no Flux: `kubectl -n apps scale deploy/club-mcp --replicas=0` (a later run of 55 restores the replica count from the manifest).
+
+Decommission: `scale --replicas=0`, delete the club-mcp route from `cf_ingress_body` and re-run 40, remove the CNAME, delete the `claude-club-mcp` client authorizations, then remove the manifests. **Remove the `claude-club-mcp` client before any auth-service rollback** to a release that does not know it, exactly as for the hub.
+
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 
 All 8 platform images (the 5 in this runbook, plus postgres-exporter, mosquitto, and

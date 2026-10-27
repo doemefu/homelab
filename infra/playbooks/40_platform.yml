@@ -161,6 +161,15 @@
                 service: "http://auth-service.apps.svc.cluster.local:8080"
               - hostname: "device.furchert.ch"
                 service: "http://device-service.apps.svc.cluster.local:8081"
+              # club-mcp gateway webhook is internal-only: club-mcp calls it in-cluster (n8n.apps.svc), so the public
+              # tunnel answers 404 for that path. First-match wins, hence this rule stays BEFORE the n8n entry.
+              # `path` is a regex matched against the URL path (cloudflared ingress rules). Case-insensitive, any
+              # /webhook* prefix (-test, -waiting), repeated slashes and trailing segments. Percent-encoded variants
+              # are not covered: defence in depth only; the gateway's own header-key + Host guard remains the
+              # control (club-assistant D67, RT-M05 checks both).
+              - hostname: "n8n.furchert.ch"
+                path: "(?i)^/+webhook[^/]*/+club-mcp-gateway(/.*)?$"
+                service: "http_status:404"
               - hostname: "n8n.furchert.ch"
                 service: "http://n8n.apps.svc.cluster.local:80"
               - hostname: "ai.furchert.ch"
@@ -174,6 +183,10 @@
               # the hub's internal port 8084 (health, metrics) is never routed.
               - hostname: "mcp.furchert.ch"
                 service: "http://mcp-hub.apps.svc.cluster.local:8083"
+              # club-mcp: claude.ai custom connector for club memory/corpus (read-only). Port 8083 only; 8084 (health,
+              # metrics) is never routed.
+              - hostname: "club-mcp.furchert.ch"
+                service: "http://club-mcp.apps.svc.cluster.local:8083"
               - service: "http_status:404"
 
     - name: Cloudflare Tunnel Ingress via API setzen (SSH raspi5 + Fallback 404)

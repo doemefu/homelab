@@ -1,0 +1,128 @@
+---
+# club-mcp deployment (read-only MCP connector server for the club assistant, claude.ai custom connector)
+# Namespace: apps
+#
+# Prerequisites:
+#   - 50_apps_infra.yml + 41_monitoring.yml completed (apps namespace, ServiceMonitor CRD)
+#   - 59_app_services.yml completed with the club_mcp_* and ghcr_pull_token SOPS variables
+#     (Secrets club-mcp-secrets and ghcr-pull exist)
+#   - cluster/apps/club-mcp/deployment.yaml carries a real image (tag + digest from a club-assistant CI build)
+#   - 40_platform.yml run with the club-mcp.furchert.ch route (not needed for the pod itself, only for traffic)
+#
+# Run: ansible-playbook infra/playbooks/55_club_mcp.yml
+# Not Flux: image bumps are PRs against cluster/apps/club-mcp/deployment.yaml followed by a run of this playbook.
+- name: App Deployment — club-mcp
+  hosts: k3s_server
+  gather_facts: false
+  run_once: true
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
+    apps_namespace: apps
+    club_mcp_manifest_dir: "{{ playbook_dir }}/../../cluster/apps/club-mcp"
+    club_mcp_image: >-
+      {{ ((lookup('file', club_mcp_manifest_dir + '/deployment.yaml') | from_yaml)
+          .spec.template.spec.containers | selectattr('name', 'equalto', 'club-mcp') | map(attribute='image')
+          | first | default('')) }}
+    club_mcp_version_env: >-
+      {{ ((lookup('file', club_mcp_manifest_dir + '/deployment.yaml') | from_yaml)
+          .spec.template.spec.containers | selectattr('name', 'equalto', 'club-mcp') | map(attribute='env') | first
+          | selectattr('name', 'equalto', 'CLUB_MCP_VERSION') | map(attribute='value') | first | default('')) }}
+
+  tasks:
+    # The manifest ships an unresolved placeholder (tag main-UNRESOLVED, all-zero digest) until the first CI build
+    # is bumped in by PR. Refuse to apply anything else than a real, pinned, digest-qualified GHCR image.
+    - name: Club-mcp Image muss aufgelöst und gepinnt sein
+      ansible.builtin.assert:
+        that:
+          - club_mcp_image is match('^ghcr[.]io/doemefu/club-assistant-mcp:main-[0-9]{8}T[0-9]{6}@sha256:[0-9a-f]{64}\Z')
+          - club_mcp_image is not search('@sha256:0{64}\Z')
+        fail_msg: >-
+          cluster/apps/club-mcp/deployment.yaml still has a placeholder or unpinned image ({{ club_mcp_image }}).
+          Bump it by PR to ghcr.io/doemefu/club-assistant-mcp:main-<YYYYMMDDTHHMMSS>@sha256:<index digest> (and set
+          CLUB_MCP_VERSION to the same tag), then re-run. See DEPLOYMENT.md "club-mcp".
+        quiet: true
+      delegate_to: localhost
+
+    - name: Club-mcp-secrets lesen
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Secret
+        namespace: "{{ apps_namespace }}"
+        name: club-mcp-secrets
+      register: club_mcp_secret
+      no_log: true
+      delegate_to: localhost
+
+    - name: Ghcr-pull lesen
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Secret
+        namespace: "{{ apps_namespace }}"
+        name: ghcr-pull
+      register: club_mcp_pull_secret
+      no_log: true
+      delegate_to: localhost
+
+    # CLUB_MCP_VERSION is reported to the gateway as server_version and must be the image's tag, so audit rows name the
+    # running build. Simplest robust option: assert equality instead of templating the manifest.
+    - name: Club-mcp CLUB_MCP_VERSION muss dem Image-Tag entsprechen
+      ansible.builtin.assert:
+        that:
+          - club_mcp_version_env != 'main-UNRESOLVED'
+          - club_mcp_version_env == (club_mcp_image | regex_replace('^[^:]+:([^@]+)@.*$', '\\1'))
+        fail_msg: >-
+          CLUB_MCP_VERSION ({{ club_mcp_version_env }}) in cluster/apps/club-mcp/deployment.yaml must equal the
+          tag part of the image ({{ club_mcp_image }}). Bump both together.
+        quiet: true
+      delegate_to: localhost
+
+    - name: Club-mcp Secrets müssen existieren (59_app_services.yml zuerst)
+      ansible.builtin.assert:
+        that:
+          - club_mcp_secret.resources | length == 1
+          - club_mcp_secret.resources[0].data is defined
+          - "'allowed-subjects' in club_mcp_secret.resources[0].data"
+          - "'gateway-key' in club_mcp_secret.resources[0].data"
+          - club_mcp_pull_secret.resources | length == 1
+        fail_msg: >-
+          Secret club-mcp-secrets (keys allowed-subjects, gateway-key) and/or ghcr-pull is missing in
+          namespace {{ apps_namespace }}. Add the SOPS variables listed in the header of 59_app_services.yml
+          and run it first (DEPLOYMENT.md "club-mcp").
+        quiet: true
+      delegate_to: localhost
+
+    - name: Apps Namespace anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ apps_namespace }}"
+      delegate_to: localhost
+
+    - name: Club-mcp Deployment anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ club_mcp_manifest_dir }}/deployment.yaml"
+        wait: true
+        wait_timeout: 180
+      delegate_to: localhost
+
+    - name: Club-mcp Service anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ club_mcp_manifest_dir }}/service.yaml"
+      delegate_to: localhost
+
+    - name: Club-mcp ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ club_mcp_manifest_dir }}/servicemonitor.yaml"
+      delegate_to: localhost
+
+    - name: Club-mcp NetworkPolicy anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        src: "{{ club_mcp_manifest_dir }}/networkpolicy.yaml"
+      delegate_to: localhost
