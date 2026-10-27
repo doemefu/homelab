@@ -1,0 +1,42 @@
+# Ingress hardening (P2, optional): the MCP port is reachable only from cloudflared, the metrics/health port only from
+# Prometheus. There is no default-deny in `apps`; this policy only restricts club-mcp's own pods. No egress rules.
+# LIMIT: Kubernetes always admits traffic from the pod's own node (kubelet probes rely on it); same limit as
+# cluster/monitoring/coroot-node-agent/networkpolicy.yaml. Broader NetworkPolicy coverage: homelab#127.
+# The cloudflared selector is the Deployment's own selector label `pod: cloudflared` (chart cloudflare-tunnel-remote;
+# verified live 2026-10-27: the pod carries only `pod=cloudflared` + `pod-template-hash`, no app.kubernetes.io/* labels).
+# Re-check `kubectl -n platform get pods --show-labels` after any cloudflared chart bump (DEPLOYMENT.md "club-mcp").
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: club-mcp
+  namespace: apps
+  labels:
+    app: club-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app: club-mcp
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: platform
+          podSelector:
+            matchLabels:
+              pod: cloudflared
+      ports:
+        - protocol: TCP
+          port: 8083
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              operator.prometheus.io/name: kube-prometheus-stack-prometheus
+      ports:
+        - protocol: TCP
+          port: 8084

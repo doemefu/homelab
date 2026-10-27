@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: club-mcp
+  namespace: apps
+  labels:
+    app: club-mcp
+spec:
+  selector:
+    app: club-mcp
+  ports:
+    - name: mcp
+      port: 8083
+      targetPort: mcp
+      protocol: TCP
+    # Health + metrics. Never routed through the tunnel (cf_ingress_body targets 8083 only).
+    - name: metrics
+      port: 8084
+      targetPort: metrics
+      protocol: TCP
+  type: ClusterIP
