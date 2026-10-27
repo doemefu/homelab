@@ -385,8 +385,8 @@ cd terrarium-auth-service
 | PostgreSQL 17 | 100-150Mi | 50-200m | IaC repo |
 | InfluxDB 2 | 150-250Mi | 50-300m | IaC repo |
 | Mosquitto 2 | 10-20Mi | 10-50m | IaC repo |
-| mcp-hub | 128-256Mi | 50-500m | Own repo (estimate, 080 §9.6) |
-| **Total** | **~838-1276Mi** | **~310-1750m** | |
+| mcp-hub | 128-320Mi | 50-1000m | Own repo (080 §9.6) |
+| **Total** | **~838-1340Mi** | **~310-2250m** | |
 
 Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 
