@@ -2015,7 +2015,7 @@ if [ -z "$S" ] || [ "$S" = e3b0c44298fc ]; then echo 'Secret not read - check th
 
 Run (e2) **directly after (d)**: it protects only the planned pod deletion. An unplanned restart in between (a Flux image roll, a node reset, a liveness restart) would start on an unchecked registry.
 
-**(f) Restart the hub** (the registry changed): `kubectl -n apps delete pod -l app=mcp-hub`. About 30 s later, in claude.ai `list_accounts` shows `outlook` mail **auth_expired** (no token yet) — expected. Hub log:
+**(f) Restart the hub** (the registry changed): `kubectl -n apps delete pod -l app=mcp-hub`. About 30 s later, in claude.ai `list_accounts` shows `outlook` mail **auth_expired** (no token yet) — expected. Hub log (run it about 30 s after the pod is Ready: `token_store_migrated` and `token_refresh` `no_token` appear about 30 s after start-up, so an earlier `grep` prints nothing):
 
 ```bash
 kubectl -n apps logs deploy/mcp-hub --since=5m --request-timeout=10s | grep -E '"event": "(token_store_migrated|token_refresh)"'
