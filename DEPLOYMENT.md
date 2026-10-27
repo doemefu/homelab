@@ -2044,14 +2044,21 @@ ssh -t -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared acce
   kubectl -n apps logs deploy/mcp-hub --since=24h --request-timeout=10s | grep '"event": "token_refresh"' | grep -c '"outcome": "ok"'
   ```
 
+  Pod logs do not survive a restart or rollout: run the count on each of the 7 days and record it the same day.
+
 - **Mandatory revocation test:**
+  0. Record the current count with the daily `grep` (the pod log is lost at step 2).
   1. Remove the app's access in the Microsoft account's app-permissions settings (the account privacy settings list it under apps that can access your data).
   2. Run `kubectl -n apps delete pod -l app=mcp-hub`.
   3. Wait about 60 s: `list_accounts` shows `outlook` mail `auth_expired`, and the log shows `token_refresh` with `"outcome": "invalid_grant"` and an `error_code`.
   4. Restore with (g).
 
+  Observed result (2026-10-27): the removal revokes the refresh token. The first refresh after the pod restart logged `"outcome": "invalid_grant"` with `error_code` 70000, `list_accounts` showed `outlook` mail `auth_expired`, and the login of (g) restored it; its consent page listed no calendar permission.
+
   If refreshes still succeed after the removal, report it: the cut-off order (spec 080 §4.6, "Cutting off a Graph account") then needs a password change.
-- **Tenant checks** on day 31 and day 35 after the Azure sign-up (session lead): the same `grep` and `list_accounts`.
+
+  If the log shows `token_refresh` with `"outcome": "error"` and an `error_code` instead (Microsoft answered with a status other than HTTP 400), `list_accounts` shows `outlook` mail `error`, not `auth_expired`: record the status and restore with (g); spec 080 §6.3 "Failure modes" is then amended.
+- **Tenant checks** on day 31 and day 35 after the sign-up (session lead), only for a tenant created through a time-limited Azure free subscription (R28); not needed when the registration lives under an existing Azure account. The checks are the same `grep` and `list_accounts`.
 
 **(j) Troubleshooting:**
 
@@ -2137,7 +2144,7 @@ A rotation protects only ciphertexts written afterwards; it revokes no refresh t
 cd /Users/dominic/informatik/homelab/infrastructure && F=infra/inventory/group_vars/all.sops.yml && if [ "$(sops decrypt --extract '["mcp_hub_accounts"]["accounts"]' --output-type json "$F" | jq -c '.[1].id')" = '"outlook"' ]; then sops set "$F" '["mcp_hub_accounts"]["accounts"][1]["enabled"]' 'false'; else echo 'Entry 1 is not outlook: nothing changed.'; fi
 ```
 
-Then PR + merge, (d), (e2), and the pod delete. The token row stays (ciphertext); to cut the account off for good, follow spec 080 §4.6 "Cutting off a Graph account" (remove consent, then a password change if needed, then delete the row).
+Then PR + merge, (d), (e2), and the pod delete. The token row stays (ciphertext); to cut the account off for good, follow spec 080 §4.6 "Cutting off a Graph account" (remove consent, which revokes the refresh token as observed in (i); a password change only if a copy of the key and of the ciphertext may have leaked; then delete the row).
 
 **(m) Restore after a PostgreSQL instance loss.**
 
