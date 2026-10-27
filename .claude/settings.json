@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(/.env)",
+      "Edit(/.env)",
+      "Read(/.env.local)",
+      "Edit(/.env.local)",
+      "Read(/.env.production)",
+      "Edit(/.env.production)",
+      "Read(/.env.development)",
+      "Edit(/.env.development)",
+      "Read(/.env.test)",
+      "Edit(/.env.test)",
+      "Read(/.env.production.local)",
+      "Edit(/.env.production.local)",
+      "Read(/.env.development.local)",
+      "Edit(/.env.development.local)",
+      "Read(/.env.test.local)",
+      "Edit(/.env.test.local)",
+      "Read(/**/?*.sops.yml)",
+      "Edit(/**/?*.sops.yml)",
+      "Read(/**/?*.sops.yaml)",
+      "Edit(/**/?*.sops.yaml)",
+      "Read(/**/?*.sops.json)",
+      "Edit(/**/?*.sops.json)",
+      "Read(/**/*.age)",
+      "Edit(/**/*.age)",
+      "Edit(/.sops.yaml)",
+      "Bash(sops *)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f *)",
+      "Bash(git push * -f)",
+      "Bash(git push * +*)",
+      "Bash(git push +*)"
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "homelab": {
+      "source": {
+        "source": "github",
+        "repo": "doemefu/homelab-claude",
+        "ref": "v0.1.0"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "homelab-workflow@homelab": true
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/yamllint.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
