@@ -2058,7 +2058,7 @@ ssh -t -i ~/.ssh/homelab -o IdentitiesOnly=yes -o ProxyCommand="cloudflared acce
   If refreshes still succeed after the removal, report it: the cut-off order (spec 080 §4.6, "Cutting off a Graph account") then needs a password change.
 
   If the log shows `token_refresh` with `"outcome": "error"` and an `error_code` instead (Microsoft answered with a status other than HTTP 400), `list_accounts` shows `outlook` mail `error`, not `auth_expired`: record the status and restore with (g); spec 080 §6.3 "Failure modes" is then amended.
-- **Tenant checks** on day 31 and day 35 after the Azure sign-up (session lead): the same `grep` and `list_accounts`.
+- **Tenant checks** on day 31 and day 35 after the sign-up (session lead), only for a tenant created through a time-limited Azure free subscription (R28); not needed when the registration lives under an existing Azure account. The checks are the same `grep` and `list_accounts`.
 
 **(j) Troubleshooting:**
 
