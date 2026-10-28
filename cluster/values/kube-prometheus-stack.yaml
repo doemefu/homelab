@@ -313,8 +313,9 @@ additionalPrometheusRulesMap:
                 has stopped. Longhorn also strips a group's labels from the PVC and the Volume when
                 that group's last job is deleted, which drops the Prometheus TSDB volume back into
                 the `default` snapshot group and can repeat the #101 disk-pressure incident.
-                Re-apply infra/playbooks/30_longhorn.yml; runbook in DEPLOYMENT.md
-                "Backup alerting (#92)".
+                Re-apply infra/playbooks/30_longhorn.yml. If the last metrics-group job was deleted,
+                also re-apply infra/playbooks/41_monitoring.yml to restore the group labels; runbook
+                in DEPLOYMENT.md "Backup alerting (#92)".
   # NM-3 node-script alerts (docs/060-network-monitoring.md §5.6, homelab#117, PR #132). The
   # metrics come from homelab-netmon-collect (role netmon_node) via the node-exporter
   # textfile collector (PR #109). Same top-level map as the entries above.
