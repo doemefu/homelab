@@ -102,7 +102,7 @@ warn[msg] {
     c := apps_containers[_]
     not seccomp_confined(c)
     msg := sprintf(
-        "%s/%s in apps: container %q should use seccompProfile.type RuntimeDefault (container or pod)",
+        "%s/%s in apps: container %q should use seccompProfile.type RuntimeDefault or Localhost (container or pod)",
         [input.kind, input.metadata.name, c.name],
     )
 }
