@@ -22,3 +22,7 @@ storage_backup_paths:
   # Consistent copy of the live SQLite datastore, produced each run by homelab-backup.sh
   # (infra/roles/storage/tasks/main.yml) via sqlite3's online backup API before restic runs.
   - "{{ storage_k3s_state_copy }}"
+
+# kine datastore size metric + alert K3sDatastoreLarge (homelab#150, role netmon_node).
+# Same path as storage_k3s_state_db (infra/roles/storage/defaults/main.yml).
+netmon_node_k3s_state_db: /var/lib/rancher/k3s/server/db/state.db
