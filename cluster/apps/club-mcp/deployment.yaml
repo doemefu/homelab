@@ -36,7 +36,7 @@ spec:
           # or CLUB_MCP_VERSION differs from the tag. Bump both by PR after each CI build of the club-assistant repo
           # (club-mcp-build.yml): tag + multi-arch index digest (linux/amd64 + linux/arm64) from the merge job.
           # Format: ghcr.io/doemefu/club-assistant-mcp:main-<YYYYMMDDTHHMMSS>@sha256:<index digest>
-          image: ghcr.io/doemefu/club-assistant-mcp:main-20261028T080648@sha256:dc70ebeb9456f5a87b805f47249e188c029a60109e1538fb8b0b83d0bc086e2f
+          image: ghcr.io/doemefu/club-assistant-mcp:main-20261028T092351@sha256:599d8371f968ec496f7e15742d911db6771d1b22b554e5f4474fb49727baca19
           ports:
             - name: mcp
               containerPort: 8083
@@ -47,7 +47,7 @@ spec:
               value: "Europe/Zurich"
             # Must equal the image tag above (reported to the gateway as server_version, contract §2).
             - name: CLUB_MCP_VERSION
-              value: "main-20261028T080648"
+              value: "main-20261028T092351"
             - name: CLUB_MCP_PUBLIC_HOST
               value: "club-mcp.furchert.ch"
             - name: CLUB_MCP_RESOURCE
