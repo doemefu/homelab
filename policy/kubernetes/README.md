@@ -12,6 +12,7 @@ enforced in CI by the **Enforce Cluster Policies** job in
 | `require-resource-limits.rego` | `kubernetes.resources` | Every container (incl. `initContainers`) in `Deployment` / `StatefulSet` / `DaemonSet` workloads **in namespace `apps`** must declare both `resources.requests` and `resources.limits`. |
 | `namespace-allowlist.rego` | `kubernetes.namespaces` | Namespaced objects must live in one of: `platform`, `monitoring`, `apps`, `longhorn-system`, `kube-system`, `flux-system`, `default`. Cluster-scoped kinds (CRDs, ClusterRoles, …) are skipped. |
 | `deny-app-cluster-admin.rego` | `kubernetes.rbac` | `ClusterRoleBinding` / `RoleBinding` to `cluster-admin` is forbidden when any subject is in namespace `apps`. Flux controllers in `flux-system` are unaffected. |
+| `warn-securitycontext.rego` | `kubernetes.securitycontext` | **Warn only.** Every container (incl. `initContainers`) in `Deployment` / `StatefulSet` / `DaemonSet` workloads in namespace `apps` should run with `runAsNonRoot: true` and seccomp `RuntimeDefault` (or `Localhost`), both inheritable from the pod, plus `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true` and `capabilities.drop: ["ALL"]`. `conftest test` exits 0 on warnings (nobody passes `--fail-on-warn`), so CI stays green. Switching to `deny` is a follow-up of #243 once the app manifests are hardened. |
 
 Each policy has a sibling `*_test.rego` with unit tests (`conftest verify`).
 
