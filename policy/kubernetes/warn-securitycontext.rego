@@ -9,7 +9,7 @@ package kubernetes.securitycontext
 #   - seccompProfile.type RuntimeDefault    (container, or inherited from the pod;
 #                                            Localhost is accepted as well)
 #
-# Why warn: not every app manifest is hardened yet (device-service#85,
+# Why warn: not every app manifest is hardened yet (device-service#85 / PR #106,
 # data-service#46, auth-service#126 pending). `conftest test` exits 0 on
 # warnings unless --fail-on-warn is passed, and neither CI nor the service
 # repos' local commands pass it. Switching these rules to deny is a
