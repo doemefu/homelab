@@ -330,7 +330,7 @@ CREATE TABLE devices (
 | GET | `/devices` | JWT | List all devices with current state |
 | GET | `/devices/{id}` | JWT | Single device state |
 | POST | `/devices/{id}/control` | JWT | Send control command (-> MQTT publish) |
-| WS | `/ws` | Optional | STOMP WebSocket, subscribe to `/topic/terrarium/{deviceId}` |
+| WS | `/ws` | JWT on STOMP `CONNECT` | STOMP WebSocket: the upgrade is open, the `CONNECT` frame must carry `Authorization: Bearer <access token>`; browser origins limited to `https://furchert.ch`; clients may only subscribe to `/topic/terrarium/{deviceName}` and cannot `SEND` to `/topic/**` (device-service#84) |
 | GET | `/schedules` | JWT | List all schedules (planned: device-service#41) |
 | POST | `/schedules` | ADMIN | Create schedule (planned: device-service#41) |
 | PUT | `/schedules/{id}` | ADMIN | Update schedule (planned: device-service#41) |
@@ -418,6 +418,6 @@ Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 
 1. **Refresh token strategy:** DB-backed (revocable) vs. signed JWT (stateless). Recommend DB-backed for revocability.
 2. **Schedule change notification (resolved 2026-09-01, ADR 0001):** No longer an open decision — device-service is both schedule owner and executor, so CRUD writes (device-service#41) re-register the affected task directly in-process. The shipped 60s periodic reconciliation (`SchedulerService`, `app.scheduler.poll-interval`) remains only as a fallback safety net for out-of-band DB edits, not as the primary change-propagation mechanism.
-3. **WebSocket authentication:** Require JWT for WebSocket connection or allow unauthenticated read-only subscriptions. WebSocket only broadcasts state (read-only), so unauthenticated is acceptable for simplicity.
+3. **WebSocket authentication (resolved 2026-10-28, device-service#84):** JWT required. The `/ws` upgrade stays open because browsers cannot send an `Authorization` header on it; the STOMP `CONNECT` frame must carry `Authorization: Bearer <access token>`, validated by the same resource-server decoder as the REST API (issuer/audience checks follow with device-service#81). Browser origins are limited to `app.websocket.allowed-origins` (default `https://furchert.ch`), `SUBSCRIBE` to `/topic/terrarium/**`, and client `SEND` to `/app/**`. Kill switch `APP_WEBSOCKET_REQUIRE_AUTH=false`, set via a PR to `k8s/deployment.yaml` because Flux reverts `kubectl set env`. The security audit (2026-09-24) found `/ws` internet-reachable via `device.furchert.ch` with no authentication, which outweighs the earlier "read-only, so unauthenticated is acceptable" argument.
 4. **MQTT topic redesign:** Current topics follow `terra{n}/{sensor}/data` pattern. May be simplified or restructured during M2.
 5. **CI/CD pipeline:** GitHub Actions for building multi-arch images per service repo.
