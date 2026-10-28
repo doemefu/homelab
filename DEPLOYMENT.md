@@ -214,6 +214,45 @@ are in the issue; this section is the reusable runbook that came out of it.
   is far enough behind that the raised timeout isn't enough on its own; go straight to offline
   compaction below.
 
+##### Early warning: `K3sDatastoreLarge` (#150)
+
+`homelab-netmon-collect` (role `netmon_node`) writes `homelab_k3s_state_db_bytes{node="raspi5"}` —
+`state.db` plus `state.db-wal` in bytes — into the node-exporter textfile every minute, on the
+control-plane node only (`netmon_node_k3s_state_db` in `infra/inventory/group_vars/k3s_server.yml`).
+The warning `K3sDatastoreLarge` (group `homelab-netmon-node`) fires above 500 MB for 30 min.
+Right after an offline compaction the datastore is ≈ 30-70 MB; a stalled compactor grew it to
+2.9 GB in 7 days (2026-09-30), so the alert gives roughly a day of lead time before the symptoms
+above. When it fires, run the read-only diagnostics below and then the offline compaction.
+SQLite never shrinks a file without `VACUUM`, so the alert keeps firing even after the online
+compactor catches up on its own — the offline compaction (which ends with `VACUUM`) clears it.
+The compaction lag (`max_id - compact_rev`) is not exported; it needs a read of the live
+datastore (out of scope for #150).
+
+A missing `state.db` makes the whole netmon run fail (previous file kept), which surfaces as
+`NetmonNodeScriptStale` on raspi5. On a freshly bootstrapped control-plane node that is expected
+until `20_k3s.yml` has installed k3s (`10_base.yml` runs first).
+
+Rollout (owner; playbook runs need a go):
+
+```bash
+# Off-LAN: prefix with ANSIBLE_SSH_ARGS=… (see "Off-LAN kubectl / Ansible Access").
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags netmon_node   # 2nd run: changed=0
+ansible-playbook infra/playbooks/41_monitoring.yml                           # alert rule
+```
+
+Only raspi5's unit file changes (the extra `--k3s-state-db` argument); the other nodes render the
+same unit as before, so `--tags netmon_node` on all nodes is a no-op for them.
+
+Verify:
+
+```bash
+ssh raspi5 "grep homelab_k3s_state_db_bytes /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
+ssh raspi5 "sudo ls -la /var/lib/rancher/k3s/server/db/"     # state.db + state.db-wal ≈ the gauge
+kubectl -n monitoring get prometheusrule -o yaml | grep -c K3sDatastoreLarge  # expect 1
+```
+
 ##### Read-only diagnostics (safe any time — k3s keeps running)
 
 ```bash
@@ -1572,6 +1611,7 @@ Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the ap
 | `homelab_netmon_bucket_end_timestamp_seconds{node}` | end (exclusive) of the bucket the two `*_bucket` gauges describe |
 | `homelab_netmon_last_success_timestamp_seconds{node}` | last successful run → alert `NetmonNodeScriptStale` (> 10 min, warning) |
 | `homelab_netmon_truncated_series{node,metric}` | series folded into `src_ip="other"` by the cap `netmon_node_max_series` (200) → alert `NetmonSeriesTruncated` (info) |
+| `homelab_k3s_state_db_bytes{node}` | raspi5 only (`netmon_node_k3s_state_db` in `group_vars/k3s_server.yml`): kine `state.db` + WAL bytes → alert `K3sDatastoreLarge` (> 500 MB for 30 min, warning); see "k3s datastore (kine/SQLite) maintenance" (#150) |
 
 **Dependency: homelab PR #109.** node-exporter's `--collector.textfile.directory` + hostPath (kube-prometheus-stack values) come from #109; merge #109 first. The textfile directory itself is created by this role and by #109's storage role with identical attributes, so the file is written even before #109 — it is just not scraped yet. Conntrack data is IPv4 only. The alert rules sit in `additionalPrometheusRulesMap.homelab-netmon-node` and need `41_monitoring.yml`.
 

@@ -204,6 +204,48 @@ class CapTest(unittest.TestCase):
         )
 
 
+class K3sStateDbTest(unittest.TestCase):
+    """homelab_k3s_state_db_bytes (homelab#150): control-plane only, opt-in via a flag."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.tmp.name, "state.db")
+        with open(self.db, "wb") as handle:
+            handle.write(b"\0" * 4096)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def collect(self, path):
+        return collect_mod.collect(
+            node="raspi5", lan_cidr=LAN, pod_cidr=POD, ports=PORTS, max_series=200,
+            bucket_seconds=900, now=NOW, runner=FixtureRunner(), k3s_state_db=path,
+        )
+
+    def test_db_and_wal_are_summed(self):
+        with open(self.db + "-wal", "wb") as handle:
+            handle.write(b"\0" * 1000)
+        out = self.collect(self.db)
+        self.assertTrue(out.startswith(fixture("expected.prom")))
+        self.assertEqual(
+            out[len(fixture("expected.prom")):],
+            "# HELP homelab_k3s_state_db_bytes Size on disk of the k3s kine SQLite datastore "
+            "(state.db plus state.db-wal).\n"
+            "# TYPE homelab_k3s_state_db_bytes gauge\n"
+            'homelab_k3s_state_db_bytes{node="raspi5"} 5096\n',
+        )
+
+    def test_missing_wal_counts_as_zero(self):
+        self.assertIn('homelab_k3s_state_db_bytes{node="raspi5"} 4096\n', self.collect(self.db))
+
+    def test_missing_db_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            self.collect(os.path.join(self.tmp.name, "missing.db"))
+
+    def test_without_flag_no_k3s_metric(self):
+        self.assertNotIn("homelab_k3s_", self.collect(None))
+
+
 class MainTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -237,6 +279,16 @@ class MainTest(unittest.TestCase):
         with mock.patch.object(collect_mod, "run_command", failing):
             with self.assertRaises(subprocess.CalledProcessError):
                 collect_mod.main(self.argv)
+        with open(self.out, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "previous\n")
+
+    def test_missing_k3s_state_db_keeps_previous_file(self):
+        with open(self.out, "w", encoding="utf-8") as handle:
+            handle.write("previous\n")
+        argv = self.argv + ["--k3s-state-db", os.path.join(self.tmp.name, "state.db")]
+        with mock.patch.object(collect_mod, "run_command", FixtureRunner()):
+            with self.assertRaises(FileNotFoundError):
+                collect_mod.main(argv)
         with open(self.out, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "previous\n")
 

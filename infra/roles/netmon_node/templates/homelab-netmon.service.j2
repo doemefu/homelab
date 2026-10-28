@@ -14,6 +14,9 @@ ExecStart=/usr/bin/python3 {{ netmon_node_script }} \
   --max-series {{ netmon_node_max_series }} \
   --bucket-seconds {{ netmon_node_bucket_seconds }} \
   --sshd-unit {{ netmon_node_sshd_unit }} \
+{% if netmon_node_k3s_state_db %}
+  --k3s-state-db {{ netmon_node_k3s_state_db }} \
+{% endif %}
   --output {{ netmon_node_textfile_dir }}/homelab_netmon.prom
 TimeoutStartSec=50
 Nice=10

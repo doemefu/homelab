@@ -34,3 +34,8 @@ netmon_node_script: /usr/local/sbin/homelab-netmon-collect
 # net.netfilter.nf_conntrack_acct (byte counters per flow). NM-3 does not need it; only the
 # NM-2 conntrack-egress fallback (docs/060 §6.6) sets it to true.
 netmon_node_conntrack_acct: false
+
+# Path of the k3s kine SQLite datastore. When set, the script also emits
+# homelab_k3s_state_db_bytes (state.db + WAL; alert K3sDatastoreLarge, homelab#150).
+# Empty = off; set only for the control-plane node in group_vars/k3s_server.yml.
+netmon_node_k3s_state_db: ""

@@ -549,6 +549,7 @@ homelab_netmon_truncated_series{node="raspi5",metric="homelab_ufw_blocks_bucket"
 - **sshd outcomes are disjoint:** one connection for a non-existent user counts once as `invalid_user` (the `Invalid user …` line); its follow-up `Failed … for invalid user …` line is **not** counted as `failed`, and `Connection closed by / Disconnected from invalid user …` lines are not counted at all. `failed` therefore means failed authentication for an existing user (amended 2026-09-23, NM-3: PR #132).
 - **Own outbound flows:** `homelab_lan_connections` skips conntrack entries whose original source is one of the node's own addresses (`ip -o addr show`) — the node is then the client (e.g. the API server calling another node's kubelet on :10250), and the receiving node already counts the flow as inbound (amended 2026-09-23, NM-3: homelab PR for #117).
 - **Cardinality bound:** the /24 LAN has 254 sources, times 5 ports and a few states. The hard cap is `netmon_node_max_series` per metric per node. The highest-valued series are kept verbatim; the overflow is summed into `src_ip="other"` (other labels kept) and counted in `homelab_netmon_truncated_series` (number of input series not emitted verbatim). For `homelab_ufw_blocks_bucket` the overflow also collapses `dport` to `0`, because one scanner sweeping ports would otherwise stay unbounded; an overflow row is therefore `{src_ip="other",dport="0",proto=<proto>}` (amended 2026-09-23, NM-3: homelab PR for #117).
+- **Control-plane extra (not network data):** on the `k3s_server` node only (`netmon_node_k3s_state_db`, set in `group_vars/k3s_server.yml`), the same file also carries `homelab_k3s_state_db_bytes{node}` — the on-disk size of the k3s kine datastore, `state.db` plus `state.db-wal` (a missing WAL counts as 0; a missing `state.db` fails the run like any other collection error). It is the early warning for the kine compaction stall (homelab#129) and is **not** read by data-service (amended 2026-10-28, homelab#150).
 
 ### 5.3 Why gauges and buckets, not counters (decided)
 
@@ -598,6 +599,7 @@ NM-3's rules go under `additionalPrometheusRulesMap.homelab-netmon-node` (group 
 |---|---|---|---|
 | `NetmonNodeScriptStale` | `time() - homelab_netmon_last_success_timestamp_seconds > 600` | 5m | warning |
 | `NetmonSeriesTruncated` | `homelab_netmon_truncated_series > 0` | 30m | info |
+| `K3sDatastoreLarge` (homelab#150, not NM-3 data) | `homelab_k3s_state_db_bytes > 500e6` | 30m | warning |
 
 ---
 

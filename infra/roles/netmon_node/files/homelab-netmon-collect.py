@@ -10,6 +10,8 @@
 #   - homelab_sshd_auth_bucket          sshd accepted/failed/invalid_user in the same bucket
 #   - homelab_netmon_bucket_end_timestamp_seconds, homelab_netmon_last_success_timestamp_seconds,
 #     homelab_netmon_truncated_series
+#   - homelab_k3s_state_db_bytes    k3s kine datastore size (state.db + WAL), only with
+#                                   --k3s-state-db (control-plane node, homelab#150)
 #
 # No state is kept on the node: the bucket is recomputed from the journal on every run.
 # All-or-nothing: if any command fails, the previous file stays in place (its last-success
@@ -36,6 +38,7 @@ METRIC_SSHD = "homelab_sshd_auth_bucket"
 METRIC_BUCKET_END = "homelab_netmon_bucket_end_timestamp_seconds"
 METRIC_LAST_SUCCESS = "homelab_netmon_last_success_timestamp_seconds"
 METRIC_TRUNCATED = "homelab_netmon_truncated_series"
+METRIC_K3S_DB = "homelab_k3s_state_db_bytes"
 
 HELP = {
     METRIC_LAN: "Current conntrack TCP entries to a watched local port, by original source.",
@@ -47,6 +50,7 @@ HELP = {
     METRIC_LAST_SUCCESS: "Unix time of the last successful script run.",
     METRIC_TRUNCATED: 'Series dropped into src_ip="other" because netmon_node_max_series '
     "was exceeded, per metric.",
+    METRIC_K3S_DB: "Size on disk of the k3s kine SQLite datastore (state.db plus state.db-wal).",
 }
 
 # Label order per metric, as in the contract examples.
@@ -250,12 +254,28 @@ def _labels(pairs: Sequence[Tuple[str, str]]) -> str:
     return "{" + ",".join('{}="{}"'.format(k, _escape(v)) for k, v in pairs) + "}"
 
 
+def k3s_state_db_bytes(path: str) -> int:
+    """Size of the kine datastore: state.db plus its WAL (homelab#150).
+
+    The WAL can hold a large share of the total between checkpoints (#129: 812 MB). A missing
+    WAL is normal after a checkpoint and counts as 0; a missing state.db raises, so a wrong
+    path fails the run loudly instead of silently dropping the metric.
+    """
+    size = os.stat(path).st_size
+    try:
+        size += os.stat(path + "-wal").st_size
+    except FileNotFoundError:
+        pass
+    return size
+
+
 def render(
     node: str,
     data: Dict[str, Series],
     truncated: Dict[str, int],
     bucket_end: int,
     now: int,
+    k3s_db_bytes: Optional[int] = None,
 ) -> str:
     lines: List[str] = []
 
@@ -280,6 +300,9 @@ def render(
     for metric in (METRIC_LAN, METRIC_UFW, METRIC_SSHD):
         pairs = [("node", node), ("metric", metric)]
         lines.append("{}{} {}".format(METRIC_TRUNCATED, _labels(pairs), truncated[metric]))
+    if k3s_db_bytes is not None:
+        header(METRIC_K3S_DB)
+        lines.append("{}{} {}".format(METRIC_K3S_DB, _labels([("node", node)]), k3s_db_bytes))
     return "\n".join(lines) + "\n"
 
 
@@ -332,6 +355,7 @@ def collect(
     now: float,
     runner: Runner = run_command,
     sshd_unit: str = "ssh",
+    k3s_state_db: Optional[str] = None,
 ) -> str:
     classifier = Classifier(lan_cidr, pod_cidr)
     start, end = bucket_bounds(now, bucket_seconds)
@@ -352,7 +376,8 @@ def collect(
     truncated: Dict[str, int] = {}
     for metric in list(data):
         data[metric], truncated[metric] = apply_cap(metric, data[metric], max_series)
-    return render(node, data, truncated, end, int(now))
+    k3s_db_bytes = k3s_state_db_bytes(k3s_state_db) if k3s_state_db else None
+    return render(node, data, truncated, end, int(now), k3s_db_bytes)
 
 
 def _ports(value: str) -> List[int]:
@@ -371,6 +396,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--max-series", type=int, default=200)
     parser.add_argument("--bucket-seconds", type=int, default=900)
     parser.add_argument("--sshd-unit", default="ssh")
+    parser.add_argument(
+        "--k3s-state-db", help="path of the kine state.db (control-plane node only, homelab#150)"
+    )
     parser.add_argument("--output", required=True, help="path of the .prom file")
     args = parser.parse_args(argv)
     if args.max_series < 1 or args.bucket_seconds < 60:
@@ -387,6 +415,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Looked up at call time (not a default argument) so tests can substitute it.
         runner=run_command,
         sshd_unit=args.sshd_unit,
+        k3s_state_db=args.k3s_state_db,
     )
     write_atomic(args.output, content)
     return 0
