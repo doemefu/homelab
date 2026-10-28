@@ -928,7 +928,7 @@ Alertmanager route. All four are `severity: warning`.
 | `ResticBackupFailed` | `homelab_backup_exit_code > 0` — the last run of `homelab-backup.sh` on raspi5 exited non-zero | 15m |
 | `ResticBackupStale` | no successful restic run for more than 26 h, **or** the metric is absent entirely | 2h |
 | `LonghornRecurringJobNotSucceeding` | a CronJob in `longhorn-system` that is older than 26 h has no successful run in the last 26 h (or never had one) | 1h |
-| `LonghornRecurringJobMissing` | the `daily-snapshot` or `metrics-snapshot-cleanup` CronJob has disappeared | 1h |
+| `LonghornRecurringJobMissing` | the `daily-snapshot`, `metrics-snapshot-cleanup` or `metrics-filesystem-trim` CronJob has disappeared | 1h |
 
 **A failed Longhorn recurring-job run is deliberately *not* covered by a new rule** — the chart's
 own `KubeJobFailed` (`kube_job_failed{namespace=~".*"} > 0`, `for: 15m`, warning) already fires for
@@ -3447,7 +3447,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
 | Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup metrics-filesystem-trim` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
-| Verify the metrics-group trim is still working | Weekly | `kubectl -n longhorn-system get volumes.longhorn.io <prometheus-volume> -o jsonpath='{.status.actualSize}'` (flat, not trending towards 40 G) + `kubectl -n longhorn-system logs <latest metrics-filesystem-trim pod>` showing `Finished recurring filesystem trim` — every failure mode of the trim is silent; alerting is tracked in #92 |
+| Verify the metrics-group trim is still working | Weekly | `kubectl -n longhorn-system get volumes.longhorn.io <prometheus-volume> -o jsonpath='{.status.actualSize}'` (flat, not trending towards 40 G) + `kubectl -n longhorn-system logs <latest metrics-filesystem-trim pod>` showing `Finished recurring filesystem trim` — a deleted trim job fires `LonghornRecurringJobMissing` (#239), but a run that skips or no-ops is silent |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
