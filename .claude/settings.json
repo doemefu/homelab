@@ -41,15 +41,13 @@
       "Bash(git push * -f)",
       "Bash(git push * +*)",
       "Bash(git push * --mirror*)",
-      "Bash(git push --mirror*)"
+      "Bash(git push --mirror*)",
+      "Bash(gh pr merge --admin*)",
+      "Bash(gh pr merge * --admin*)",
+      "Bash(gh api *pulls/*/merge*)",
+      "Bash(gh api *mergePullRequest*)"
     ],
     "ask": [
-      "Bash(gh pr merge *)",
-      "Bash(gh api -X*)",
-      "Bash(gh api * -X*)",
-      "Bash(gh api --method*)",
-      "Bash(gh api * --method*)",
-      "Bash(gh api graphql *mutation*)",
       "Bash(kubectl apply *)",
       "Bash(kubectl * apply *)",
       "Bash(kubectl delete *)",
