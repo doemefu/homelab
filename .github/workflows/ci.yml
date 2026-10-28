@@ -266,7 +266,8 @@ jobs:
         # `verify` walks every *_test.rego file regardless of package, so it
         # doesn't need --all-namespaces. The per-file packages
         # (kubernetes.images / kubernetes.resources / kubernetes.namespaces /
-        # kubernetes.rbac) just keep test fixtures from cross-coupling — see
+        # kubernetes.rbac / kubernetes.securitycontext) just keep test fixtures
+        # from cross-coupling — see
         # policy/kubernetes/README.md.
         run: conftest verify --policy policy/kubernetes/
       - name: Enforce policies against rendered manifests
