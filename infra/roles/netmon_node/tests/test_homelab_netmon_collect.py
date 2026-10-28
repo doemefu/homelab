@@ -8,6 +8,7 @@ The fixtures are captured-format samples of `conntrack -L`, `ip -o addr show` an
 """
 import importlib.machinery
 import importlib.util
+import io
 import os
 import subprocess
 import tempfile
@@ -238,9 +239,12 @@ class K3sStateDbTest(unittest.TestCase):
     def test_missing_wal_counts_as_zero(self):
         self.assertIn('homelab_k3s_state_db_bytes{node="raspi5"} 4096\n', self.collect(self.db))
 
-    def test_missing_db_raises(self):
-        with self.assertRaises(FileNotFoundError):
-            self.collect(os.path.join(self.tmp.name, "missing.db"))
+    def test_missing_db_skips_only_the_gauge(self):
+        stderr = io.StringIO()
+        with mock.patch.object(collect_mod.sys, "stderr", stderr):
+            out = self.collect(os.path.join(self.tmp.name, "missing.db"))
+        self.assertEqual(out, fixture("expected.prom"))
+        self.assertIn("k3s state db skipped: FileNotFoundError", stderr.getvalue())
 
     def test_without_flag_no_k3s_metric(self):
         self.assertNotIn("homelab_k3s_", self.collect(None))
@@ -282,15 +286,16 @@ class MainTest(unittest.TestCase):
         with open(self.out, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "previous\n")
 
-    def test_missing_k3s_state_db_keeps_previous_file(self):
+    def test_missing_k3s_state_db_still_writes_lan_metrics(self):
         with open(self.out, "w", encoding="utf-8") as handle:
             handle.write("previous\n")
         argv = self.argv + ["--k3s-state-db", os.path.join(self.tmp.name, "state.db")]
-        with mock.patch.object(collect_mod, "run_command", FixtureRunner()):
-            with self.assertRaises(FileNotFoundError):
-                collect_mod.main(argv)
+        with mock.patch.object(collect_mod, "run_command", FixtureRunner()), \
+                mock.patch.object(collect_mod.time, "time", return_value=NOW), \
+                mock.patch.object(collect_mod.sys, "stderr", io.StringIO()):
+            self.assertEqual(collect_mod.main(argv), 0)
         with open(self.out, encoding="utf-8") as handle:
-            self.assertEqual(handle.read(), "previous\n")
+            self.assertEqual(handle.read(), fixture("expected.prom"))
 
     def test_missing_directory_fails_loudly(self):
         argv = self.argv[:-1] + [os.path.join(self.tmp.name, "missing", "homelab_netmon.prom")]

@@ -524,6 +524,7 @@ makes node-exporter discard the whole directory and set `node_textfile_scrape_er
 | `homelab_netmon_bucket_end_timestamp_seconds` | `node` | bucket guard |
 | `homelab_netmon_last_success_timestamp_seconds` | `node` | staleness (`NetmonNodeScriptStale`) |
 | `homelab_netmon_truncated_series` | `node`, `metric` | cap overflow (`NetmonSeriesTruncated`) |
+| `homelab_k3s_state_db_bytes` | `node` (raspi5 only) | kine `state.db` + WAL bytes (`K3sDatastoreLarge` > 500 MB, `K3sDatastoreSizeMissing`); not read by data-service (#150) |
 
 `src_ip` is a LAN IP verbatim, the literal `10.42.0.0/16` for pod IPs, a public IP verbatim (UFW/sshd only) or `other`. The `node` label is the Ansible inventory hostname; node-exporter's ServiceMonitor keeps it (`honorLabels: true`).
 

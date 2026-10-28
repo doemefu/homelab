@@ -11,7 +11,8 @@
 #   - homelab_netmon_bucket_end_timestamp_seconds, homelab_netmon_last_success_timestamp_seconds,
 #     homelab_netmon_truncated_series
 #   - homelab_k3s_state_db_bytes    k3s kine datastore size (state.db + WAL), only with
-#                                   --k3s-state-db (control-plane node, homelab#150)
+#                                   --k3s-state-db (control-plane node, homelab#150); a missing
+#                                   state.db skips only this gauge (warning on stderr)
 #
 # No state is kept on the node: the bucket is recomputed from the journal on every run.
 # All-or-nothing: if any command fails, the previous file stays in place (its last-success
@@ -258,8 +259,8 @@ def k3s_state_db_bytes(path: str) -> int:
     """Size of the kine datastore: state.db plus its WAL (homelab#150).
 
     The WAL can hold a large share of the total between checkpoints (#129: 812 MB). A missing
-    WAL is normal after a checkpoint and counts as 0; a missing state.db raises, so a wrong
-    path fails the run loudly instead of silently dropping the metric.
+    WAL is normal after a checkpoint and counts as 0; a missing or unreadable state.db raises
+    OSError, which collect() turns into a skipped gauge.
     """
     size = os.stat(path).st_size
     try:
@@ -376,7 +377,19 @@ def collect(
     truncated: Dict[str, int] = {}
     for metric in list(data):
         data[metric], truncated[metric] = apply_cap(metric, data[metric], max_series)
-    k3s_db_bytes = k3s_state_db_bytes(k3s_state_db) if k3s_state_db else None
+    k3s_db_bytes = None
+    if k3s_state_db:
+        try:
+            k3s_db_bytes = k3s_state_db_bytes(k3s_state_db)
+        except OSError as exc:
+            # Skip only this gauge: the LAN metrics must not go stale because of it (data-service
+            # expects every node). The missing series fires K3sDatastoreSizeMissing instead.
+            print(
+                "homelab-netmon-collect: k3s state db skipped: {}: {}".format(
+                    type(exc).__name__, exc
+                ),
+                file=sys.stderr,
+            )
     return render(node, data, truncated, end, int(now), k3s_db_bytes)
 
 

@@ -351,10 +351,11 @@ additionalPrometheusRulesMap:
           # Early warning for the kine compaction stall (homelab#129, #150). The gauge comes from
           # the same script, on the control-plane node only (netmon_node_k3s_state_db in
           # group_vars/k3s_server.yml): state.db + WAL bytes. Healthy after an offline compaction
-          # ≈ 30-70 MB; a stalled compactor grew it ≈ 400 MB/day (2.9 GB in 7 days, 2026-09-30).
-          # 500e6 = 500 MB (decimal). `for: 30m` rides out short WAL growth between checkpoints.
-          # SQLite files never shrink without VACUUM, so this keeps firing after the online
-          # compactor catches up until the offline compaction (with VACUUM) has run.
+          # ≈ 30-90 MB (2026-10-28: 51 MB + 36 MB WAL); a stalled compactor grew it ≈ 400 MB/day
+          # (2.9 GB in 7 days, 2026-09-30). 500e6 = 500 MB (decimal). `for: 30m` rides out short
+          # WAL growth between checkpoints. SQLite files never shrink without VACUUM, so this keeps
+          # firing after the online compactor catches up until the offline compaction (with
+          # VACUUM) has run.
           - alert: K3sDatastoreLarge
             expr: homelab_k3s_state_db_bytes > 500e6
             for: 30m
@@ -364,10 +365,31 @@ additionalPrometheusRulesMap:
               summary: "k3s datastore on {{ $labels.node }} is larger than 500 MB"
               description: >-
                 The kine SQLite datastore (state.db + WAL) on {{ $labels.node }} is
-                {{ $value | humanize }}B; it is ≈ 30-70 MB right after an offline compaction.
+                {{ $value | humanize }}B; it is ≈ 30-90 MB right after an offline compaction.
                 kine's online compactor has probably stalled again (homelab#129). Check the
                 compaction lag and Slow SQL rate with the read-only diagnostics, then run the
                 offline compaction; runbook in DEPLOYMENT.md
+                "k3s datastore (kine/SQLite) maintenance". The file only shrinks through that
+                runbook's offline compaction + VACUUM, so this alert keeps firing until it has
+                run; silencing it is not a fix.
+          # The script skips only the gauge when state.db is missing or unreadable (the LAN metrics
+          # must keep flowing for data-service), so the missing series is the signal. The node is
+          # named literally, as for the restic rules: only the k3s_server group sets
+          # netmon_node_k3s_state_db, and raspi5 is that group's only member.
+          # Rollout order: 10_base.yml (netmon_node) before 41_monitoring.yml, or this fires after 1h.
+          - alert: K3sDatastoreSizeMissing
+            expr: absent(homelab_k3s_state_db_bytes{node="raspi5"})
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "k3s datastore size metric missing on raspi5"
+              description: >-
+                homelab_k3s_state_db_bytes{node="raspi5"} has been absent for 1h, so
+                K3sDatastoreLarge cannot fire. Either state.db is missing or unreadable (see
+                `journalctl -u homelab-netmon -n 20` on raspi5 for "k3s state db skipped"), the
+                unit lacks --k3s-state-db (re-run 10_base.yml --tags netmon_node), or node-exporter
+                on raspi5 is not scraped. Runbook in DEPLOYMENT.md
                 "k3s datastore (kine/SQLite) maintenance".
 
   # --- Network monitoring: coroot-node-agent egress rules (NM-2, #118) ---
