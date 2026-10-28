@@ -287,18 +287,21 @@ additionalPrometheusRulesMap:
           # group labels from the PVC and the Volume, so the volume silently falls back to
           # the `default` group (#101). The job object then disappears entirely, which the
           # rule above cannot see, because it has no series left to be stale.
-          # Both existing recurring jobs are guarded in one rule: absent() carries the
+          # All three recurring jobs are guarded in one rule: absent() carries the
           # matcher labels, so the `or` union yields at most one series per missing job,
           # each with its own `cronjob` label. Two separately declared rules with the same
           # alertname and the same static labels are rejected by `promtool check rules`
           # as duplicates, even though their firing label sets would differ at runtime.
           # The `and on()` clause suppresses the alert while kube-state-metrics itself is
           # down or rolling — that case is the chart's TargetDown, not a backup problem.
-          # metrics-filesystem-trim (#106, PR #107) joins this list once that PR merges.
+          # metrics-filesystem-trim (#106, PR #107) is guarded too (#239): losing it lets the
+          # Prometheus TSDB volume's frozen snapshot base grow back (#106), and losing it
+          # together with metrics-snapshot-cleanup drops the volume into `default` (#101).
           - alert: LonghornRecurringJobMissing
             expr: >-
               (absent(kube_cronjob_info{namespace="longhorn-system", cronjob="daily-snapshot"})
-              or absent(kube_cronjob_info{namespace="longhorn-system", cronjob="metrics-snapshot-cleanup"}))
+              or absent(kube_cronjob_info{namespace="longhorn-system", cronjob="metrics-snapshot-cleanup"})
+              or absent(kube_cronjob_info{namespace="longhorn-system", cronjob="metrics-filesystem-trim"}))
               and on() (count(up{job="kube-state-metrics"} == 1) > 0)
             for: 1h
             labels:
@@ -310,8 +313,9 @@ additionalPrometheusRulesMap:
                 has stopped. Longhorn also strips a group's labels from the PVC and the Volume when
                 that group's last job is deleted, which drops the Prometheus TSDB volume back into
                 the `default` snapshot group and can repeat the #101 disk-pressure incident.
-                Re-apply infra/playbooks/30_longhorn.yml; runbook in DEPLOYMENT.md
-                "Backup alerting (#92)".
+                Re-apply infra/playbooks/30_longhorn.yml. If the last metrics-group job was deleted,
+                also re-apply infra/playbooks/41_monitoring.yml to restore the group labels; runbook
+                in DEPLOYMENT.md "Backup alerting (#92)".
   # NM-3 node-script alerts (docs/060-network-monitoring.md §5.6, homelab#117, PR #132). The
   # metrics come from homelab-netmon-collect (role netmon_node) via the node-exporter
   # textfile collector (PR #109). Same top-level map as the entries above.
