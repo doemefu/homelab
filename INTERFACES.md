@@ -301,7 +301,7 @@ Secrets are materialized into Kubernetes Secrets via Ansible `kubernetes.core.k8
 | `mcp-hub-secrets` | `apps` | Account registry (`accounts.json`), subject allowlist (`allowed-subjects`, one username per line; empty = every token rejected), one key per provider credential (`docs/080-mcp-hub.md` §7.1, §8.1); optional token-store keys `db-username` (literal `mcp_hub`), `db-password`, `token-encryption-key`, `token-encryption-key-previous` (rotation only), created only when `mcp_hub_db_password` and `mcp_hub_token_encryption_key` are set; read by the hub per use; the key id is derived from the key (§7.2) | mcp-hub (mounted read-only at `/etc/mcp-hub/secrets`) | Rotate via `59_app_services.yml`; the kubelet refreshes the files in about 1–2 min. Credential rotation (same key names) and `allowed-subjects`: no restart. Registry (`accounts.json`) changes: delete the hub pod (`kubectl -n apps delete pod -l app=mcp-hub`), because the hub reads it only at start-up. Keys removed from SOPS stay until removed by hand. Kill switch: DEPLOYMENT.md "mcp-hub incident runbook", L2 |
 | `postgresql-secret` | `apps` | PostgreSQL admin password | PostgreSQL, connecting apps | Set in `50_apps_infra.yml` |
 | `influxdb2-auth` | `apps` | InfluxDB admin password (`admin-password`), token (`admin-token`) | InfluxDB, connecting apps | Set in `50_apps_infra.yml` |
-| `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), SMTP password (`smtp-password`, contact-form delivery, furchert-ch#46) | furchert-ch | Rotate via `59_app_services.yml`; `smtp-password` is an Infomaniak application password, independently revocable from the mailbox login password |
+| `furchert-ch-secrets` | `apps` | Auth.js session secret (`auth-secret`), OIDC client secret (`oidc-client-secret`), iCloud SMTP login (`smtp-user`, full primary iCloud Mail address) and password (`smtp-password`), contact-form delivery via `smtp.mail.me.com` (furchert-ch#115) | furchert-ch | Rotate via `59_app_services.yml`, then `kubectl -n apps delete pod -l app=furchert-ch` (env is read at pod start); `smtp-password` is a dedicated iCloud app-specific password, independently revocable (it grants account-wide iCloud access, so never reuse mcp-hub's) |
 | `cloudflare-api-token` | `platform` | Cloudflare API token | cert-manager DNS-01 challenges | Set in `40_platform.yml` |
 
 ### Required SOPS Variables
@@ -316,7 +316,8 @@ From `59_app_services.yml` (app secrets):
 - `auth_service_device_service_client_secret`, `auth_service_n8n_client_secret`
 - `furchert_ch_auth_secret`
 - `auth_service_furchert_ch_client_secret`
-- `furchert_ch_smtp_password` (Infomaniak application password for `info@furchert.ch`, furchert-ch#46)
+- `furchert_ch_smtp_user` (full primary iCloud Mail address, e.g. `name@icloud.com` — not the short mail name mcp-hub uses; furchert-ch#115)
+- `furchert_ch_smtp_password` (dedicated iCloud app-specific password for that account, furchert-ch#115)
 - `n8n_encryption_key` (generate with `openssl rand -hex 32`)
 - `auth_service_rsa_private_key`, `auth_service_rsa_public_key`
 - `litellm_master_key` (starts with `sk-`)
