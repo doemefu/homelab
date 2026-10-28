@@ -43,7 +43,9 @@
       "Bash(git push * --mirror*)",
       "Bash(git push --mirror*)",
       "Bash(gh pr merge --admin*)",
-      "Bash(gh pr merge * --admin*)"
+      "Bash(gh pr merge * --admin*)",
+      "Bash(gh api *pulls/*/merge*)",
+      "Bash(gh api *mergePullRequest*)"
     ],
     "ask": [
       "Bash(kubectl apply *)",
