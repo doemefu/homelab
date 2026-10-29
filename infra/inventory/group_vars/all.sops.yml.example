@@ -135,8 +135,14 @@ furchert_ch_auth_secret: "CHANGE_ME_openssl_rand_base64_33"
 # furchert-ch OIDC client secret, plain value (auth-service stores it "{noop}"-prefixed)
 auth_service_furchert_ch_client_secret: "CHANGE_ME_openssl_rand_hex_32"
 
-# Infomaniak application password for info@furchert.ch (contact-form SMTP, furchert-ch#46)
-furchert_ch_smtp_password: "CHANGE_ME_infomaniak_smtp_app_password"
+# furchert-ch contact form via iCloud SMTP (smtp.mail.me.com:587, furchert-ch#115)
+# furchert_ch_smtp_user: full primary iCloud Mail address (@icloud.com/@me.com/@mac.com) — the
+#   playbook asserts this; a non-iCloud Apple Account address fails with 550 5.1.1 at send time.
+#   Not mcp-hub's short icloud-username.
+# furchert_ch_smtp_password: dedicated iCloud app-specific password (appleid.apple.com → App-Specific
+#   Passwords) — do not reuse mcp-hub's.
+furchert_ch_smtp_user: "CHANGE_ME@icloud.com"
+furchert_ch_smtp_password: "CHANGE_ME_icloud_app_specific_password"
 
 # data-service Postgres password for the data_service role/DB (docs/060-network-monitoring.md §9)
 # Created idempotently by 59_app_services.yml; materialised as data-service-secrets/db-password.
