@@ -189,6 +189,8 @@ Internet
 
 ## Authentication Flow
 
+> **Access-token contract:** the token shape (resource audiences, header `typ`, which clients get `role`) and the validation every resource server must apply are specified in [`054-access-token-audiences.md`](054-access-token-audiences.md) (`homelab-auth-service#101`, draft). The flow below is the original sketch from before Spring Authorization Server and is kept for history.
+
 ```
 1. User submits credentials
    POST /auth/login { "username": "admin", "password": "secret" }
