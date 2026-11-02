@@ -23,7 +23,7 @@ If the card fails, the cluster state and its only backup are gone together. `#91
 ### What went wrong (#129)
 
 - **2026-09-23:** kine's online compactor had stopped about 5 days earlier. `state.db` reached 5.02 GB and 1.79 M rows, the apiserver timed out, and Flux and the Longhorn CSI sidecars crash-looped on lease renewals. The fix was an offline compaction with 22 minutes of API downtime.
-- **2026-09-30:** the same stall came back after 7 days (2.9 GB, about 1.24 M revisions behind) and was fixed with another offline compaction.
+- **2026-09-30:** the same stall came back (2.9 GB, about 1.24 M revisions behind) and was fixed with another offline compaction. At ≈ 0.25–0.3 M revisions/day the stall began around 2026-09-25/26, not on 2026-09-30. The Mac node resets that evening triggered the symptoms, not the stall.
 - **Since then:**
   - The `K3sDatastoreLarge` alert (> 500 MB, `#150`) has existed since 2026-10-28.
   - The apiserver etcd health and ready timeouts are raised to 20 s (PR #151).
@@ -39,9 +39,11 @@ If the card fails, the cluster state and its only backup are gone together. `#91
 | All apiserver writes | 3.47 /s (≈ 300 k revisions/day), 7-day average 3.40 /s | `apiserver_request_total{verb=~"PUT\|POST\|PATCH\|DELETE"}`, `job="apiserver"` |
 | Lease `PUT`s | 2.62 /s (≈ 226 k/day) = **75 % of all writes** | same, `resource="leases"` |
 
-Note on the measurements: in k3s the kubelet's `/metrics` endpoint exposes the apiserver series too, so every `apiserver_*` series exists twice in Prometheus (`job="apiserver"` and `job="kubelet"`). Any sum without a `job` filter doubles. The values above use `job="apiserver"`.
+Note on the measurements:
+- In k3s the kubelet's `/metrics` endpoint exposes the apiserver series too, so every `apiserver_*` series exists twice in Prometheus (`job="apiserver"` and `job="kubelet"`). Any sum without a `job` filter doubles. The values above use `job="apiserver"`.
+- Over the whole 14-day Prometheus window, `homelab_k3s_state_db_bytes` stayed at or below 109.7 MB. v0.13.9 has therefore run at least two weeks without a stall, so a stall-free period alone proves little (see the exit criteria).
 
-Every lease renewal is one new kine row. The 16 leases in the cluster explain the measured rate:
+Every lease renewal is one new kine row. The 17 renewing leases in the cluster (plus one idle Longhorn upgrade lock) explain the measured rate:
 
 | Lease holders (live) | Renew interval (default) | ≈ PUT/s | Share |
 |---|---|---|---|
@@ -56,9 +58,14 @@ k3s with a single SQLite server already runs kube-controller-manager and kube-sc
 
 - **kine `v0.13.9` contains kine#414.** If a compaction iteration fails before any batch succeeds (for example a 5 s batch timeout or `database is locked` under load), the compactor's target revision is reset to 0 and compaction stops **for good** until kine restarts.
   - The bug was introduced in `v0.13.4` and fixed in `v0.13.10` (2025-02-19). The kine maintainer's advice on the matching report kine#489 (reported against v0.13.9): "Please upgrade to at least v0.13.10".
-  - This matches both incidents: the stall followed an API-latency spike (the Longhorn rebuild loop on 2026-09-17, the Mac node resets on 2026-09-30), and compaction never resumed on its own.
+  - The strongest evidence comes from 2026-09-23 itself. After the 15:53 restart, compaction resumed. At 17:20 it wedged again, and it logged no further COMPACT attempt until 21:43 (#129, mitigation 3).
+  - Both stalls followed a latency event:
+    - the Longhorn rebuild loop on 2026-09-17;
+    - for the second stall (≈ 2026-09-25/26), probably the k3s restart for PR #151 on 2026-09-25, a Mac node reset, or the nightly datastore backup.
+  - **The nightly backup is a known latency source.** At 03:00 the `storage` role copies `state.db` with sqlite3's online backup API (`backup(pages=-1)`). That is one long read transaction on the same SD card. #129 recorded 735 `Slow SQL` lines in that hour, against a baseline of 30–90.
   - The note in `DEPLOYMENT.md` ("the compactor stalls permanently instead of retrying") describes exactly this behaviour.
-- **From k3s `v1.32.13+k3s1` on, compaction works differently.**
+  - **Interim remedy while on v1.32.2:** a plain `sudo systemctl restart k3s` (≈ 1 min API blip; containers keep running) restarts the compactor, provided the backlog is small enough for online compaction. Offline compaction is needed only for a multi-GB backlog.
+- **From k3s `v1.32.9+k3s1` on (the planned hop target is `v1.32.13+k3s1`), compaction works differently.**
   - k3s starts kine with `--compact-interval=0s` (`pkg/etcd/etcd.go` `DefaultEndpointConfig`). kine's own timer is off, and compaction is driven by kube-apiserver through the etcd `Compact` API, every `--etcd-compaction-interval` (default 5 m).
   - kine's handler (`SQLLog.Compact`, kine v0.14.12) re-reads the compact revision **from the database on every call**. A failed run therefore no longer leaves the compactor stuck: the next apiserver call starts again from the stored revision.
   - The interval can be set with `--kube-apiserver-arg=etcd-compaction-interval=<duration>`.
@@ -69,7 +76,7 @@ kine and etcd versions per k3s release (read from each tag's `go.mod`):
 |---|---|---|---|
 | v1.32.2+k3s1 (live) | v0.13.9 | none of the below | v3.5.18 |
 | v1.32.13+k3s1 | v0.14.12 | kine#414 (stall fix), kine#464/#490 (configurable compaction, apiserver-driven compaction) | v3.5.26 |
-| v1.33.13+k3s1 | v0.16.1 | + kine#613 (partial index: faster SQLite compaction), kine#623 (`VACUUM` at startup) | v3.6.12 |
+| v1.33.13+k3s2 (current 1.33 build; partial index from v1.33.10, startup `VACUUM` from v1.33.11) | v0.16.3 | + kine#613 (partial index: faster SQLite compaction), kine#623 (`VACUUM` at startup) | v3.6.14 |
 | v1.34.12 / v1.35.9 / v1.36.5 | v0.16.5 | + kine#762/#765 (cheaper compaction delete set, bounded batches) | v3.6.14 |
 | v1.37.1+k3s1 | v0.17.1 | same as v0.16.5 for compaction | v3.7.1 |
 
@@ -88,7 +95,7 @@ Note on `VACUUM` at startup: from k3s 1.33.13 on, a plain k3s restart reclaims f
 
 ### A. Stay on SQLite/kine, upgraded, with mitigations
 
-Keep the default datastore. Fix the cause with the k3s patch hop and add the mitigations M1–M6 below.
+Keep the default datastore. Fix the cause with the k3s patch hop and add the mitigations M1–M7 below.
 
 - **Pros:**
   - The probable root cause (kine#414) is fixed by a hop that is planned anyway (`#139` hop 1).
@@ -127,7 +134,7 @@ k3s documents converting an existing single-node SQLite cluster by restarting th
 
 | Variant | What moves | Effort | Notes |
 |---|---|---|---|
-| D1 | Whole root file system to an NVMe drive (Pi 5 M.2 HAT) or a USB 3 SSD; boot order via the Pi 5 bootloader | Re-image raspi5 or clone the card; one maintenance window; playbooks 10/20 re-run | Moves datastore, Longhorn replicas and images in one step. Best wear and latency result. |
+| D1 | Whole root file system to an NVMe drive (Pi 5 M.2 HAT) or a USB 3 SSD; boot order via the Pi 5 bootloader | **Clone the card** to the new drive with k3s stopped; one maintenance window; playbooks 10/20 re-run for drift | Moves datastore, Longhorn replicas and images in one step. Best wear and latency result. A fresh re-image instead of a clone loses the cluster CA, token and datastore unless `/var/lib/rancher/k3s/server` and `/etc/rancher/k3s` are restored, so re-imaging is the riskier path. |
 | D2 | Keep booting from SD; mount an SSD at `/var/lib/rancher` and `/var/lib/longhorn` | Smaller change; data copy with k3s stopped | Root file system (logs, journald) stays on SD. Two media to manage. |
 | D0 | Stay on SD | none | Accepts the single-medium risk. |
 
@@ -136,7 +143,7 @@ Whichever variant: **the datastore and its backup must end up on different media
 ## Decision (proposed)
 
 1. **Datastore: option A.** Stay on SQLite/kine and fix the cause by upgrading, together with the mitigations below. Do **not** migrate to embedded etcd now.
-2. **Storage: option D1**, owner hardware permitting: a Pi 5 NVMe HAT with an NVMe drive, or a USB 3 SSD. Do it in its own maintenance window, not together with a k3s hop. If no hardware is bought, D0 stays, and the off-node backup work (`#91`/`#161`) carries the whole recovery risk.
+2. **Storage: option D1**, owner hardware permitting: a Pi 5 NVMe HAT with an NVMe drive, or a USB 3 SSD. Do it in its own maintenance window, not together with a k3s hop. D1 does **not** block the minor upgrades in `#65`. If no hardware is bought, D0 stays, and the off-node backup work (`#91`/`#161`) carries the whole recovery risk.
 3. **Embedded etcd (B)** is re-evaluated only when an exit criterion below trips, and only after D1. etcd on the SD card is ruled out.
 
 ### Mitigations for option A
@@ -144,11 +151,12 @@ Whichever variant: **the datastore and its backup must end up on different media
 | # | Mitigation | Where | Tracking |
 |---|---|---|---|
 | M1 | k3s patch hop `v1.32.2+k3s1` → `v1.32.13+k3s1` (kine v0.14.12: kine#414 fixed, apiserver-driven compaction). Back up `state.db` first (offline compaction if the backlog is large, since kine opens a large file slowly). | `infra/roles/k3s/defaults/main.yml` `k3s_version`, playbook 20 | `#139` hop 1 |
-| M2 | Continue the minor hops at least to `v1.34.12` (kine v0.16.5): partial index, startup `VACUUM`, cheaper compaction deletes. Order and target are in `#65`/`#139`. | same | `#139`, `#65` |
-| M3 | **Compaction-lag gauge and alert.** Export `max_id − compact_rev` (the read-only query already in `DEPLOYMENT.md` § "Read-only diagnostics") as `homelab_k3s_compaction_lag_revisions` from the `netmon_node` textfile script on raspi5, and alert when it stays above about 100 k revisions (≈ 8 h of writes at today's rate) for 1 h. This catches a stall within hours, long before `K3sDatastoreLarge` (> 500 MB) fires. The read must use `mode=ro` and a short timeout, so it never blocks kine. | `netmon_node` role, `41_monitoring.yml` rules + promtool test | new task (see "Follow-ups") |
-| M4 | **Cut lease churn by about half.** Raise the Flux controllers' leader-election timing from 35 s / 30 s / 5 s to e.g. 60 s / 40 s / 15 s via a kustomize patch on the Flux bootstrap manifests. This removes ≈ 0.8 PUT/s (≈ 23 % of all writes). A failover then takes up to about 60 s instead of 35 s, which does not matter for single-replica controllers. Longhorn's CSI sidecars are created by longhorn-manager, and their leader-election flags are not exposed in the chart as far as checked; leave them. Disabling Flux leader election entirely (single replicas) would remove 1.2 PUT/s, but risks two active controllers during a rollout; not recommended. | `cluster/flux-system/` kustomization | `#129` (a) |
+| M2 | Continue the minor hops at least to `v1.34.12` (kine v0.16.5): partial index, startup `VACUUM`, cheaper compaction deletes. Order and target are in `#65`/`#139`. Startup `VACUUM` needs about 2× the database size free on disk and lengthens restarts of a large file; the DSN flag `_kine_disable_startup_vacuum` turns it off if ever needed. | same | `#139`, `#65` |
+| M3 | **Compaction-lag gauge and alert.** Export `max_id` and `compact_rev` as two gauges (`homelab_k3s_kine_max_revision`, `homelab_k3s_kine_compact_revision`) from the `netmon_node` textfile script on raspi5. The lag is the alert expression; `max_id` alone also gives the true revision rate. Warn when the lag stays above about 25 k revisions (≈ 2 h of writes at today's rate) for 1 h. **Runbook:** on v1.32.2, run `sudo systemctl restart k3s`, which restarts the stalled compactor; on v1.32.13 and later, read the journal first. | `netmon_node` role; rules in `cluster/values/kube-prometheus-stack.yaml` (applied by playbook 41) + promtool test | new task (see "Follow-ups") |
+| M4 | **Cut lease churn by about a third.** Raise the Flux controllers' leader-election timing from 35 s / 30 s / 5 s to e.g. 60 s / 40 s / 15 s via a kustomize patch on the Flux bootstrap manifests. This removes ≈ 0.8 PUT/s, which is −31 % of lease writes and −23 % of all writes. A failover then takes up to about 60 s instead of 35 s, which does not matter for single-replica controllers. Longhorn's CSI sidecars are created by longhorn-manager, and their leader-election flags are not exposed in the chart as far as checked; leave them. Disabling Flux leader election entirely (single replicas) would remove 1.2 PUT/s, but risks two active controllers during a rollout; not recommended. **Recovery:** if the patch breaks kustomize-controller, a git revert cannot heal it, because nothing applies the revert. The recovery is an owner-run `kubectl apply -k cluster/flux-system` from a fixed checkout. | `cluster/flux-system/` kustomization | `#129` (a) |
 | M5 | **Keep the offline compaction runbook** as break-glass, and update its kine references once M1 is live (the "not tunable via k3s flags" note is true only for kine v0.13.9; on v1.32.13+ the compaction interval is `--kube-apiserver-arg=etcd-compaction-interval`). No scheduled offline compaction: with M1 it would cost API downtime for no gain. | `DEPLOYMENT.md` | with M1 |
-| M6 | **Datastore backup off the node.** The restic repository holding the nightly `state.db` copy must leave raspi5's SD card (`#91` interim copy to the Mac, `#161` SSD and offsite target). | `scripts/`, `storage` role | `#91`, `#161` |
+| M6 | **Datastore backup off the node.** The restic repository holding the nightly `state.db` copy must leave raspi5's SD card (`#91` interim copy to the Mac, `#161` SSD and offsite target). The pre-hop backup for M1 also goes off the node. | `scripts/`, `storage` role | `#91`, `#161` |
+| M7 | **Gentler nightly datastore copy.** Change the `storage` role's `backup(pages=-1)` to stepped pages with short pauses, so the 03:00 copy no longer holds one long read transaction against kine on the same card. Small change; verify with the `Slow SQL` count at 03:00 before and after. | `storage` role | new task |
 
 Not part of this decision:
 - Tuning kine's batch size and timeout. k3s does not expose them. kine reads `KINE_COMPACT_TIMEOUT` and `KINE_COMPACT_BATCH_SIZE` from the environment when k3s builds its config through kine's CLI parser, so `/etc/default/k3s` *might* set them. This is inferred from source only and unverified at runtime; revisit only if M1–M3 are not enough.
@@ -156,31 +164,34 @@ Not part of this decision:
 
 ### Exit criteria: when to re-open option B
 
+A quiet month alone proves little: v0.13.9 has already gone two weeks without a stall. The review therefore needs **positive evidence** that the new compaction path recovers. It takes place at the end of the 2-week observation step (order below) and again after 30 days. The evidence is at least one `Compact failed` line in `journalctl -u k3s` (or a lag spike in M3) that is followed by recovery within one or two apiserver compaction calls (5–10 min). If no failure happens in that time, extend the observation; do not declare success.
+
 Re-evaluate embedded etcd (on SSD only) if **any** of these happens within 30 days after M1, M3 and M4 are live:
 - the compaction-lag alert fires twice, or stays firing for more than 24 h;
 - an offline compaction is needed again;
 - `apiserver_storage_size_bytes` grows steadily for 7 days with a flat write rate.
 
-Otherwise, close `#129`'s datastore follow-ups and keep A.
+If a criterion trips while raspi5 is still on SD, D1 comes first, and B is evaluated only afterwards. Until then the M3 runbook (restart, or offline compaction) remains the remedy. If no criterion trips and the positive evidence exists, close `#129`'s datastore follow-ups and keep A.
 
 ## Consequences
 
 - **Positive:**
   - The fix rides on the `#139` hop that is due anyway: no extra migration window and no new component.
   - M3 turns a silent stall into an alert within hours.
-  - M4 halves the dominant write source, which also reduces SD-card writes until D1 happens.
+  - M4 cuts the dominant write source by about a third, which also reduces SD-card writes until D1 happens.
 - **Negative / risks:**
   - The diagnosis "kine#414 is the root cause" is strong but not proven on this cluster. M3 is the check. If the lag still grows on v1.32.13, the exit criteria apply.
   - Until D1, one SD card still carries the control plane. The upgrade does not change that.
-  - M4 changes Flux's bootstrap manifests. Any later `flux bootstrap` or `flux install` regeneration (Flux 2.9/2.10 in `#65`) must keep the patch. It belongs as a `patches:` entry in `cluster/flux-system/kustomization.yaml`, not inside `gotk-components.yaml`. The Flux sync path (`gotk-sync.yaml` → `./cluster` → `cluster/kustomization.yaml` → `flux-system/`) references only `cluster/flux-system/gotk-components.yaml`. The second copy at `cluster/flux-system/flux-system/gotk-components.yaml` is not referenced by any kustomization and looks like a leftover. Confirm that before patching, and remove it in its own PR.
+  - M4 changes Flux's bootstrap manifests. Any later `flux bootstrap` or `flux install` regeneration (Flux 2.9/2.10 in `#65`) must keep the patch. It belongs as a `patches:` entry in `cluster/flux-system/kustomization.yaml`, not inside `gotk-components.yaml`. The Flux sync path (`gotk-sync.yaml` → `./cluster` → `cluster/kustomization.yaml` → `flux-system/`) references only `cluster/flux-system/gotk-components.yaml`. The second copy at `cluster/flux-system/flux-system/gotk-components.yaml` is not referenced by any kustomization. Flux itself committed it (commit 794ebaa), most likely during a bootstrap with a different `--path`. Confirm that before patching, and remove it in its own PR.
 - **Order relative to `#139` / `#65`** (one change per window):
   1. M3 lag gauge (no restart; playbooks 10 and 41).
-  2. M1 hop to v1.32.13 (+ `#158` checksum).
-  3. M4 Flux lease patch (Flux applies on merge).
-  4. Observe 2 weeks.
-  5. D1 storage move (own window).
-  6. Minor hops per `#65`.
-  7. Exit-criteria review.
+  2. M6 off-node copy of the datastore backup (`#91`).
+  3. M1 hop to v1.32.13 (+ `#158` checksum), with an off-node `state.db` backup first.
+  4. M4 Flux lease patch (Flux applies on merge); M7 when convenient.
+  5. Observe 2 weeks, then the first exit-criteria review.
+  6. D1 storage move (own window, when hardware is there; it does not block step 7).
+  7. Minor hops per `#65`.
+  8. Exit-criteria review after 30 days.
 
 ## If option B is ever chosen (for the record)
 
@@ -196,7 +207,9 @@ Otherwise, close `#129`'s datastore follow-ups and keep A.
 
 ## Follow-ups (to file or fold in once accepted)
 
-- New task: kine compaction-lag gauge + alert + promtool test (M3).
+- New task: kine revision gauges + lag alert + promtool test + runbook line (M3).
+- New task: stepped online backup of `state.db` in the `storage` role (M7).
+- Optional: the `job="kubelet"` scrape duplicates every `apiserver_*` series. Any rule or panel that sums apiserver metrics needs a `job` filter. On kine ≤ v0.14.12 the duplicate scrape also doubles the cost of the datastore-size query.
 - `#129`: Flux leader-election kustomize patch (M4), plus removal of the unreferenced `cluster/flux-system/flux-system/gotk-components.yaml`.
 - `#139` hop 1: after the hop, update the kine paragraphs in `DEPLOYMENT.md` (M5).
 - Owner: decide on D1 hardware (NVMe HAT + drive, or USB 3 SSD) and how it relates to `#161`'s SSD.
@@ -204,4 +217,5 @@ Otherwise, close `#129`'s datastore follow-ups and keep A.
 
 ## Results note: k3s patch hop (2026-11-03 overnight run)
 
-*Pending.* The overnight run's k3s upgrade work package will report here whether hop 1 (v1.32.13) was prepared or applied, and the first compaction readings after it.
+- **Pre-flight (read-only, 2026-11-02 23:51 CET):** cluster healthy; kine 2,621 rows, compaction lag 1,164 revisions (`max_id − compact_rev`), `state.db` 74 MB. The online compactor is keeping up on v0.13.9 right now, which matches the reading that the bug needs a trigger.
+- **Hop 1:** *pending.* The overnight run's k3s upgrade work package will report whether hop 1 was prepared or applied, and the first compaction readings after it.
