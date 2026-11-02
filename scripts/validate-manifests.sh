@@ -91,6 +91,8 @@ validate() {
     -kubernetes-version "$2" -cache "${cache}" \
     -schema-location default -schema-location "${crd_catalog}" \
     "$1" > "${work}/result.json" || rc=$?
+  jq -r '"\(.summary.valid // 0) valid, \(.summary.skipped // 0) skipped: no schema"' \
+    "${work}/result.json" > "${work}/counts" 2>/dev/null || echo "no counts" > "${work}/counts"
   if ! problems="$(jq -r '
       def builtin: (.version | contains("/") | not)
         or (.version | split("/")[0] | (contains(".") | not) or endswith(".k8s.io"));
@@ -160,7 +162,7 @@ for d in "${dirs[@]}"; do
     live_result="invalid: $(count_lines "${problems}") problem(s)"
     status=1
   else
-    echo "Kubernetes ${live} (blocking): valid"
+    echo "Kubernetes ${live} (blocking): valid ($(cat "${work}/counts"))"
     live_result="valid"
   fi
   echo "| ${live} | blocking | ${name} | ${live_result} |" >> "${summary}"
@@ -174,7 +176,7 @@ for d in "${dirs[@]}"; do
       next_annotations+=("${v}")
       echo "| ${v} | report-only | ${name} | invalid: $(count_lines "${problems}") problem(s) |" >> "${summary}"
     else
-      echo "Kubernetes ${v} (report-only): valid"
+      echo "Kubernetes ${v} (report-only): valid ($(cat "${work}/counts"))"
       echo "| ${v} | report-only | ${name} | valid |" >> "${summary}"
     fi
   done

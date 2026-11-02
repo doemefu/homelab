@@ -291,11 +291,11 @@ line's index digest is the actual source of truth).
 2. Update the `image:` (or `image.tag`) line to `repo:<new-tag>@sha256:<index-digest>`
    and the one-line explanatory comment above it with the new index digest + resolution date.
 3. Validate:
-   - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml`: covered by the existing
-     `kustomize build cluster/apps/<app> | kubeconform ...` and
-     `| conftest test --policy policy/kubernetes/ --all-namespaces -` commands in
-     "Reproducing each check locally" above (open-webui, litellm, and n8n are already
-     in that loop; `deny-latest-image.rego` already accepts any `@sha256:...`-suffixed
+   - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml`: covered by
+     `scripts/validate-manifests.sh` and the
+     `| conftest test --policy policy/kubernetes/ --all-namespaces -` loop in
+     "Reproducing each check locally" below (open-webui, litellm, and n8n are already
+     in both directory lists; `deny-latest-image.rego` already accepts any `@sha256:...`-suffixed
      reference regardless of tag).
    - `cluster/values/cloudflared.yaml` and `infra/playbooks/50_apps_infra.yml`
      (pgvector, postgres-exporter, mosquitto, mosquitto-exporter): not rendered by
