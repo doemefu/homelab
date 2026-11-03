@@ -1103,6 +1103,46 @@
       changed_when: "'CREATE DATABASE' in pg_mcp_hub_create_db.stdout"
       when: mcp_hub_token_store_configured | bool
 
+    # #163: by default PUBLIC holds CONNECT on every database, so any login role could connect to any
+    # app database. Revoke it on the databases this playbook creates. The owning role keeps CONNECT through
+    # its owner privileges; device-service shares the homelabdb owner role until #153. Databases that do
+    # not exist yet (mcp_hub before its token store is configured) are skipped. club_assistant (54) and n8n
+    # are a follow-up. Fail-closed: ON_ERROR_STOP + a single transaction, so any psql error fails the
+    # task. A restore that recreates one of these databases brings PUBLIC CONNECT back: re-run this
+    # playbook (DEPLOYMENT.md "Backup & rollback for image updates").
+    - name: App databases — revoke CONNECT from PUBLIC (#163)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - -c
+          - postgresql
+          - --
+          - psql
+          - -U
+          - postgres
+          - -v
+          - ON_ERROR_STOP=1
+          - --single-transaction
+          - -f
+          - "-"
+        stdin: |
+          SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', d.datname)
+          FROM pg_database d
+          WHERE d.datname IN ('homelabdb', 'litellm', 'data_service', 'mcp_hub')
+            AND has_database_privilege('public', d.datname, 'CONNECT')
+          ORDER BY d.datname \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_revoke_connect
+      # psql prints the command tag "REVOKE" once per executed statement; nothing when all are done.
+      changed_when: "'REVOKE' in pg_revoke_connect.stdout"
+
     - name: Mcp-hub token store — add the token-store keys to mcp-hub-secrets
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"

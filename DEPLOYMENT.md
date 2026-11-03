@@ -3202,6 +3202,8 @@ If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps dele
   kubectl -n apps exec postgresql-0 -c postgresql -- pg_restore -U postgres -d litellm --no-owner --role=litellm /tmp/litellm.dump
   kubectl -n apps scale deploy/litellm --replicas=1
   ```
+  A recreated database (and a restored `pg_dumpall`) gets the default ACL back, with CONNECT for PUBLIC:
+  re-run `ansible-playbook infra/playbooks/59_app_services.yml` afterwards (#163, "App databases").
 - **PostgreSQL image revert** — pick the path that matches how far the upgrade progressed:
   - (a) **Tag revert only**, safe while `ALTER EXTENSION vector UPDATE;` has **not** yet been run
     against `club_assistant` (the underlying PG minor bump is on-disk compatible either way).
