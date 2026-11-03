@@ -25,12 +25,13 @@ spec:
         - name: litellm
           # Avoid 1.82.7 and 1.82.8 (malicious releases on PyPI, March 2026).
           # The non_root image auto-migrates the Postgres schema on startup (prisma migrate deploy).
-          # Pinned v1.102.1 (Dependabot PR #143, merged 2026-10-14). No '-stable' suffix since v1.84.0
-          # (weekly releases bump MINOR). Newer than v1.98.0, so it keeps the CVE-2026-49468 fix
-          # (critical host-header auth bypass) + 4 further advisory fixes since 1.83.7.
-          # Multi-arch index digest sha256:ce9eec5907c9828706183dc9b80962f932ad2e34171fc8c7f131e3deda439f36
-          # (linux/amd64 + linux/arm64) re-verified 2026-11-02 via the registry API (#165).
-          image: docker.litellm.ai/berriai/litellm-non_root:v1.102.1@sha256:ce9eec5907c9828706183dc9b80962f932ad2e34171fc8c7f131e3deda439f36
+          # Pinned v1.102.2 (#305, 2026-11-03): patch release of v1.102.1 that fixes GHSA-7hp6-4w63-5g45
+          # (high; UI/CLI session tokens now use their own AES-GCM context — existing UI sessions end once).
+          # No '-stable' suffix since v1.84.0 (weekly releases bump MINOR). Newer than v1.98.0, so it keeps
+          # the CVE-2026-49468 fix (critical host-header auth bypass) + 4 further advisory fixes since 1.83.7.
+          # Multi-arch index digest sha256:b485a445ad2b53cae19df83e6e90b3f05ffc4394fe7039b76249fa60d00d181b
+          # (linux/amd64 + linux/arm64) resolved 2026-11-03 via the registry API.
+          image: docker.litellm.ai/berriai/litellm-non_root:v1.102.2@sha256:b485a445ad2b53cae19df83e6e90b3f05ffc4394fe7039b76249fa60d00d181b
           args:
             - "--config"
             - "/app/proxy_config.yaml"
@@ -111,7 +112,7 @@ spec:
             # auth-service has requireProofKey(true) globally — all clients must use PKCE.
             - name: GENERIC_CLIENT_USE_PKCE
               value: "true"
-            # SSO roles (#164). LiteLLM v1.102.1 maps the auth-service userinfo claim `role` (USER|ADMIN)
+            # SSO roles (#164). LiteLLM v1.102.x maps the auth-service userinfo claim `role` (USER|ADMIN)
             # to a LiteLLM role on EVERY SSO login and writes it to the user's DB row
             # (ui_sso.py _setup_role_mappings / generic_response_convertor / upsert_sso_user):
             # auth-service ADMIN -> proxy_admin, everyone else -> internal_user_viewer (can sign in and see
