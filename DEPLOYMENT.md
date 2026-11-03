@@ -914,6 +914,7 @@ Expected UP targets:
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
 - `serviceMonitor/monitoring/data-service` → apps (job `data-service`, `/actuator/prometheus` — see "data-service NM-1: Cloudflare keys, scrape and alerts")
+- `serviceMonitor/monitoring/cert-manager` → platform (job `cert-manager`, port 9402 — see "Platform alerting (#284)")
 - `serviceMonitor/monitoring/coroot-node-agent` → monitoring (one target per gated node; none while the gate is closed)
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
@@ -1007,9 +1008,14 @@ forward instead of erasing it; `0` means "never succeeded".
 - A Longhorn recurring job that *silently skips* a detached volume still exits 0 and counts as a
   success (`filterVolumesForJob` logs a warning only). The weekly manual snapshot check in the
   maintenance checklist stays for that reason.
-- The **Mac-side app-data dumps** (`scripts/backup-app-data.sh`) are not covered. The Mac is not a
-  cluster node, so an automatic signal would need a new component (Pushgateway or an n8n check).
-  It remains a manual monthly check — see the maintenance checklist.
+- The **Mac-side app-data dumps** (`scripts/backup-app-data.sh`) and the **restic repository
+  copies** (`scripts/copy-restic-repo.sh`, #91) are not covered. The Mac is not a cluster node, so
+  an automatic signal would need a new component (Pushgateway or an n8n check). It remains a
+  manual monthly check — see the maintenance checklist.
+- `scripts/copy-restic-repo.sh` holds the same lock (shared) while it copies. A 03:00 run that
+  starts during a copy exits on the lock collision like a manual run would; the script refuses to
+  start between 02:00 and 03:44 and caps each remote command at one hour, so a copy cannot reach
+  03:00 in normal operation.
 - A lock collision (a manual run while the 03:00 cron holds the lock) exits before any metric is
   written, on purpose: the run holding the lock owns the metrics. A permanently stuck lock surfaces
   as `ResticBackupStale` after about 26 h.
@@ -1052,6 +1058,80 @@ Decision: raised `postgres-exporter`'s `limits.cpu` to `250m` in `infra/playbook
 (`requests` unchanged); kept the alert itself (severity `info`, already excluded from paging by
 `InfoInhibitor`) rather than tuning its expression — it was correctly identifying a genuinely
 undersized CPU quota, not a false positive.
+
+**Platform alerting (#284):** Flux, cert-manager and whole-workload outages, in
+`additionalPrometheusRulesMap.homelab-platform` (tests: `cluster/values/tests/platform.test.yml`).
+All `severity: warning`, routed to Discord through the single route.
+
+| Alert | Fires when | `for` |
+|-------|-----------|-------|
+| `FluxReconciliationFailed` | a Flux object (Kustomization, GitRepository, OCIRepository, HelmRepository, HelmRelease, Image*) is not `Ready=True` and not suspended | 15m |
+| `FluxResourceMetricsMissing` | kube-state-metrics is up but exports no `gotk_resource_info` for a Flux kind in use | 30m |
+| `WorkloadUnavailable` | a Deployment or StatefulSet in `apps`, `platform` or `flux-system` has 0 available/ready replicas while `spec.replicas > 0` | 5m |
+| `WorkloadMissing` | one of the named workloads (list in INTERFACES.md §9) no longer exists | 15m |
+| `CertManagerCertificateExpiringSoon` | an issued Certificate expires in less than 14 days | 1h |
+| `CertManagerCertificateNotReady` | a Certificate is `Ready=False/Unknown` | 15m |
+| `CertManagerDown` | no successful scrape of the cert-manager controller | 15m |
+
+Design notes:
+- **Flux state comes from kube-state-metrics**, not from the controllers: Flux v2.1 removed
+  `gotk_reconcile_condition`; the upstream replacement is a custom-resource-state config that turns
+  each Flux object into `gotk_resource_info{namespace,name,customresource_kind,ready,suspended}`
+  (about 28 series). A PodMonitor on the six controllers would add thousands of series to a
+  Prometheus that was already near its memory limit. Adding a Flux kind means one more
+  `groupVersionKind` entry and its plural in `kube-state-metrics.rbac.extraRules`.
+- **cert-manager** is scraped by an inline ServiceMonitor in `41_monitoring.yml`, not by the chart's
+  `prometheus.servicemonitor.enabled`, which would need a `40_platform.yml` run. No Certificate exists
+  today (public TLS terminates at Cloudflare), so the certificate rules stay dormant until one does.
+- **WorkloadUnavailable vs. the chart rules:** `KubeDeploymentReplicasMismatch` /
+  `KubeStatefulSetReplicasMismatch` need 15 min plus 10 min of an unchanged rollout and also fire for
+  partial outages. While `WorkloadUnavailable` fires, an Alertmanager inhibit rule in
+  `41_monitoring.yml` mutes the chart alert for the same object, so one outage gives one message.
+  Expected short firings: a Recreate-strategy upgrade with a slow image pull (open-webui ≈ 7 min,
+  n8n) and a node reboot that evicts a single-replica pod with an RWO volume.
+- **The #125 key move** also put the long-ignored KSM/node-exporter `resources` into effect (they
+  had none before); KSM's memory limit is 256Mi because custom-resource-state caches every CRD.
+  Prometheus' memory limit went from 1Gi to 1536Mi in the same change (RSS peaked at 1009 Mi).
+
+Known blind spots: a Flux controller that is alive but has stopped reconciling leaves `Ready=True`
+(`WorkloadUnavailable` catches a dead one, `WorkloadMissing` a deleted one); nothing outside the
+cluster watches the cluster. A deleted `kustomize-controller` cannot heal itself through Flux:
+re-apply the bundle from a main checkout with `kubectl apply -k cluster/flux-system/` (owner step).
+
+**Off-cluster dead-man's switch (owner step, not set up):** Alertmanager runs inside the cluster,
+so if raspi5 or the whole cluster dies, nothing reaches Discord. The chart's always-firing
+`Watchdog` alert is the heartbeat; it needs an external receiver that pages when the heartbeats
+stop. Today `Watchdog` goes to Discord every 12 h with everything else.
+1. Create a heartbeat check at an external service (a hosted heartbeat/cron-monitoring service, or
+   a Cloudflare Worker cron on the existing account). Period 5 min, grace 10 min, notify via
+   Discord or e-mail. This is a new external service, so it is the owner's choice.
+2. Store its ping URL as `alertmanager_watchdog_heartbeat_url` in
+   `infra/inventory/group_vars/all.sops.yml`. With the URL in the clipboard:
+   `pbpaste | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))' | sops set --value-stdin infra/inventory/group_vars/all.sops.yml '["alertmanager_watchdog_heartbeat_url"]'`
+3. In `infra/playbooks/41_monitoring.yml` (inline `alertmanager.config`), add a sub-route and a
+   receiver, then run the playbook. The sub-route also stops the 12-hourly Watchdog message in Discord:
+
+   ```yaml
+   route:
+     # ...existing keys...
+     routes:
+       - matchers: ['alertname = Watchdog']
+         receiver: 'heartbeat'
+         group_wait: 0s
+         group_interval: 1m
+         repeat_interval: 1m
+   receivers:
+     # ...existing receivers...
+     - name: 'heartbeat'
+       webhook_configs:
+         - url: "{{ alertmanager_watchdog_heartbeat_url }}"
+           send_resolved: false
+   ```
+
+**Rollback (#284):** `helm -n monitoring history kube-prometheus-stack` → `helm -n monitoring rollback
+kube-prometheus-stack <revision before the change>`, then
+`kubectl -n monitoring delete servicemonitor cert-manager` (Ansible-applied, not part of the
+release), and revert the PR so the next playbook run does not re-apply it.
 
 ### coroot-node-agent (NM-2)
 
@@ -2930,7 +3010,8 @@ dumps contain credentials and PII and must never be committed or uploaded. Run d
 created mode 700 and artifacts mode 600. `--retain N` (default 5) deletes the oldest run
 directories after a successful run; it only ever considers directories whose name matches
 `YYYY-MM-DD_HHMMSS` **and** that contain `SHA256SUMS`, so anything else in the folder (for
-example `backups/restic/`) is never touched, and pruning is skipped entirely when the run had a
+example `backups/restic/`, where `scripts/copy-restic-repo.sh` keeps its copies — see "Off-node
+copy to the operator's Mac (#91)") is never touched, and pruning is skipped entirely when the run had a
 failure. A run that was interrupted (Ctrl-C, crash, aborted stream) is renamed to
 `<run>.incomplete` instead of being deleted; those are never counted or pruned — check and
 remove them by hand.
@@ -3132,6 +3213,8 @@ ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"
 ssh raspi5 "cat /var/lib/node_exporter/textfile_collector/homelab-backup.prom"
 # In Prometheus: homelab_backup_exit_code / homelab_backup_last_success_timestamp_seconds
 # Alerts: ResticBackupFailed, ResticBackupStale — see "Backup alerting (#92)" above
+# Off-node copies on the Mac (#91): newest MANIFEST.txt — see "Off-node copy to the operator's Mac (#91)"
+#   tail -n +2 "$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)MANIFEST.txt"
 
 # List snapshots
 ssh raspi5 "sudo restic snapshots \
@@ -3149,6 +3232,9 @@ ssh raspi5 "sudo restic check \
 ```bash
 ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"
 ```
+
+A manual run exits with "another backup run is active" while the 03:00 cron or a
+`scripts/copy-restic-repo.sh` copy holds `/var/lock/homelab-backup.lock` — wait and run it again.
 
 #### Restore Test (Non-Destructive)
 
@@ -3183,7 +3269,119 @@ ssh raspi5 "sudo python3 -c \"import sqlite3; print(sqlite3.connect('/var/lib/ba
 ssh raspi5 "sudo rm -rf /var/lib/backup/restore-test"
 ```
 
+#### Off-node copy to the operator's Mac (#91)
+
+The repository lives on raspi5's root SD card — the disk it protects. `scripts/copy-restic-repo.sh`
+pulls a byte-identical copy into the Mac backup folder, next to the app-data dumps. Interim until
+an external SSD or an off-site target exists (#161; owner decision 2026-11-02: Mac folder for now).
+
+- **Read-only on the node.** rsync runs on raspi5 as the sender only (`sudo`, because the
+  repository is root-only), under a **shared** `flock` on `/var/lock/homelab-backup.lock` — the lock
+  `homelab-backup.sh` takes exclusively. A copy never overlaps a backup or `forget --prune`, and a
+  backup never starts in the middle of a copy. The only thing it may create on the node is the
+  empty lock file itself (tmpfs, after a reboot).
+- **No password.** The repository is encrypted by restic and copied as is. The copy still holds
+  the k3s datastore with every cluster Secret (restic-encrypted): directories mode 700, files 0400,
+  outside every git repo, never uploaded.
+- **Independent copies.** Every run writes a complete copy (no hard links); 5 copies of today's
+  ≈ 270 MB repository need ≈ 1.35 GB.
+
+```bash
+./scripts/copy-restic-repo.sh --help
+./scripts/copy-restic-repo.sh --dry-run     # every check + totals, copies nothing
+./scripts/copy-restic-repo.sh               # on the LAN (ansible@192.168.1.61)
+./scripts/copy-restic-repo.sh --ssh-config ~/.ssh/homelab-offlan.conf   # off-LAN (untested)
+```
+
+**Layout:** `~/informatik/homelab/backups/restic/<YYYY-MM-DD_HHMMSS>/repo/` (the repository,
+`locks/` empty) plus `MANIFEST.txt` (first line `homelab restic repo copy`, totals, newest snapshot
+file, verification results). `.in-progress/` is a copy that has not finished verification; the next
+run resumes it (rsync only fetches what is missing). Copy directories never contain `SHA256SUMS`,
+so `backup-app-data.sh`'s retention never counts or deletes them.
+
+**Verification (every run):** the source file list with sizes is taken under the lock before and
+after the copy; both must equal the copy (file count + bytes). Every file under `data/`, `index/`,
+`keys/` and `snapshots/` must hash to its own name — restic names them by the SHA-256 of their
+content — and `config` must hash like the source. This proves the copy equals the source byte for
+byte; it does not prove the source is intact (`restic check --read-data` does, below). A file that
+fails its hash is removed from `.in-progress/` and fetched again by the next run; if the same file
+fails again, the file on raspi5 is damaged — run the "Integrity check" under "Status" with
+`--read-data`.
+
+**It refuses** when the node clock reads 02:00–03:44 (restic cron at 03:00; the remote side is
+capped at one hour), when the backup holds the lock (exit 75, try later), when restic holds a lock
+younger than 60 min, when the repository has no key or no snapshot file, and when `--dest`
+contains a `YYYY-MM-DD_HHMMSS` directory that is not a restic copy (for example the app-data
+folder itself).
+
+**Retention:** `--retain N` (default 5) deletes the oldest complete copies, only after a fully
+verified run. **Shrink guard:** if the source lost more than 3 snapshot files or half its bytes
+since the last good copy, the new copy is kept, nothing is pruned and the script exits 2 — on every
+run until you check the repository on the node and re-run with `--accept-shrink`.
+
+**Re-check a copy later** (no password, no network; the hashed file count must be `files` from
+`MANIFEST.txt` minus 1 for `config`, because a missing file cannot fail a hash):
+
+```bash
+COPY="$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)"
+tail -n +2 "${COPY}MANIFEST.txt"     # note the "files" line
+(cd "${COPY}repo" && find data index keys snapshots -type f -exec shasum -a 256 {} + \
+  | awk '{ n = split($2, p, "/"); if (p[n] != $1) { print "BAD " $2; bad++ } }
+         END { print NR " files, " bad + 0 " bad"; exit bad > 0 }')
+```
+
+**Restore test from the copy (owner).** There is no restic on the Mac and the password stays on
+raspi5 (`/etc/restic-password`, written by the storage role from the encrypted variable
+`restic_password`): push the copy into a root-only scratch path on raspi5 and run restic there
+against it — never into the live repository.
+
+```bash
+COPY="$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)repo"
+# start from empty scratch paths (an aborted earlier test must not be merged in)
+ssh ansible@192.168.1.61 "sudo -n rm -rf /var/lib/backup/copy-check /var/lib/backup/restore-test && sudo -n install -d -m 0700 /var/lib/backup/copy-check /var/lib/backup/restore-test"
+rsync -rlpt --rsync-path="sudo -n rsync" "$COPY/" ansible@192.168.1.61:/var/lib/backup/copy-check/
+# The copy opens with the live password and every pack reads back
+# (for a large repository use --read-data-subset=1/10 instead of --read-data)
+# --no-cache: the copy has the live repository's ID, so it would share root's restic cache
+ssh ansible@192.168.1.61 "sudo -n restic --no-cache --repo /var/lib/backup/copy-check --password-file /etc/restic-password snapshots"
+ssh ansible@192.168.1.61 "sudo -n restic --no-cache --repo /var/lib/backup/copy-check --password-file /etc/restic-password check --read-data"
+# Restore the newest snapshot from the copy and check the datastore copy (expect ('ok',))
+ssh ansible@192.168.1.61 "sudo -n restic --no-cache --repo /var/lib/backup/copy-check --password-file /etc/restic-password restore latest --target /var/lib/backup/restore-test"
+ssh ansible@192.168.1.61 "sudo -n python3 -c \"import sqlite3; print(sqlite3.connect('/var/lib/backup/restore-test/var/lib/backup/k3s-state.db').execute('PRAGMA integrity_check').fetchone())\""
+# Cleanup — MANDATORY, restore-test holds every cluster Secret in plaintext
+ssh ansible@192.168.1.61 "sudo -n rm -rf /var/lib/backup/copy-check /var/lib/backup/restore-test"
+```
+
+Record the result in the restore-test log below.
+
+**Restore-test log:**
+
+| Date | Copy | Result |
+|------|------|--------|
+| 2026-11-03 00:04 | first real copy `2026-11-03_000410` (63 files, 269 636 649 bytes, 25 snapshot files, newest 2026-11-02 03:00) | copy verified (file list + sizes before/after, 62/62 SHA-256 names, `config`); one-off cross-check: `sha256sum` of every file on raspi5 under the lock equals `shasum -a 256` of the copy (63/63). restic restore test from the copy: **pending (owner)** |
+
 #### Full Restore (Disaster Recovery)
+
+**raspi5's disk is lost** (the repository went with it): restore the newest Mac copy (#91) onto the
+new disk **before** the storage role runs. `10_base.yml` runs `restic init` unless
+`/var/lib/backup/restic-repo/config` exists, and a freshly initialised repository has a different
+key — never copy into one, and never use `--delete` for this push.
+
+```bash
+# after 00_bootstrap.yml on the new SD card, ideally before 10_base.yml
+COPY="$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)repo"
+# 1) only if 10_base.yml already ran (it initialised a new, empty repository): move it aside
+ssh ansible@192.168.1.61 "sudo -n test -e /var/lib/backup/restic-repo/config && sudo -n mv /var/lib/backup/restic-repo /var/lib/backup/restic-repo.fresh || true"
+# 2) empty target directory; the push runs only if it really is empty
+ssh ansible@192.168.1.61 "sudo -n install -d -m 0750 /var/lib/backup && sudo -n install -d -m 0700 /var/lib/backup/restic-repo"
+if ssh ansible@192.168.1.61 'sudo -n test ! -e /var/lib/backup/restic-repo/config && test -z "$(sudo -n find /var/lib/backup/restic-repo -mindepth 1 -print -quit)"'; then
+  rsync -rlpt --rsync-path="sudo -n rsync" "$COPY/" ansible@192.168.1.61:/var/lib/backup/restic-repo/
+else
+  echo "NOT pushed: /var/lib/backup/restic-repo on raspi5 is not empty (or not reachable)"
+fi
+```
+
+Then `10_base.yml` (writes `/etc/restic-password`, skips `restic init`) and the steps below.
 
 Only when k3s is stopped and node is freshly provisioned:
 
@@ -3522,8 +3720,9 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify the metrics-group trim is still working | Weekly | `kubectl -n longhorn-system get volumes.longhorn.io <prometheus-volume> -o jsonpath='{.status.actualSize}'` (flat, not trending towards 40 G) + `kubectl -n longhorn-system logs <latest metrics-filesystem-trim pod>` showing `Finished recurring filesystem trim` — a deleted trim job fires `LonghornRecurringJobMissing` (#239), but a run that skips or no-ops is silent |
 | Run the app-data backup script | Monthly and before every image bump | `./scripts/backup-app-data.sh` on the Mac (see "App-data backups to the operator's Mac (#64)" above) |
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
+| Copy the restic repository to the Mac | Monthly, with the app-data dumps, and before SD-card or node work | `./scripts/copy-restic-repo.sh` on the Mac, outside 02:00–03:44 (see "Off-node copy to the operator's Mac (#91)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
-| Check app-data dump freshness | Monthly | `ls -lt ~/informatik/homelab/backups/` on the Mac — **not alerted** (the Mac is not a cluster node, see "Backup alerting (#92)") |
+| Check app-data dump and restic copy freshness | Monthly | `ls -lt ~/informatik/homelab/backups/ ~/informatik/homelab/backups/restic/` on the Mac — **not alerted** (the Mac is not a cluster node, see "Backup alerting (#92)") |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
 | Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |
