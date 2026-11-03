@@ -767,10 +767,13 @@ prometheus-node-exporter:
 # gotk_reconcile_condition metric; used by FluxReconciliationFailed. Chosen over a PodMonitor for
 # the six Flux controllers because it adds one series per Flux object (~28) instead of thousands,
 # on a Prometheus near its memory limit. The ServiceMonitor uses honorLabels, so the `namespace`
-# label is the Flux object's. All kinds share ONE metric list via the &flux_object_metrics anchor:
-# KSM only collapses duplicate HELP/TYPE lines when they are identical, so every kind must use the
-# same name and help text. Adding a Flux kind = one more groupVersionKind entry plus its plural in
-# rbac.extraRules (and in FluxResourceMetricsMissing if it is in use).
+# label is the Flux object's. Every kind needs its OWN help text: since KSM v2.12, families that
+# share a name AND an identical HELP line are de-duplicated across kinds and the later kinds' samples
+# are dropped (kubernetes/kube-state-metrics#2366; the first rollout of #284 exported only 3 of 5
+# kinds in use). The upstream flux2-monitoring-example uses one help text per kind for this reason.
+# The `each` and `labelsFromPath` blocks are shared via YAML anchors. Adding a Flux kind = one more
+# entry with its own help text, its plural in rbac.extraRules, and FluxResourceMetricsMissing if it
+# is in use.
 kube-state-metrics:
   resources:
     requests:
@@ -803,39 +806,67 @@ kube-state-metrics:
         resources:
           - groupVersionKind: {group: kustomize.toolkit.fluxcd.io, version: v1, kind: Kustomization}
             metricNamePrefix: gotk
-            metrics: &flux_object_metrics
+            metrics:
               - name: resource_info
-                help: The current state of a Flux object.
-                each:
+                help: The current state of a Flux Kustomization resource.
+                each: &flux_resource_info_each
                   type: Info
                   info:
                     labelsFromPath:
                       name: [metadata, name]
-                labelsFromPath:
+                labelsFromPath: &flux_resource_info_labels
                   namespace: [metadata, namespace]
                   ready: [status, conditions, "[type=Ready]", status]
                   suspended: [spec, suspend]
           - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: GitRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux GitRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: OCIRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux OCIRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: HelmRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux HelmRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: helm.toolkit.fluxcd.io, version: v2, kind: HelmRelease}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux HelmRelease resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImageRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux ImageRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImagePolicy}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux ImagePolicy resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImageUpdateAutomation}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux ImageUpdateAutomation resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
 
 prometheusOperator:
   resources:
