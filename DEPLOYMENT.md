@@ -3811,6 +3811,9 @@ Record the result in the restore-test log below.
 
 #### Full Restore (Disaster Recovery)
 
+The order of a whole rebuild (which playbook, which restore, what is not recoverable) is in
+`docs/090-disaster-recovery.md`; the blocks below are its restic steps.
+
 **raspi5's disk is lost** (the repository went with it): restore the newest Mac copy (#91) onto the
 new disk **before** the storage role runs. `10_base.yml` runs `restic init` unless
 `/var/lib/backup/restic-repo/config` exists, and a freshly initialised repository has a different
@@ -3819,8 +3822,15 @@ key — never copy into one, and never use `--delete` for this push.
 ```bash
 # after 00_bootstrap.yml on the new SD card, ideally before 10_base.yml
 COPY="$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)repo"
-# 1) only if 10_base.yml already ran (it initialised a new, empty repository): move it aside
-ssh ansible@192.168.1.61 "sudo -n test -e /var/lib/backup/restic-repo/config && sudo -n mv /var/lib/backup/restic-repo /var/lib/backup/restic-repo.fresh || true"
+# 1) only if 10_base.yml already ran: move its freshly initialised repository aside. Only a
+#    repository WITHOUT snapshots is moved (restic init writes none); anything else stops here.
+ssh ansible@192.168.1.61 'if sudo -n test -e /var/lib/backup/restic-repo/config; then
+  if [ -z "$(sudo -n find /var/lib/backup/restic-repo/snapshots -type f -print -quit)" ]; then
+    sudo -n mv /var/lib/backup/restic-repo "/var/lib/backup/restic-repo.fresh-$(date +%Y%m%d%H%M%S)"
+  else
+    echo "STOP: /var/lib/backup/restic-repo holds snapshots — not a fresh repository; inspect it (restic snapshots) before going on"; exit 1
+  fi
+fi'
 # 2) empty target directory; the push runs only if it really is empty
 ssh ansible@192.168.1.61 "sudo -n install -d -m 0750 /var/lib/backup && sudo -n install -d -m 0700 /var/lib/backup/restic-repo"
 if ssh ansible@192.168.1.61 'sudo -n test ! -e /var/lib/backup/restic-repo/config && test -z "$(sudo -n find /var/lib/backup/restic-repo -mindepth 1 -print -quit)"'; then
@@ -3830,9 +3840,26 @@ else
 fi
 ```
 
-Then `10_base.yml` (writes `/etc/restic-password`, skips `restic init`) and the steps below.
+Then `10_base.yml` (writes `/etc/restic-password`, skips `restic init`) and the steps below. A
+moved-aside `restic-repo.fresh-*` directory holds no snapshots; delete it once the restore worked.
 
-Only when k3s is stopped and node is freshly provisioned:
+**New SD card** (k3s not installed yet — nothing to stop or start; `20_k3s.yml` starts k3s on the
+restored datastore afterwards). Pick the newest snapshot taken **before** the failure:
+
+```bash
+ssh raspi5 "sudo restic snapshots --repo /var/lib/backup/restic-repo --password-file /etc/restic-password"
+ssh raspi5 "sudo restic restore <snapshot-id> \
+  --repo /var/lib/backup/restic-repo \
+  --password-file /etc/restic-password \
+  --target /"
+# restic recreates server/ (for server/token) but not server/db/
+ssh raspi5 "sudo install -d -m 0700 /var/lib/rancher/k3s/server/db"
+ssh raspi5 "sudo cp /var/lib/backup/k3s-state.db /var/lib/rancher/k3s/server/db/state.db"
+ssh raspi5 "sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/rancher/k3s/server/db/state.db-shm /var/lib/backup/k3s-state.db"
+# then: ansible-playbook infra/playbooks/20_k3s.yml -l raspi5   (same k3s_token as before)
+```
+
+**Node that still runs k3s** (only when k3s is stopped and the node is freshly provisioned):
 
 ```bash
 # Stop k3s
