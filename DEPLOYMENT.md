@@ -244,6 +244,35 @@ The kube-apiserver on raspi5 writes an audit log to `/var/log/k3s-audit/audit.lo
 - **Disable** (rollback): `ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5 -e '{"k3s_audit_log_enabled": false}'`
   (restarts k3s on raspi5).
 
+#### Pod Security Admission (#160)
+
+The four namespaces created by the playbooks carry Pod Security Admission labels for the `baseline`
+profile in `warn` and `audit` mode. Nothing is enforced yet.
+
+| Namespace | Set by | Labels | Workloads that violate baseline (2026-11-03, offline check of the pinned charts and manifests) |
+|---|---|---|---|
+| `apps` | `50_apps_infra.yml` | warn + audit `baseline`, `v1.32` | none |
+| `platform` | `40_platform.yml` | warn + audit `baseline`, `v1.32` | none |
+| `monitoring` | `41_monitoring.yml` | warn + audit `baseline`, `v1.32` | `kube-prometheus-stack-prometheus-node-exporter` (hostNetwork, hostPID, hostPath, hostPort 9100); `coroot-node-agent` (privileged, hostPID, hostPath; approved, NM-2) |
+| `homeassistant` | `51_homeassistant.yml` | warn + audit `baseline`, `v1.32` | `home-assistant` (hostNetwork, hostPort 8123; needed for mDNS discovery) |
+
+- **Effect:** admission never rejects a pod. `warn` returns a warning when a workload is created or
+  updated, so existing pods are not re-evaluated. `audit` adds a `pod-security.kubernetes.io/audit-violations`
+  annotation to that request's audit event (the API audit log above) and counts it in
+  `pod_security_evaluations_total{mode="audit"}`.
+- **Live check (read-only; also the gate before any `enforce` label):**
+  `kubectl label --dry-run=server --overwrite ns <namespace> pod-security.kubernetes.io/enforce=baseline`
+  lists the running pods that `enforce=baseline` would reject. Audit log:
+  `ssh ansible@192.168.1.61 "sudo cat /var/log/k3s-audit/audit.log | jq -c 'select(.annotations[\"pod-security.kubernetes.io/audit-violations\"]) | {ns: .objectRef.namespace, name: .objectRef.name, v: .annotations[\"pod-security.kubernetes.io/audit-violations\"]}'"`
+- **Next steps (#160):** `apps` and `platform` can get `enforce: baseline` after a clean audit
+  period. For `monitoring` and `homeassistant`, either set `enforce: privileged` explicitly or move the
+  violators out first. `restricted` comes later, per workload. Every new workload in `apps` has to
+  stay baseline-clean.
+- **Version pin:** the `-version` labels pin the policy to `v1.32`. Raise them with the next k3s minor
+  upgrade.
+- **Rollback:** a revert does not remove labels, because the playbooks patch namespaces with a merge.
+  Run `kubectl label ns apps platform monitoring homeassistant pod-security.kubernetes.io/warn- pod-security.kubernetes.io/warn-version- pod-security.kubernetes.io/audit- pod-security.kubernetes.io/audit-version-`.
+
 #### k3s datastore (kine/SQLite) maintenance
 
 k3s's embedded datastore is [kine](https://github.com/k3s-io/kine) on SQLite

@@ -28,6 +28,13 @@
           kind: Namespace
           metadata:
             name: "{{ platform_namespace }}"
+            # Pod Security Admission #160, step 1: warn + audit only, nothing enforced (DEPLOYMENT.md
+            # "Pod Security Admission"). Label-less Namespace tasks in other playbooks keep these labels.
+            labels:
+              pod-security.kubernetes.io/warn: baseline
+              pod-security.kubernetes.io/warn-version: v1.32
+              pod-security.kubernetes.io/audit: baseline
+              pod-security.kubernetes.io/audit-version: v1.32
       delegate_to: localhost
 
     # --- cert-manager ---
