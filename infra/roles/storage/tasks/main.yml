@@ -159,6 +159,13 @@
           echo "# HELP homelab_backup_last_success_timestamp_seconds Unix time of the last successful homelab-backup.sh run."
           echo "# TYPE homelab_backup_last_success_timestamp_seconds gauge"
           echo "homelab_backup_last_success_timestamp_seconds ${success_ts}"
+          echo "# HELP homelab_backup_integrity_check_failed 1 while a restic check of the repository has failed and not been cleared (#301)."
+          echo "# TYPE homelab_backup_integrity_check_failed gauge"
+          if [ -e "$CHECK_FAILED_MARKER" ]; then
+            echo "homelab_backup_integrity_check_failed 1"
+          else
+            echo "homelab_backup_integrity_check_failed 0"
+          fi
         } >"$tmp_metrics"
         chmod 0644 "$tmp_metrics"
         mv "$tmp_metrics" "$METRICS_FILE"
@@ -166,6 +173,10 @@
 
       export RESTIC_PASSWORD_FILE=/etc/restic-password
       REPO="{{ storage_restic_repo }}"
+      # Sticky integrity signal (#301): created when a restic check fails, removed only by the
+      # operator after a full `restic check --read-data` passes (DEPLOYMENT.md "Backup (Restic)").
+      CHECK_FAILED_MARKER="{{ storage_backup_dir }}/restic-check-failed"
+      CHECK_SUBSET_DAYS={{ storage_restic_check_subset_days | int }}
 
       logger -t "homelab-backup" "Backup gestartet"
 
@@ -216,12 +227,49 @@
       fi
 
       restic backup --repo "${REPO}" {{ storage_backup_paths | join(' ') }}
+      # The plaintext datastore copy is in the repository now; do not keep it on disk while
+      # forget/prune and the integrity check run (the EXIT trap removes it on every other path).
+      rm -f "$COPY"
 
       restic forget --repo "${REPO}" \
         --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
 
+      # Recurring integrity check (#301): read back and verify one of CHECK_SUBSET_DAYS slices of
+      # the pack files every night, so every pack is read, decrypted and hash-checked once per
+      # cycle. A failure does not fail the backup (the snapshot above is taken); it sets the
+      # sticky marker that homelab_backup_integrity_check_failed reports.
+      if [ "$CHECK_SUBSET_DAYS" -gt 0 ]; then
+        slice=$(( ($(date +%-j) - 1) % CHECK_SUBSET_DAYS + 1 ))
+        if restic check --repo "${REPO}" --read-data-subset="${slice}/${CHECK_SUBSET_DAYS}"; then
+          logger -t "homelab-backup" "restic check ok (subset ${slice}/${CHECK_SUBSET_DAYS})"
+        else
+          touch "$CHECK_FAILED_MARKER"
+          logger -p user.err -t "homelab-backup" "restic check FAILED (subset ${slice}/${CHECK_SUBSET_DAYS}) — run a full check --read-data"
+        fi
+      fi
+
       logger -t "homelab-backup" "Backup abgeschlossen"
   when: storage_run_restic_backup
+
+# Off-node freshness marker (#301): the operator's Mac scripts (scripts/backup-app-data.sh,
+# scripts/copy-restic-repo.sh) call this helper over SSH after a complete run; it writes
+# homelab-backup-offnode.prom into the textfile collector directory.
+- name: Install the off-node backup marker helper (/usr/local/bin/homelab-backup-mark)
+  ansible.builtin.template:
+    src: homelab-backup-mark.sh.j2
+    dest: /usr/local/bin/homelab-backup-mark
+    owner: root
+    group: root
+    mode: "0755"
+  when: storage_offnode_marker_enabled
+  notify: Re-render the off-node backup metrics
+
+# First install only: both kinds read 0 ("never") until the first marked run.
+- name: Create the off-node backup metrics file
+  ansible.builtin.command:
+    cmd: /usr/local/bin/homelab-backup-mark --render
+    creates: "{{ storage_textfile_collector_dir }}/homelab-backup-offnode.prom"
+  when: storage_offnode_marker_enabled
 
 - name: Restic Backup Cron-Job anlegen (täglich 03:00)
   ansible.builtin.cron:

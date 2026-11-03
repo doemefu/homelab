@@ -1,0 +1,7 @@
+---
+# A changed helper (format or HELP text) re-renders the metrics file at once instead of at the
+# next marked run, which can be weeks away.
+- name: Re-render the off-node backup metrics
+  ansible.builtin.command:
+    cmd: /usr/local/bin/homelab-backup-mark --render
+  changed_when: true

@@ -15,9 +15,11 @@
   roles:
     - role: hardening
 
+# Tag storage rolls the backup role out alone: --tags storage (#301).
 - name: Storage — Restic, Backup-Verzeichnisse, externer Mount (pi5)
   hosts: all
   become: true
+  tags: [storage]
   roles:
     - role: storage
 
