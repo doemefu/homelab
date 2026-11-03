@@ -34,6 +34,7 @@ Follow this loop for **every change** to this repository:
 | Longhorn recurring snapshot per-volume exclusions (PVC labels) | the playbook owning the PVC — today `infra/playbooks/41_monitoring.yml` (Prometheus PVC) | `41_monitoring.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
 | App-data backup script (components, retention, verification) | `scripts/backup-app-data.sh` | none (run the script) |
+| restic repository copy script (copy, verification, retention) | `scripts/copy-restic-repo.sh` | none (run the script; `--dry-run` changes nothing) |
 | cert-manager / TLS | `infra/playbooks/40_platform.yml`, `cluster/values/cert-manager.yaml` | `40_platform.yml` |
 | Cloudflare Tunnel | `infra/playbooks/40_platform.yml`, `cluster/values/cloudflared.yaml` | `40_platform.yml` |
 | Cloudflare Tunnel ingress list | `infra/playbooks/40_platform.yml` (`cf_ingress_body` fact) | `40_platform.yml` |
