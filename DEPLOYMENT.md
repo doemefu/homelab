@@ -1089,7 +1089,8 @@ Design notes:
   Prometheus' memory limit went from 1Gi to 1536Mi in the same change (RSS peaked at 1009 Mi).
 
 Known blind spots: a Flux controller that is alive but has stopped reconciling leaves `Ready=True`
-(`WorkloadUnavailable` only catches a dead one); nothing outside the cluster watches the cluster.
+(`WorkloadUnavailable` catches a dead one, `WorkloadMissing` a deleted one); nothing outside the
+cluster watches the cluster.
 
 **Off-cluster dead-man's switch (owner step, not set up):** Alertmanager runs inside the cluster,
 so if raspi5 or the whole cluster dies, nothing reaches Discord. The chart's always-firing

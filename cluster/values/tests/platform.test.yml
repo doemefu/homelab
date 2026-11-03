@@ -115,9 +115,16 @@ tests:
         values: 0x10
       - series: kube_statefulset_replicas{namespace="apps", statefulset="postgresql"}
         values: 1x10
+      # StatefulSet deliberately scaled to 0 -> never fires
       - series: kube_statefulset_status_replicas_ready{namespace="apps", statefulset="influxdb2"}
-        values: 1x10
+        values: 0x10
       - series: kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}
+        values: 0x10
+      # platform namespace is in scope (cloudflared = the only public ingress)
+      - series: kube_deployment_status_replicas_available{namespace="platform",
+          deployment="cloudflared-cloudflare-tunnel-remote"}
+        values: 0x10
+      - series: kube_deployment_spec_replicas{namespace="platform", deployment="cloudflared-cloudflare-tunnel-remote"}
         values: 1x10
     alert_rule_test:
       - eval_time: 4m
@@ -140,6 +147,18 @@ tests:
                 runbook in DEPLOYMENT.md "Platform alerting (#284)".
           - exp_labels:
               severity: warning
+              namespace: platform
+              deployment: cloudflared-cloudflare-tunnel-remote
+            exp_annotations:
+              summary: "platform/cloudflared-cloudflare-tunnel-remote has no available replica"
+              description: >-
+                Deployment platform/cloudflared-cloudflare-tunnel-remote has had 0 available replicas for 5 minutes
+                although it should run at least one. Check `kubectl -n platform get pods` and
+                `kubectl -n platform describe deployment cloudflared-cloudflare-tunnel-remote`. A Recreate-strategy
+                upgrade with a slow image pull (open-webui, n8n) can trigger this briefly;
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
               namespace: apps
               statefulset: postgresql
             exp_annotations:
@@ -152,8 +171,8 @@ tests:
                 runbook in DEPLOYMENT.md "Platform alerting (#284)".
 
   # --- WorkloadMissing ---
-  # kube-state-metrics up, auth-service and postgresql gone -> one alert each (guard applies to the
-  # whole or-chain).
+  # kube-state-metrics up; auth-service, cloudflared, postgresql and image-automation-controller gone
+  # -> one alert each (the guard applies to the whole or-chain).
   - interval: 1m
     input_series:
       - series: up{job="kube-state-metrics"}
@@ -174,9 +193,17 @@ tests:
         values: 1x20
       - series: kube_deployment_spec_replicas{namespace="apps", deployment="mosquitto"}
         values: 1x20
-      - series: kube_deployment_spec_replicas{namespace="platform", deployment="cloudflared-cloudflare-tunnel-remote"}
-        values: 1x20
       - series: kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="source-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="kustomize-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="helm-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="notification-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="image-reflector-controller"}
         values: 1x20
     alert_rule_test:
       - eval_time: 10m
@@ -194,6 +221,28 @@ tests:
               description: >-
                 kube-state-metrics reports no Deployment apps/auth-service for 15 minutes. Check
                 the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
+                re-run the owning playbook) and whether the name changed in its repo; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: platform
+              deployment: cloudflared-cloudflare-tunnel-remote
+            exp_annotations:
+              summary: "Workload platform/cloudflared-cloudflare-tunnel-remote no longer exists"
+              description: >-
+                kube-state-metrics reports no Deployment platform/cloudflared-cloudflare-tunnel-remote for 15 minutes.
+                Check the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
+                re-run the owning playbook) and whether the name changed in its repo; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: flux-system
+              deployment: image-automation-controller
+            exp_annotations:
+              summary: "Workload flux-system/image-automation-controller no longer exists"
+              description: >-
+                kube-state-metrics reports no Deployment flux-system/image-automation-controller for 15 minutes.
+                Check the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
                 re-run the owning playbook) and whether the name changed in its repo; runbook in
                 DEPLOYMENT.md "Platform alerting (#284)".
           - exp_labels:
@@ -267,6 +316,29 @@ tests:
       - eval_time: 30m
         alertname: CertManagerDown
         exp_alerts: []
+  # target scraped but failing -> fires with the target's labels
+  - interval: 1m
+    input_series:
+      - series: up{job="cert-manager", instance="10.42.0.9:9402"}
+        values: 0x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CertManagerDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: CertManagerDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cert-manager
+              instance: 10.42.0.9:9402
+            exp_annotations:
+              summary: "cert-manager is not being scraped"
+              description: >-
+                Prometheus has no successful scrape of the cert-manager controller for 15 minutes,
+                so the certificate alerts are blind. Check `kubectl -n platform get pods` and the
+                ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
+  # no target at all -> the absent() branch fires
   - interval: 1m
     input_series:
       - series: up{job="other"}

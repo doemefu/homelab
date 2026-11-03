@@ -571,8 +571,9 @@ additionalPrometheusRulesMap:
                 {{ $labels.statefulset }}{{ end }}`. A Recreate-strategy upgrade with a slow image pull (open-webui, n8n) can trigger
                 this briefly; runbook in DEPLOYMENT.md "Platform alerting (#284)".
           # The workload object itself is gone (deleted, renamed in its repo, pruned by Flux), so the
-          # rule above has no series. Explicit list: the names are a contract with the app repos and
-          # the playbooks (INTERFACES.md §9). Parenthesised or-chain: `and` binds tighter than `or`,
+          # rule above has no series. Explicit list: the names are a contract with the app repos, the
+          # playbooks and the Flux bundle (INTERFACES.md §9). The Flux controllers are listed because a
+          # deleted controller would otherwise leave every gotk_resource_info frozen at Ready=True. Parenthesised or-chain: `and` binds tighter than `or`,
           # and the KSM-up guard must cover every branch (the rollout of KSM itself included).
           - alert: WorkloadMissing
             expr: >-
@@ -587,7 +588,13 @@ additionalPrometheusRulesMap:
               or absent(kube_deployment_spec_replicas{namespace="apps", deployment="mosquitto"})
               or absent(kube_deployment_spec_replicas{namespace="platform", deployment="cloudflared-cloudflare-tunnel-remote"})
               or absent(kube_statefulset_replicas{namespace="apps", statefulset="postgresql"})
-              or absent(kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}))
+              or absent(kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"})
+              or absent(kube_deployment_spec_replicas{namespace="flux-system", deployment="source-controller"})
+              or absent(kube_deployment_spec_replicas{namespace="flux-system", deployment="kustomize-controller"})
+              or absent(kube_deployment_spec_replicas{namespace="flux-system", deployment="helm-controller"})
+              or absent(kube_deployment_spec_replicas{namespace="flux-system", deployment="notification-controller"})
+              or absent(kube_deployment_spec_replicas{namespace="flux-system", deployment="image-reflector-controller"})
+              or absent(kube_deployment_spec_replicas{namespace="flux-system", deployment="image-automation-controller"}))
               and on() (count(up{job="kube-state-metrics"} == 1) > 0)
             for: 15m
             labels:
@@ -746,7 +753,7 @@ prometheus-node-exporter:
 # kube-state-metrics subchart values (chart 5.29.0, KSM v2.14.0).
 # resources (#125): moved from the top-level `kubeStateMetrics:` key, which in chart 69.3.1 only
 # takes `enabled`, so KSM ran without requests/limits. Measured 7-day max before enforcing
-# (2026-11-03): 85 Mi, < 5m CPU. Memory limit 256Mi, not 128Mi: custom-resource-state makes KSM
+# (2026-11-03): 85 Mi, < 5m CPU, so the request is 128Mi. Memory limit 256Mi: custom-resource-state makes KSM
 # cache every CustomResourceDefinition in the cluster (large kube-prometheus-stack, Longhorn,
 # cert-manager and Flux CRDs). CPU limit 250m for scrape bursts (see prometheus-node-exporter).
 #
@@ -763,7 +770,7 @@ kube-state-metrics:
   resources:
     requests:
       cpu: 10m
-      memory: 64Mi
+      memory: 128Mi
     limits:
       cpu: 250m
       memory: 256Mi
