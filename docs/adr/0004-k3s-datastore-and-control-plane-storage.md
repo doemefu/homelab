@@ -218,4 +218,16 @@ If a criterion trips while raspi5 is still on SD, D1 comes first, and B is evalu
 ## Results note: k3s patch hop (2026-11-03 overnight run)
 
 - **Pre-flight (read-only, 2026-11-02 23:51 CET):** cluster healthy; kine 2,621 rows, compaction lag 1,164 revisions (`max_id − compact_rev`), `state.db` 74 MB. The online compactor is keeping up on v0.13.9 right now, which matches the reading that the bug needs a trigger.
-- **Hop 1:** *pending.* The overnight run's k3s upgrade work package will report whether hop 1 was prepared or applied, and the first compaction readings after it.
+- **Hop 1 (M1) is merged, not yet rolled out.**
+  - PR #304 (merged 2026-11-03 08:37 UTC) pins `v1.32.13+k3s1` with sha256-verified binaries (#158) and the Traefik chart 39 key move. It also updates the kine paragraphs in `DEPLOYMENT.md`: `--compact-interval=0s`, and compaction driven by the apiserver's `--etcd-compaction-interval`. That covers M5.
+  - The rollout is an owner step, using the owner runbook from the overnight run (local, not in git).
+  - An independent SRE review rated it **GO WITH CHANGES, on the LAN only**. Off-LAN, steps 2–8 are NO-GO as written: the runbook's gates assume LAN addresses, the interactive offline compaction is fragile over an unstable link, and nothing can recover from a lockout.
+- **Source facts the SRE review confirmed (kine v0.14.12):**
+  - The apiserver-driven path logs `COMPACT compacted` and retries every interval, so it does not stall for good. This is the kine#414 fix this ADR relies on.
+  - It adds a key `compact_rev_key_apiserver`, which is harmless on a rollback to v1.32.2.
+  - The first apiserver-driven compaction comes about 10 min after an apiserver start.
+- **Post-rollout check (exit-criteria input):**
+  - `journalctl -u k3s | grep -c 'Compact failed'` = 0.
+  - `compact_rev` read twice, 10 min apart (`mode=ro`), must advance.
+  - After 24 h, the kine row count must be below 10 k.
+  - Record these readings here, or in #129, when the owner has run the hop.
