@@ -238,14 +238,18 @@
             name: traefik
             namespace: kube-system
           spec:
+            # Traefik chart 39 (bundled since k3s v1.32.13+k3s1) moved the redirect under
+            # ports.web.http and rejects unknown keys in ports.*; chart 34 (k3s v1.32.2)
+            # read ports.web.redirections instead.
             valuesContent: |
               ports:
                 web:
-                  redirections:
-                    entryPoint:
-                      to: websecure
-                      scheme: https
-                      permanent: true
+                  http:
+                    redirections:
+                      entryPoint:
+                        to: websecure
+                        scheme: https
+                        permanent: true
                 metrics:
                   port: 9101
                   exposedPort: 9101
