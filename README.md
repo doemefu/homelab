@@ -80,7 +80,7 @@ directly to the backing Service per the rules in 40_platform.yml.
   [DEPLOYMENT.md § data-service NM-1](DEPLOYMENT.md#data-service-nm-1-cloudflare-keys-scrape-and-alerts)
 
 ### External Access
-- **Tunnel Provider**: Cloudflare Tunnel (cloudflared v0.1.2 helm chart)
+- **Tunnel Provider**: Cloudflare Tunnel (cloudflared v0.1.2 helm chart), 2 replicas on different nodes with a PodDisruptionBudget (#322)
 - **DNS**: Cloudflare-managed domains
 
 ### Application Infrastructure (Shared Services in `apps` namespace)

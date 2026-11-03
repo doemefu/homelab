@@ -350,20 +350,13 @@ Reboots (z.B. nach Kernel-Updates) sind manuell — erfordern drain → reboot �
 
 ---
 
-### Cloudflare Access Policy für SSH (Zero Trust)
+### Cloudflare Access (Zero Trust)
 
-**Aktuell:** SSH via Cloudflare Tunnel ist eingerichtet (`ssh://` Protokoll + `cloudflared access ssh` ProxyCommand).
-Schutz: Cloudflare Tunnel-Token + SSH Key Auth.
-
-**Ziel post-M5:** Cloudflare Zero Trust Access Policy als zweite Authentifizierungsschicht:
-- Nur autorisierte E-Mail-Adressen / Identity Provider erhalten Zugang
-- Policy über Cloudflare Dashboard oder Terraform (cloudflare/cloudflare Provider) automatisiert
-- Kurzlebige SSH-Zertifikate (Cloudflare-signiert) statt statischer Keys möglich
-
-**Minimal-Umsetzung:**
-1. Zero Trust → Access → Applications → SSH-App für `ssh.furchert.ch` anlegen
-2. Policy: Email `*@furchert.ch` oder spezifische Adresse
-3. `cloudflare_access_application` Terraform-Resource für Automatisierung
+Done for `ssh.furchert.ch`: an Access application sits in front of the SSH proxy. The owner runbook for
+`grafana.furchert.ch` and `n8n.furchert.ch` is DEPLOYMENT.md "Cloudflare Access for grafana, n8n and ssh
+(#121)": an owner-only One-time PIN policy, plus a bypass for the one Telegram webhook path. Codifying the
+applications (an API token with the Access scope) is a follow-up. Short-lived Cloudflare-signed SSH
+certificates remain an option.
 
 ### Automatisiertes Update-Skript mit Integrationstests + Rollback
 

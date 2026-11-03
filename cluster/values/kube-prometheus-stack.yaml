@@ -83,6 +83,7 @@ defaultRules:
 #   homelab-netmon-egress  NM-2 coroot-node-agent rules (PR #133)
 #   homelab-backups        backup alerts (PR #109)
 #   homelab-platform       Flux, cert-manager and workload availability alerts (#284)
+#   homelab-mcp-hub        mcp-hub account status and scrape alerts (#178, docs/080 §7.4)
 # ⚠️ Each of those PRs adds its own top-level additionalPrometheusRulesMap key. Git can
 # merge two such blocks without any conflict (it did for #109 + #131), leaving a
 # duplicate YAML key that Helm resolves by silently dropping one map. CI's yamllint
@@ -396,6 +397,44 @@ additionalPrometheusRulesMap:
                 unit lacks --k3s-state-db (re-run 10_base.yml --tags netmon_node), or node-exporter
                 on raspi5 is not scraped. Runbook in DEPLOYMENT.md
                 "k3s datastore (kine/SQLite) maintenance".
+          # Stall detector for the kine compactor (homelab#129), hours before K3sDatastoreLarge. The
+          # gauge (same script, raspi5 only) is MAX(id) - compact_rev_key from a read-only SQLite
+          # read. Healthy: about 1-3k (kine keeps 1000 revisions, plus 5-10 min of churn between
+          # compactions). A stalled compactor falls behind by the full write churn (~200 revisions/min
+          # before the Flux lease tuning), so 50k is passed about 4-6 h into a stall; a working one
+          # clears 50k in a single run, so a sustained 50k cannot be a catch-up. max_over_time keeps
+          # one skipped script run (missing series) from resetting the 2 h.
+          - alert: K3sKineCompactionLagging
+            expr: max_over_time(homelab_k3s_kine_compaction_lag_revisions[10m]) > 50000
+            for: 2h
+            labels:
+              severity: warning
+            annotations:
+              summary: "kine compaction on {{ $labels.node }} is {{ $value | humanize }} revisions behind"
+              description: >-
+                The k3s kine datastore on {{ $labels.node }} has been more than 50k revisions behind its
+                compaction marker for 2h; the online compactor has probably stalled (homelab#129). Check
+                the compaction lag and the Slow SQL rate with the read-only diagnostics, then plan the
+                offline compaction; runbook in DEPLOYMENT.md "k3s datastore (kine/SQLite) maintenance".
+          # The size gauge is present but the lag is not: the script runs, but the SQLite read fails
+          # (k3s stopped cleanly, so no -wal/-shm to open read-only; a locked or damaged database;
+          # an old script without the gauge). Both absent is K3sDatastoreSizeMissing's job.
+          # Rollout order: 10_base.yml --tags netmon_node before 41_monitoring.yml, or this fires after 1h.
+          - alert: K3sKineCompactionLagMissing
+            expr: >-
+              absent(homelab_k3s_kine_compaction_lag_revisions{node="raspi5"})
+              and on() (count(homelab_k3s_state_db_bytes{node="raspi5"}) > 0)
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "kine compaction lag metric missing on raspi5"
+              description: >-
+                homelab_k3s_kine_compaction_lag_revisions{node="raspi5"} has been absent for 1h while the
+                datastore size is still reported, so K3sKineCompactionLagging cannot fire. See
+                `journalctl -u homelab-netmon -n 20` on raspi5 for "k3s kine lag skipped" (k3s stopped,
+                SQLite error), or re-run 10_base.yml --tags netmon_node if the script predates the gauge.
+                Runbook in DEPLOYMENT.md "k3s datastore (kine/SQLite) maintenance".
 
   # --- Network monitoring: coroot-node-agent egress rules (NM-2, #118) ---
   # Contract: docs/060-network-monitoring.md §6.4. Own map key so the NM-1 (`homelab-netmon`),
@@ -656,6 +695,50 @@ additionalPrometheusRulesMap:
                 so the certificate alerts are blind. Check `kubectl -n platform get pods` and the
                 ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
 
+  # --- mcp-hub (#178): expressions are the contract of docs/080-mcp-hub.md §7.4 (rev 4.17), copied
+  # verbatim (line-wrapped only); the scrape is the ServiceMonitor monitoring/mcp-hub in 41_monitoring.yml (job `mcp-hub`).
+  # Tests: cluster/values/tests/mcp-hub.test.yml. Annotations name only account/capability (§9.7: no
+  # addresses or content), and McpHubDown's use no label that only one of its branches carries.
+  homelab-mcp-hub:
+    groups:
+      - name: homelab-mcp-hub
+        rules:
+          # The status is one-hot per account x capability and lives in memory only: a pod restart
+          # resets it to `unknown` and restarts the 30 min.
+          - alert: McpHubAccountAuthExpired
+            expr: max by (account, capability) (mcp_hub_account_status{status="auth_expired"}) == 1
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "mcp-hub account {{ $labels.account }} ({{ $labels.capability }}) needs re-authentication"
+              description: >-
+                mcp-hub has reported auth_expired for account {{ $labels.account }}, capability {{ $labels.capability }},
+                for 30 minutes, so the account is missing from the tools and the briefing. Graph accounts: re-login with
+                `mcp-hub login <account>` (DEPLOYMENT.md "mcp-hub token store and the Outlook account (#171
+                onboarding)"). App-password accounts: replace the app password in SOPS and run playbook 59
+                (DEPLOYMENT.md "mcp-hub (Flux, #170 onboarding)", "mcp-hub: Gmail account (#172)"). Spec:
+                docs/080-mcp-hub.md §7.3.
+          # Branch 1: target exists, scrape fails. Branch 2: no target at all (Service or ServiceMonitor
+          # broken) while the Deployment wants a replica; a deliberate scale to 0 (kill switch L3) stays
+          # silent. While WorkloadUnavailable fires for the hub, 41_monitoring.yml inhibits this alert and
+          # the chart's TargetDown for job mcp-hub, and this alert in turn mutes TargetDown for the job
+          # when only the scrape fails (one message per outage).
+          - alert: McpHubDown
+            expr: >-
+              up{job="mcp-hub"} == 0 or (absent(up{job="mcp-hub"}) and on()
+              (max(kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"}) > 0))
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "mcp-hub is not being scraped"
+              description: >-
+                Prometheus has had no successful scrape of mcp-hub (Service port internal, 8084, /metrics) for
+                10 minutes while the Deployment wants a replica, so McpHubAccountAuthExpired is blind. Check
+                `kubectl -n apps get pods -l app=mcp-hub`, `kubectl -n monitoring get servicemonitor mcp-hub` and
+                any NetworkPolicy in apps that selects the hub; runbook in DEPLOYMENT.md "mcp-hub alerts (#178)".
+
 prometheus:
   prometheusSpec:
     # arm64-only is intentional, not a resource-sizing constraint:
@@ -767,10 +850,13 @@ prometheus-node-exporter:
 # gotk_reconcile_condition metric; used by FluxReconciliationFailed. Chosen over a PodMonitor for
 # the six Flux controllers because it adds one series per Flux object (~28) instead of thousands,
 # on a Prometheus near its memory limit. The ServiceMonitor uses honorLabels, so the `namespace`
-# label is the Flux object's. All kinds share ONE metric list via the &flux_object_metrics anchor:
-# KSM only collapses duplicate HELP/TYPE lines when they are identical, so every kind must use the
-# same name and help text. Adding a Flux kind = one more groupVersionKind entry plus its plural in
-# rbac.extraRules (and in FluxResourceMetricsMissing if it is in use).
+# label is the Flux object's. Every kind needs its OWN help text: since KSM v2.12, families that
+# share a name AND an identical HELP line are de-duplicated across kinds and the later kinds' samples
+# are dropped (kubernetes/kube-state-metrics#2366; the first rollout of #284 exported only 3 of 5
+# kinds in use). The upstream flux2-monitoring-example uses one help text per kind for this reason.
+# The `each` and `labelsFromPath` blocks are shared via YAML anchors. Adding a Flux kind = one more
+# entry with its own help text, its plural in rbac.extraRules, and FluxResourceMetricsMissing if it
+# is in use.
 kube-state-metrics:
   resources:
     requests:
@@ -803,39 +889,67 @@ kube-state-metrics:
         resources:
           - groupVersionKind: {group: kustomize.toolkit.fluxcd.io, version: v1, kind: Kustomization}
             metricNamePrefix: gotk
-            metrics: &flux_object_metrics
+            metrics:
               - name: resource_info
-                help: The current state of a Flux object.
-                each:
+                help: The current state of a Flux Kustomization resource.
+                each: &flux_resource_info_each
                   type: Info
                   info:
                     labelsFromPath:
                       name: [metadata, name]
-                labelsFromPath:
+                labelsFromPath: &flux_resource_info_labels
                   namespace: [metadata, namespace]
                   ready: [status, conditions, "[type=Ready]", status]
                   suspended: [spec, suspend]
           - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: GitRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux GitRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: OCIRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux OCIRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: HelmRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux HelmRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: helm.toolkit.fluxcd.io, version: v2, kind: HelmRelease}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux HelmRelease resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImageRepository}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux ImageRepository resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImagePolicy}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux ImagePolicy resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
           - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImageUpdateAutomation}
             metricNamePrefix: gotk
-            metrics: *flux_object_metrics
+            metrics:
+              - name: resource_info
+                help: The current state of a Flux ImageUpdateAutomation resource.
+                each: *flux_resource_info_each
+                labelsFromPath: *flux_resource_info_labels
 
 prometheusOperator:
   resources:
