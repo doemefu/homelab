@@ -1193,7 +1193,10 @@ Design notes:
   each Flux object into `gotk_resource_info{namespace,name,customresource_kind,ready,suspended}`
   (about 28 series). A PodMonitor on the six controllers would add thousands of series to a
   Prometheus that was already near its memory limit. Adding a Flux kind means one more
-  `groupVersionKind` entry and its plural in `kube-state-metrics.rbac.extraRules`.
+  `groupVersionKind` entry **with its own help text** and its plural in
+  `kube-state-metrics.rbac.extraRules`. kube-state-metrics (v2.12+) de-duplicates same-named
+  families with an identical HELP line and drops the later kinds' samples (kube-state-metrics#2366);
+  the first rollout exported only 3 of the 5 kinds in use and `FluxResourceMetricsMissing` fired.
 - **cert-manager** is scraped by an inline ServiceMonitor in `41_monitoring.yml`, not by the chart's
   `prometheus.servicemonitor.enabled`, which would need a `40_platform.yml` run. No Certificate exists
   today (public TLS terminates at Cloudflare), so the certificate rules stay dormant until one does.
