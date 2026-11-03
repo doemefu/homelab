@@ -690,10 +690,11 @@ These are `path` rules in `cf_ingress_body`, placed before the host's general ru
   `http://localhost:18080/swagger-ui.html`.
 
 A `40_platform.yml` run replaces the whole tunnel configuration with `cf_ingress_body` from the
-checkout. `--check` previews neither that PUT (the task is skipped in check mode and has `no_log`) nor
-the cloudflared restart. So run it from an up-to-date `main` on the home network: the restart drops an
-off-LAN SSH forward. Before the run, compare the public hostnames in the Cloudflare dashboard (Zero
-Trust → Networks → Tunnels → the tunnel → Public Hostname) with `cf_ingress_body`.
+checkout. `--check` skips that PUT (the task has `no_log`), so it never shows the new ingress list; it
+only reports the cloudflared restart task as changed when the list differs. Run it from an up-to-date
+`main` on the home network: the restart drops an off-LAN SSH forward. Before the run, compare the
+tunnel's published application routes in the Cloudflare dashboard (Networking → Tunnels → the tunnel
+→ Routes; formerly "Public Hostname") with `cf_ingress_body`.
 
 #### Restart Tunnel Pod
 
