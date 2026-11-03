@@ -171,8 +171,10 @@ Home Assistant) between nodes for no benefit.
    (`kubectl -n platform get pods -l pod=cloudflared -o wide`, see "Cloudflare Tunnel → Replicas and
    placement"). That last check is what makes a node restart safe off-LAN: `ssh.furchert.ch` runs
    through cloudflared, and while k3s on a node is down nothing restarts a crashed pod there. Off-LAN,
-   use the SSH jump config ("Off-LAN kubectl / Ansible Access") and judge every step on the node itself
-   (`sudo k3s kubectl …`, `systemctl is-active k3s`), not through the port-forward.
+   use the SSH jump config ("Off-LAN kubectl / Ansible Access") and judge every step on the nodes, not
+   through the port-forward: `sudo k3s kubectl …` on raspi5 (the agents have no admin kubeconfig), and
+   `systemctl is-active k3s` (raspi5) or `systemctl is-active k3s-agent` (agents) on the node being
+   upgraded.
 3. Keep the previous binary on every node before touching it:
    `ssh ansible@<ip> 'sudo cp -a /usr/local/bin/k3s /usr/local/bin/k3s-<old-version>'`.
 4. raspi5 first, then the agents one at a time (raspi4, mba1, mba2), each with a `--check` run first.
@@ -811,12 +813,14 @@ supervised replica:
   **third schedulable node** for the surge pod. With two nodes down the rollout waits (old pods keep
   serving) and the Helm task's 3 min wait fails the playbook run.
 
-Apply only the cloudflared part (no tunnel ingress PUT, no restart task, no Traefik values; it is safe
-before a k3s upgrade). Off-LAN, add the SSH jump config and the tunnel kubeconfig
-(`~/.kube/tunnel.yaml`, see "Off-LAN kubectl / Ansible Access"):
+Apply only the cloudflared part: the namespace, the Helm release, the PDB and the patch. No tunnel
+ingress PUT, no restart task, no Traefik values, so it is safe before a k3s upgrade. Off-LAN, add the
+SSH jump config and the tunnel kubeconfig (`~/.kube/tunnel.yaml`, see "Off-LAN kubectl / Ansible
+Access"). Prerequisite for the diff checks below: the helm-diff plugin (`helm plugin list` shows `diff`
+3.4.1 or newer). Without it the helm module prints no diff and always reports the release as changed.
 
 ```bash
-ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --list-tasks   # 5 tasks, ending with the patch
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --list-tasks   # 6 tasks, ending with the patch
 ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff
 ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared
 # off-LAN: ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=60s" \
@@ -842,14 +846,20 @@ kubectl -n platform get pdb cloudflared                   # ALLOWED DISRUPTIONS 
 ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff   # again: changed=0
 ```
 
-Rollback (the patched fields survive a plain revert, so remove them explicitly):
+Rollback. The patched fields survive Helm and a plain revert, so remove them explicitly:
 
 ```bash
 kubectl -n platform rollout undo deploy/cloudflared-cloudflare-tunnel-remote   # abort a stuck rollout only
-kubectl -n platform patch deploy cloudflared-cloudflare-tunnel-remote --type json -p '[{"op":"remove","path":"/spec/template/spec/affinity"},{"op":"remove","path":"/spec/template/spec/containers/0/readinessProbe"},{"op":"remove","path":"/spec/minReadySeconds"}]'
+# strategic merge with nulls: works with and without a preceding rollout undo
+kubectl -n platform patch deploy cloudflared-cloudflare-tunnel-remote --type strategic -p '{"spec":{"minReadySeconds":null,"template":{"spec":{"affinity":null,"containers":[{"name":"cloudflared","readinessProbe":null}]}}}}'
 kubectl -n platform delete pdb cloudflared
-# then revert the #322 commit and run the --tags cloudflared commands above (back to 1 replica)
+kubectl -n platform scale deploy/cloudflared-cloudflare-tunnel-remote --replicas=1
 ```
+
+Then, before the next playbook-40 run, open a PR that sets `replicaCount: 1` and removes the PDB and patch
+tasks but keeps the `tags: [cloudflared]` lines. A plain `git revert` of #322 also drops the tags, so a
+`--tags cloudflared` run would select nothing, and a full run would re-apply the ingress, the restart and
+the Traefik values.
 
 #### Add New Public Endpoint
 

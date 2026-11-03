@@ -36,6 +36,7 @@
               pod-security.kubernetes.io/audit: baseline
               pod-security.kubernetes.io/audit-version: v1.32
       delegate_to: localhost
+      tags: [cloudflared]
 
     # --- cert-manager ---
     - name: Jetstack Helm Repo hinzufügen
@@ -73,6 +74,7 @@
       ansible.builtin.pause:
         seconds: 15
 
+    # diff: false — a --diff run would otherwise print the old and new token if the live Secret drifted.
     - name: Cloudflare API Token Secret anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -86,6 +88,7 @@
           stringData:
             api-token: "{{ cloudflare_api_token }}"
       delegate_to: localhost
+      diff: false
 
     - name: ClusterIssuer letsencrypt-staging anlegen
       kubernetes.core.k8s:
@@ -132,8 +135,9 @@
       delegate_to: localhost
 
     # --- cloudflared ---
-    # Tag cloudflared (#322): `--tags cloudflared` deploys the two replicas and their placement without the tunnel
-    # ingress PUT, the restart task or the Traefik values (DEPLOYMENT.md "Cloudflare Tunnel → Replicas and placement").
+    # Tag cloudflared (#322, also on the namespace and helm repo update tasks above): `--tags cloudflared` deploys the
+    # two replicas and their placement without the tunnel ingress PUT, the restart task or the Traefik values
+    # (DEPLOYMENT.md "Cloudflare Tunnel → Replicas and placement").
     # Never run this playbook with -v: the helm module's result includes the release values, i.e. the tunnel token.
     - name: Cloudflare Helm Repo hinzufügen
       kubernetes.core.helm_repository:
