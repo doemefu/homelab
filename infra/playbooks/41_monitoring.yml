@@ -162,6 +162,23 @@
                     - 'severity = info'
                   equal:
                     - 'namespace'
+                # #284: WorkloadUnavailable (homelab-platform rules) reports a fully down
+                # workload; the chart's replica-mismatch alerts for the same object would be a
+                # second Discord message for the same outage.
+                - source_matchers:
+                    - 'alertname = WorkloadUnavailable'
+                  target_matchers:
+                    - 'alertname = KubeDeploymentReplicasMismatch'
+                  equal:
+                    - 'namespace'
+                    - 'deployment'
+                - source_matchers:
+                    - 'alertname = WorkloadUnavailable'
+                  target_matchers:
+                    - 'alertname = KubeStatefulSetReplicasMismatch'
+                  equal:
+                    - 'namespace'
+                    - 'statefulset'
         wait: true
         wait_timeout: "20m"
       no_log: true
@@ -266,6 +283,38 @@
             selector:
               matchLabels:
                 app: data-service
+      delegate_to: localhost
+
+    # cert-manager (#284): controller metrics on the chart's Service port
+    # `tcp-prometheus-servicemonitor` (9402) in `platform`, for the CertManager* rules in
+    # cluster/values/kube-prometheus-stack.yaml (homelab-platform). Lives here rather than as the
+    # cert-manager chart's own prometheus.servicemonitor.enabled, which would need a 40_platform.yml
+    # run (cloudflared and the Cloudflare API in the same playbook) for a scrape config.
+    # honorLabels: the certificate metrics carry the Certificate's own `namespace`.
+    - name: Cert-manager ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: cert-manager
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: tcp-prometheus-servicemonitor
+                path: /metrics
+                interval: 60s
+                honorLabels: true
+            namespaceSelector:
+              matchNames:
+                - platform
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: cert-manager
+                app.kubernetes.io/component: controller
       delegate_to: localhost
 
     # --- coroot-node-agent (NM-2, #118; docs/060-network-monitoring.md §6) ---

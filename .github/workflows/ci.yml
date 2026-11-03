@@ -14,11 +14,11 @@ name: CI
 # opens a PR with the new SHA on a version bump — review and merge that PR rather than
 # hand-resolving (hand-resolving is only for sanity-checking an already-open Dependabot PR,
 # or a bump outside its weekly schedule): `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`
-# (dereference an annotated tag via `git/tags/<sha>` -> `object.sha`). Re-pinning the 4
+# (dereference an annotated tag via `git/tags/<sha>` -> `object.sha`). Re-pinning the 5
 # curl-downloaded binaries is fully manual — Dependabot doesn't track them at all — just
 # re-fetch the matching checksums file for the new version. This same convention applies to
-# `codeql.yml` in this directory (see its own header comment) and should be applied to any
-# future workflow file added here.
+# `codeql.yml` and `helm-chart-freshness.yml` in this directory (see their header comments)
+# and should be applied to any future workflow file added here.
 
 on:
   pull_request:
@@ -48,6 +48,7 @@ jobs:
       ansible: ${{ steps.filter.outputs.ansible }}
       cluster: ${{ steps.filter.outputs.cluster }}
       policy: ${{ steps.filter.outputs.policy }}
+      promrules: ${{ steps.filter.outputs.promrules }}
       yaml: ${{ steps.filter.outputs.yaml }}
       shell: ${{ steps.filter.outputs.shell }}
       workflows: ${{ steps.filter.outputs.workflows }}
@@ -67,8 +68,17 @@ jobs:
               - 'cluster/**'
               - '!cluster/**/*.sops.yml'
               - '!cluster/**/*.sops.yaml'
+              # The kubeconform gate validates against this file's k3s_version.
+              - 'infra/roles/k3s/defaults/main.yml'
+              - 'scripts/validate-manifests.sh'
+              - '.github/workflows/ci.yml'
             policy:
               - 'policy/**'
+            promrules:
+              - 'cluster/values/kube-prometheus-stack.yaml'
+              - 'cluster/values/tests/**'
+              - 'scripts/promtool-test-rules.sh'
+              - '.github/workflows/ci.yml'
             yaml:
               - '**/*.yml'
               - '**/*.yaml'
@@ -164,9 +174,12 @@ jobs:
         run: ansible-lint infra/
 
   # ---------------------------------------------------------------------------
-  # Kubernetes schema validation. Iterates the per-app overlays plus the plain
-  # monitoring manifests (cluster/monitoring/coroot-node-agent) — does NOT
-  # include cluster/flux-system/ (generated gotk bundle, huge and noisy).
+  # Kubernetes schema validation (scripts/validate-manifests.sh). Iterates the
+  # per-app overlays plus the plain monitoring manifests
+  # (cluster/monitoring/coroot-node-agent) — does NOT include
+  # cluster/flux-system/ (generated gotk bundle, huge and noisy). Blocking for
+  # the live Kubernetes version (k3s_version in infra/roles/k3s/defaults/main.yml);
+  # report-only (warnings + job summary) for the next two minor versions (#263).
   # ---------------------------------------------------------------------------
   validate-kubernetes-manifests:
     name: Validate Kubernetes Manifests
@@ -200,29 +213,48 @@ jobs:
           echo "${KUBECONFORM_SHA256}  ${asset}" | sha256sum -c -
           sudo tar -xzf "${asset}" -C /usr/local/bin kubeconform
           rm -f "${asset}"
-      - name: Validate each per-app overlay
+      - name: Validate each overlay (live Kubernetes version blocking, next minors report-only)
+        env:
+          KUBECONFORM_CACHE: ${{ runner.temp }}/kubeconform-cache
+        run: scripts/validate-manifests.sh
+
+  # ---------------------------------------------------------------------------
+  # promtool check + unit tests for the custom PrometheusRules in
+  # cluster/values/kube-prometheus-stack.yaml (scripts/promtool-test-rules.sh,
+  # tests in cluster/values/tests/). PROMETHEUS_VERSION follows the Prometheus
+  # version that the pinned kube-prometheus-stack chart deploys (69.3.1 ->
+  # v3.1.0); bump both together (#141).
+  # ---------------------------------------------------------------------------
+  test-prometheus-rules:
+    name: Test Prometheus Rules
+    needs: detect-changes
+    if: needs.detect-changes.outputs.promrules == 'true'
+    runs-on: ubuntu-latest
+    env:
+      PROMETHEUS_VERSION: 3.1.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML (pinned)
+        run: pip install "pyyaml==6.0.3"
+      - name: Install promtool (pinned + checksum-verified)
+        env:
+          PROMETHEUS_SHA256: 9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c
         run: |
           set -euo pipefail
-          status=0
-          for d in cluster/apps/auth-service \
-                   cluster/apps/device-service \
-                   cluster/apps/data-service \
-                   cluster/apps/mcp-hub \
-                   cluster/apps/litellm \
-                   cluster/apps/n8n \
-                   cluster/apps/open-webui \
-                   cluster/monitoring/coroot-node-agent \
-                   cluster/apps; do
-            echo "::group::kubeconform $d"
-            if ! kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
-                  -summary -verbose \
-                  -schema-location default \
-                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; then
-              status=1
-            fi
-            echo "::endgroup::"
-          done
-          exit $status
+          asset="prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          curl -fsSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${asset}"
+          echo "${PROMETHEUS_SHA256}  ${asset}" | sha256sum -c -
+          sudo tar -xzf "${asset}" -C /usr/local/bin --strip-components=1 \
+            "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          rm -f "${asset}"
+          promtool --version
+      - name: Check and unit-test the rules
+        run: scripts/promtool-test-rules.sh
 
   # ---------------------------------------------------------------------------
   # Conftest/OPA policies that encode CLAUDE.md non-negotiables. Triggered by
@@ -271,6 +303,7 @@ jobs:
         # policy/kubernetes/README.md.
         run: conftest verify --policy policy/kubernetes/
       - name: Enforce policies against rendered manifests
+        # Directory list: keep in sync with scripts/validate-manifests.sh.
         run: |
           set -euo pipefail
           status=0
@@ -306,6 +339,7 @@ jobs:
       - lint-workflows
       - ansible-lint
       - validate-kubernetes-manifests
+      - test-prometheus-rules
       - enforce-cluster-policies
     runs-on: ubuntu-latest
     env:

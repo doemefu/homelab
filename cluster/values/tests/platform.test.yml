@@ -1,0 +1,380 @@
+# promtool unit tests for additionalPrometheusRulesMap.homelab-platform in
+# cluster/values/kube-prometheus-stack.yaml (#284): Flux, cert-manager, workload availability.
+# Run: scripts/promtool-test-rules.sh (CI: `Test Prometheus Rules`).
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # --- FluxReconciliationFailed ---
+  # Ready=False for 20 min fires after 15 min; Ready=Unknown in between does not reset `for`
+  # (the max by drops `ready`); a suspended object and a Ready one never fire.
+  - interval: 1m
+    input_series:
+      # KSM replaces the series when the condition changes: False until 7m, Unknown at 8-9m
+      # (a retry in progress), False again from 10m. `stale` = the series ends.
+      - series: gotk_resource_info{customresource_kind="Kustomization", namespace="flux-system", name="apps",
+          ready="False", suspended=""}
+        values: 1x7 stale _ 1x12
+      - series: gotk_resource_info{customresource_kind="Kustomization", namespace="flux-system", name="apps",
+          ready="Unknown", suspended=""}
+        values: _x8 1 1 stale
+      - series: gotk_resource_info{customresource_kind="GitRepository", namespace="flux-system", name="auth-service",
+          ready="False", suspended="true"}
+        values: 1x21
+      - series: gotk_resource_info{customresource_kind="GitRepository", namespace="flux-system", name="flux-system",
+          ready="True", suspended=""}
+        values: 1x21
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FluxReconciliationFailed
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FluxReconciliationFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              customresource_kind: Kustomization
+              namespace: flux-system
+              name: apps
+            exp_annotations:
+              summary: "Flux Kustomization flux-system/apps is not Ready"
+              description: >-
+                The Flux Kustomization flux-system/apps has not been Ready for 15 minutes, so
+                changes in git or new images are not being applied. Inspect it with
+                `flux get all -A` or `kubectl -n flux-system describe kustomization apps`;
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+
+  # --- FluxResourceMetricsMissing ---
+  # One kind's series vanish while kube-state-metrics is up -> fires for that kind only.
+  - interval: 1m
+    input_series:
+      - series: up{job="kube-state-metrics"}
+        values: 1x40
+      - series: gotk_resource_info{customresource_kind="Kustomization", namespace="flux-system", name="flux-system",
+          ready="True", suspended=""}
+        values: 1x40
+      - series: gotk_resource_info{customresource_kind="GitRepository", namespace="flux-system", name="flux-system",
+          ready="True", suspended=""}
+        values: 1x40
+      - series: gotk_resource_info{customresource_kind="ImagePolicy", namespace="flux-system", name="auth-service",
+          ready="True", suspended=""}
+        values: 1x40
+      - series: gotk_resource_info{customresource_kind="ImageUpdateAutomation", namespace="flux-system",
+          name="auth-service", ready="True", suspended=""}
+        values: 1x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: FluxResourceMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              customresource_kind: ImageRepository
+            exp_annotations:
+              summary: "kube-state-metrics exports no Flux ImageRepository objects"
+              description: >-
+                gotk_resource_info{customresource_kind="ImageRepository"} has been absent for 30 minutes
+                while kube-state-metrics is up, so FluxReconciliationFailed is blind for that kind.
+                Check the kube-state-metrics logs for custom-resource-state errors (RBAC
+                extraRules, a Flux API version that changed in a Flux upgrade); runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+  # kube-state-metrics down -> no FluxResourceMetricsMissing (that is TargetDown's job).
+  - interval: 1m
+    input_series:
+      - series: up{job="kube-state-metrics"}
+        values: 0x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: FluxResourceMetricsMissing
+        exp_alerts: []
+
+  # --- WorkloadUnavailable ---
+  - interval: 1m
+    input_series:
+      # down for 10 min -> fires after 5 min
+      - series: kube_deployment_status_replicas_available{namespace="apps", deployment="auth-service"}
+        values: 0x10
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="auth-service"}
+        values: 1x10
+      # deliberately scaled to 0 -> never fires
+      - series: kube_deployment_status_replicas_available{namespace="apps", deployment="n8n"}
+        values: 0x10
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="n8n"}
+        values: 0x10
+      # healthy
+      - series: kube_deployment_status_replicas_available{namespace="flux-system", deployment="helm-controller"}
+        values: 1x10
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="helm-controller"}
+        values: 1x10
+      # dead Flux controller -> fires (flux-system is in scope)
+      - series: kube_deployment_status_replicas_available{namespace="flux-system", deployment="kustomize-controller"}
+        values: 0x10
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="kustomize-controller"}
+        values: 1x10
+      # other namespace -> out of scope
+      - series: kube_deployment_status_replicas_available{namespace="monitoring", deployment="grafana"}
+        values: 0x10
+      - series: kube_deployment_spec_replicas{namespace="monitoring", deployment="grafana"}
+        values: 1x10
+      # StatefulSet with no ready replica
+      - series: kube_statefulset_status_replicas_ready{namespace="apps", statefulset="postgresql"}
+        values: 0x10
+      - series: kube_statefulset_replicas{namespace="apps", statefulset="postgresql"}
+        values: 1x10
+      # healthy StatefulSet
+      - series: kube_statefulset_status_replicas_ready{namespace="apps", statefulset="influxdb2"}
+        values: 1x10
+      - series: kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}
+        values: 1x10
+      # StatefulSet deliberately scaled to 0 -> never fires
+      - series: kube_statefulset_status_replicas_ready{namespace="apps", statefulset="scaled-to-zero"}
+        values: 0x10
+      - series: kube_statefulset_replicas{namespace="apps", statefulset="scaled-to-zero"}
+        values: 0x10
+      # platform namespace is in scope (cloudflared = the only public ingress)
+      - series: kube_deployment_status_replicas_available{namespace="platform",
+          deployment="cloudflared-cloudflare-tunnel-remote"}
+        values: 0x10
+      - series: kube_deployment_spec_replicas{namespace="platform", deployment="cloudflared-cloudflare-tunnel-remote"}
+        values: 1x10
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WorkloadUnavailable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WorkloadUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              deployment: auth-service
+            exp_annotations:
+              summary: "apps/auth-service has no available replica"
+              description: >-
+                Deployment apps/auth-service has had 0 available replicas for 5 minutes although it
+                should run at least one. Check `kubectl -n apps get pods` and
+                `kubectl -n apps describe deployment auth-service`. A Recreate-strategy
+                upgrade with a slow image pull (open-webui, n8n) can trigger this briefly;
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: flux-system
+              deployment: kustomize-controller
+            exp_annotations:
+              summary: "flux-system/kustomize-controller has no available replica"
+              description: >-
+                Deployment flux-system/kustomize-controller has had 0 available replicas for 5 minutes
+                although it should run at least one. Check `kubectl -n flux-system get pods` and
+                `kubectl -n flux-system describe deployment kustomize-controller`. A Recreate-strategy
+                upgrade with a slow image pull (open-webui, n8n) can trigger this briefly;
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: platform
+              deployment: cloudflared-cloudflare-tunnel-remote
+            exp_annotations:
+              summary: "platform/cloudflared-cloudflare-tunnel-remote has no available replica"
+              description: >-
+                Deployment platform/cloudflared-cloudflare-tunnel-remote has had 0 available replicas for 5 minutes
+                although it should run at least one. Check `kubectl -n platform get pods` and
+                `kubectl -n platform describe deployment cloudflared-cloudflare-tunnel-remote`. A Recreate-strategy
+                upgrade with a slow image pull (open-webui, n8n) can trigger this briefly;
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              statefulset: postgresql
+            exp_annotations:
+              summary: "apps/postgresql has no available replica"
+              description: >-
+                StatefulSet apps/postgresql has had 0 ready replicas for 5 minutes although it
+                should run at least one. Check `kubectl -n apps get pods` and
+                `kubectl -n apps describe statefulset postgresql`. A Recreate-strategy
+                upgrade with a slow image pull (open-webui, n8n) can trigger this briefly;
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+
+  # --- WorkloadMissing ---
+  # kube-state-metrics up; auth-service, cloudflared, postgresql and image-automation-controller gone
+  # -> one alert each (the guard applies to the whole or-chain).
+  - interval: 1m
+    input_series:
+      - series: up{job="kube-state-metrics"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="device-service"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="furchert-ch"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="data-service"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="litellm"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="n8n"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="open-webui"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="mosquitto"}
+        values: 1x20
+      - series: kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="source-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="kustomize-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="helm-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="notification-controller"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="image-reflector-controller"}
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WorkloadMissing
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: WorkloadMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              deployment: auth-service
+            exp_annotations:
+              summary: "Workload apps/auth-service no longer exists"
+              description: >-
+                kube-state-metrics reports no Deployment apps/auth-service for 15 minutes. Check
+                the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
+                re-run the owning playbook) and whether the name changed in its repo; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: platform
+              deployment: cloudflared-cloudflare-tunnel-remote
+            exp_annotations:
+              summary: "Workload platform/cloudflared-cloudflare-tunnel-remote no longer exists"
+              description: >-
+                kube-state-metrics reports no Deployment platform/cloudflared-cloudflare-tunnel-remote for 15 minutes.
+                Check the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
+                re-run the owning playbook) and whether the name changed in its repo; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: flux-system
+              deployment: image-automation-controller
+            exp_annotations:
+              summary: "Workload flux-system/image-automation-controller no longer exists"
+              description: >-
+                kube-state-metrics reports no Deployment flux-system/image-automation-controller for 15 minutes.
+                Check the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
+                re-run the owning playbook) and whether the name changed in its repo; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              statefulset: postgresql
+            exp_annotations:
+              summary: "Workload apps/postgresql no longer exists"
+              description: >-
+                kube-state-metrics reports no StatefulSet apps/postgresql for 15 minutes. Check
+                the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
+                re-run the owning playbook) and whether the name changed in its repo; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+  # kube-state-metrics down -> nothing fires (no series at all, guard false for every branch).
+  - interval: 1m
+    input_series:
+      - series: up{job="kube-state-metrics"}
+        values: 0x20
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WorkloadMissing
+        exp_alerts: []
+
+  # --- cert-manager ---
+  - interval: 1m
+    input_series:
+      # expires in 10 days -> fires after 1h; one in 30 days and a never-issued one (0) do not
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="apps", name="soon", job="cert-manager"}
+        values: 864000x70
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="apps", name="later", job="cert-manager"}
+        values: 2592000x70
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="apps", name="unissued", job="cert-manager"}
+        values: 0x70
+      - series: certmanager_certificate_ready_status{namespace="apps", name="unissued", condition="False", job="cert-manager"}
+        values: 1x70
+      - series: certmanager_certificate_ready_status{namespace="apps", name="unissued", condition="True", job="cert-manager"}
+        values: 0x70
+      - series: certmanager_certificate_ready_status{namespace="apps", name="soon", condition="False", job="cert-manager"}
+        values: 0x70
+      - series: certmanager_certificate_ready_status{namespace="apps", name="soon", condition="True", job="cert-manager"}
+        values: 1x70
+      - series: up{job="cert-manager", instance="10.42.0.9:9402"}
+        values: 1x70
+    alert_rule_test:
+      - eval_time: 61m
+        alertname: CertManagerCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              name: soon
+            exp_annotations:
+              summary: "Certificate apps/soon expires in less than 14 days"
+              description: >-
+                cert-manager has not renewed Certificate apps/soon, which expires in about 10 days.
+                Check `kubectl -n apps describe certificate soon` and the cert-manager logs in
+                namespace platform; runbook in DEPLOYMENT.md "Platform alerting (#284)".
+      - eval_time: 16m
+        alertname: CertManagerCertificateNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              name: unissued
+            exp_annotations:
+              summary: "Certificate apps/unissued is not Ready"
+              description: >-
+                Certificate apps/unissued has not been Ready for 15 minutes. Check
+                `kubectl -n apps describe certificate unissued` (and its CertificateRequest/Order);
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+      - eval_time: 30m
+        alertname: CertManagerDown
+        exp_alerts: []
+  # target scraped but failing -> fires with the target's labels
+  - interval: 1m
+    input_series:
+      - series: up{job="cert-manager", instance="10.42.0.9:9402"}
+        values: 0x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CertManagerDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: CertManagerDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cert-manager
+              instance: 10.42.0.9:9402
+            exp_annotations:
+              summary: "cert-manager is not being scraped"
+              description: >-
+                Prometheus has no successful scrape of the cert-manager controller for 15 minutes,
+                so the certificate alerts are blind. Check `kubectl -n platform get pods` and the
+                ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
+  # no target at all -> the absent() branch fires
+  - interval: 1m
+    input_series:
+      - series: up{job="other"}
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: CertManagerDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cert-manager
+            exp_annotations:
+              summary: "cert-manager is not being scraped"
+              description: >-
+                Prometheus has no successful scrape of the cert-manager controller for 15 minutes,
+                so the certificate alerts are blind. Check `kubectl -n platform get pods` and the
+                ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
