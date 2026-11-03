@@ -502,7 +502,8 @@ additionalPrometheusRulesMap:
           # ready!="True" (not ="False"): KSM replaces the series when the condition changes, and a
           # retry briefly reports Unknown; the max by drops `ready`, so `for` is not reset by that.
           # Suspended objects are skipped. Blind spot: a controller that is alive but has stopped
-          # reconciling leaves Ready=True (WorkloadUnavailable covers a dead controller).
+          # reconciling leaves Ready=True (WorkloadUnavailable covers a dead controller,
+          # WorkloadMissing a deleted one).
           - alert: FluxReconciliationFailed
             expr: >-
               max by (namespace, customresource_kind, name)
@@ -564,17 +565,20 @@ additionalPrometheusRulesMap:
             annotations:
               summary: "{{ $labels.namespace }}/{{ or $labels.deployment $labels.statefulset }} has no available replica"
               description: >-
-                {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has had 0 available{{ else }}StatefulSet
+                {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }}
+                has had 0 available{{ else }}StatefulSet
                 {{ $labels.namespace }}/{{ $labels.statefulset }} has had 0 ready{{ end }} replicas for 5 minutes although it
                 should run at least one. Check `kubectl -n {{ $labels.namespace }} get pods` and
-                `kubectl -n {{ $labels.namespace }} describe {{ if $labels.deployment }}deployment {{ $labels.deployment }}{{ else }}statefulset
+                `kubectl -n {{ $labels.namespace }} describe
+                {{ if $labels.deployment }}deployment {{ $labels.deployment }}{{ else }}statefulset
                 {{ $labels.statefulset }}{{ end }}`. A Recreate-strategy upgrade with a slow image pull (open-webui, n8n) can trigger
                 this briefly; runbook in DEPLOYMENT.md "Platform alerting (#284)".
           # The workload object itself is gone (deleted, renamed in its repo, pruned by Flux), so the
           # rule above has no series. Explicit list: the names are a contract with the app repos, the
           # playbooks and the Flux bundle (INTERFACES.md §9). The Flux controllers are listed because a
-          # deleted controller would otherwise leave every gotk_resource_info frozen at Ready=True. Parenthesised or-chain: `and` binds tighter than `or`,
-          # and the KSM-up guard must cover every branch (the rollout of KSM itself included).
+          # deleted controller would otherwise leave every gotk_resource_info frozen at Ready=True.
+          # Parenthesised or-chain: `and` binds tighter than `or`, and the KSM-up guard must cover
+          # every branch (the rollout of KSM itself included).
           - alert: WorkloadMissing
             expr: >-
               (absent(kube_deployment_spec_replicas{namespace="apps", deployment="auth-service"})
@@ -602,7 +606,8 @@ additionalPrometheusRulesMap:
             annotations:
               summary: "Workload {{ $labels.namespace }}/{{ or $labels.deployment $labels.statefulset }} no longer exists"
               description: >-
-                kube-state-metrics reports no {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }}{{ else }}StatefulSet
+                kube-state-metrics reports no
+                {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }}{{ else }}StatefulSet
                 {{ $labels.namespace }}/{{ $labels.statefulset }}{{ end }} for 15 minutes. Check
                 the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
                 re-run the owning playbook) and whether the name changed in its repo; runbook in

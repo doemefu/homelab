@@ -1090,7 +1090,8 @@ Design notes:
 
 Known blind spots: a Flux controller that is alive but has stopped reconciling leaves `Ready=True`
 (`WorkloadUnavailable` catches a dead one, `WorkloadMissing` a deleted one); nothing outside the
-cluster watches the cluster.
+cluster watches the cluster. A deleted `kustomize-controller` cannot heal itself through Flux:
+re-apply the bundle from a main checkout with `kubectl apply -k cluster/flux-system/` (owner step).
 
 **Off-cluster dead-man's switch (owner step, not set up):** Alertmanager runs inside the cluster,
 so if raspi5 or the whole cluster dies, nothing reaches Discord. The chart's always-firing

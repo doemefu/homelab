@@ -101,8 +101,13 @@ tests:
       - series: kube_deployment_spec_replicas{namespace="apps", deployment="n8n"}
         values: 0x10
       # healthy
-      - series: kube_deployment_status_replicas_available{namespace="flux-system", deployment="kustomize-controller"}
+      - series: kube_deployment_status_replicas_available{namespace="flux-system", deployment="helm-controller"}
         values: 1x10
+      - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="helm-controller"}
+        values: 1x10
+      # dead Flux controller -> fires (flux-system is in scope)
+      - series: kube_deployment_status_replicas_available{namespace="flux-system", deployment="kustomize-controller"}
+        values: 0x10
       - series: kube_deployment_spec_replicas{namespace="flux-system", deployment="kustomize-controller"}
         values: 1x10
       # other namespace -> out of scope
@@ -115,10 +120,15 @@ tests:
         values: 0x10
       - series: kube_statefulset_replicas{namespace="apps", statefulset="postgresql"}
         values: 1x10
-      # StatefulSet deliberately scaled to 0 -> never fires
+      # healthy StatefulSet
       - series: kube_statefulset_status_replicas_ready{namespace="apps", statefulset="influxdb2"}
-        values: 0x10
+        values: 1x10
       - series: kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}
+        values: 1x10
+      # StatefulSet deliberately scaled to 0 -> never fires
+      - series: kube_statefulset_status_replicas_ready{namespace="apps", statefulset="scaled-to-zero"}
+        values: 0x10
+      - series: kube_statefulset_replicas{namespace="apps", statefulset="scaled-to-zero"}
         values: 0x10
       # platform namespace is in scope (cloudflared = the only public ingress)
       - series: kube_deployment_status_replicas_available{namespace="platform",
@@ -143,6 +153,18 @@ tests:
                 Deployment apps/auth-service has had 0 available replicas for 5 minutes although it
                 should run at least one. Check `kubectl -n apps get pods` and
                 `kubectl -n apps describe deployment auth-service`. A Recreate-strategy
+                upgrade with a slow image pull (open-webui, n8n) can trigger this briefly;
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: flux-system
+              deployment: kustomize-controller
+            exp_annotations:
+              summary: "flux-system/kustomize-controller has no available replica"
+              description: >-
+                Deployment flux-system/kustomize-controller has had 0 available replicas for 5 minutes
+                although it should run at least one. Check `kubectl -n flux-system get pods` and
+                `kubectl -n flux-system describe deployment kustomize-controller`. A Recreate-strategy
                 upgrade with a slow image pull (open-webui, n8n) can trigger this briefly;
                 runbook in DEPLOYMENT.md "Platform alerting (#284)".
           - exp_labels:
