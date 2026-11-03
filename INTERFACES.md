@@ -510,7 +510,8 @@ as a normal node-exporter series.
 
 | Producer | File | Metrics |
 |----------|------|---------|
-| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds`, `homelab_backup_integrity_check_failed` (1 = a nightly `restic check` failed and was not cleared, #301) |
+| `homelab-backup-mark` on raspi5 (`infra/roles/storage`), called over SSH by `scripts/backup-app-data.sh` and `scripts/copy-restic-repo.sh` | `homelab-backup-offnode.prom` | `homelab_backup_offnode_last_success_timestamp_seconds{kind="app-data"\|"restic-copy"}` (node clock, 0 = never, #301) |
 | `homelab-netmon-collect` on every node (`infra/roles/netmon_node`) | `homelab_netmon.prom` | see "Node textfile metrics (NM-3)" below |
 
 Write the file atomically (temp file in the same directory, then `mv`); a partially written file

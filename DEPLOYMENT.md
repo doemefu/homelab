@@ -1009,9 +1009,10 @@ forward instead of erasing it; `0` means "never succeeded".
   success (`filterVolumesForJob` logs a warning only). The weekly manual snapshot check in the
   maintenance checklist stays for that reason.
 - The **Mac-side app-data dumps** (`scripts/backup-app-data.sh`) and the **restic repository
-  copies** (`scripts/copy-restic-repo.sh`, #91) are not covered. The Mac is not a cluster node, so
-  an automatic signal would need a new component (Pushgateway or an n8n check). It remains a
-  manual monthly check — see the maintenance checklist.
+  copies** (`scripts/copy-restic-repo.sh`, #91) report their freshness to the node since #301 (see
+  "Backup freshness and integrity signals (#301)" below); the alert rule for them is a separate
+  change in `cluster/values/kube-prometheus-stack.yaml`. Until it is live this stays a manual
+  check — see the maintenance checklist.
 - `scripts/copy-restic-repo.sh` holds the same lock (shared) while it copies. A 03:00 run that
   starts during a copy exits on the lock collision like a manual run would; the script refuses to
   start between 02:00 and 03:44 and caps each remote command at one hour, so a copy cannot reach
@@ -1019,6 +1020,52 @@ forward instead of erasing it; `0` means "never succeeded".
 - A lock collision (a manual run while the 03:00 cron holds the lock) exits before any metric is
   written, on purpose: the run holding the lock owns the metrics. A permanently stuck lock surfaces
   as `ResticBackupStale` after about 26 h.
+
+**Backup freshness and integrity signals (#301):** two more textfile signals from the `storage`
+role on raspi5.
+
+- **Nightly integrity check.** After `forget --prune`, `homelab-backup.sh` runs
+  `restic check --read-data-subset=<slice>/N` (`storage_restic_check_subset_days`, default 7;
+  `0` switches it off): every pack is read back, decrypted and hash-checked once every N days. A
+  failed check does **not** fail the backup — the snapshot is already taken — but creates the
+  sticky marker `/var/lib/backup/restic-check-failed`, and `homelab_backup_integrity_check_failed`
+  (in `homelab-backup.prom`) reads 1 until you clear it. The journal line is
+  `restic check FAILED (subset …)` under `-t homelab-backup -p err`. To clear: run the full check
+  ("Integrity check" under "Backup (Restic)" with `--read-data`); only when it passes,
+  `ssh raspi5 "sudo rm /var/lib/backup/restic-check-failed"`.
+- **Off-node freshness.** `/usr/local/bin/homelab-backup-mark` (installed by the role) writes
+  `homelab-backup-offnode.prom` with
+  `homelab_backup_offnode_last_success_timestamp_seconds{kind="app-data"|"restic-copy"}` (raspi5's
+  clock; `0` = never). `backup-app-data.sh` calls it over SSH after a complete, successful run (all
+  six components, so not with `--only`); `copy-restic-repo.sh` after a verified copy of the default
+  repository (not when the shrink guard trips). Both are best effort: a failed mark prints a
+  warning with the command to run later and never fails the backup. `--no-mark` skips it;
+  `--ssh-config ~/.ssh/homelab-offlan.conf` reaches raspi5 off-LAN. The metric name differs from
+  `homelab_backup_last_success_timestamp_seconds` on purpose: `ResticBackupStale` takes the `max()`
+  of that name, so a fresh Mac series under it would hide a stale restic run.
+
+**Rollout (#301, owner):** after the PR is merged, from an up-to-date checkout on `main`. Only the
+Storage play runs (`--tags storage`); stop if `--check --diff` shows changes outside its tasks.
+
+```bash
+cd ~/informatik/homelab/infrastructure && git pull
+# off-LAN: prefix every ansible-playbook line with
+#   ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s"
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags storage --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags storage
+ansible-playbook infra/playbooks/10_base.yml -l raspi5 --tags storage    # second run: changed=0
+# baseline full check once (outside 02:00-03:45), then one backup run with the new script
+ssh raspi5 "sudo restic check --read-data --repo /var/lib/backup/restic-repo --password-file /etc/restic-password"
+ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"
+ssh raspi5 "cat /var/lib/node_exporter/textfile_collector/homelab-backup.prom /var/lib/node_exporter/textfile_collector/homelab-backup-offnode.prom"
+# expect homelab_backup_integrity_check_failed 0 and both offnode kinds at 0 until the Mac scripts ran
+```
+
+Then run `./scripts/copy-restic-repo.sh` and `./scripts/backup-app-data.sh` once each (on the
+LAN, or with `--ssh-config ~/.ssh/homelab-offlan.conf` for the marker off-LAN) and check that the
+two `kind` series carry today's time. **Rollback:** revert the alert rules first, then this PR,
+re-apply `--tags storage`, and
+`ssh raspi5 "sudo rm -f /usr/local/bin/homelab-backup-mark /var/lib/node_exporter/textfile_collector/homelab-backup-offnode.prom /var/lib/backup/restic-check-failed"`.
 
 **Rollout order (matters):** the `ResticBackupStale` rule has an `absent()` branch, and
 `homelab-backup.sh` only writes its metric file when it runs. Apply in this order:
@@ -3198,7 +3245,8 @@ ssh raspi5 "sudo restic snapshots \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password"
 
-# Integrity check
+# Integrity check (structure only; add --read-data to read back every pack — the nightly run
+# already reads one seventh of them, see "Backup freshness and integrity signals (#301)")
 ssh raspi5 "sudo restic check \
   --repo /var/lib/backup/restic-repo \
   --password-file /etc/restic-password"
@@ -3252,11 +3300,12 @@ The repository lives on raspi5's root SD card — the disk it protects. `scripts
 pulls a byte-identical copy into the Mac backup folder, next to the app-data dumps. Interim until
 an external SSD or an off-site target exists (#161; owner decision 2026-11-02: Mac folder for now).
 
-- **Read-only on the node.** rsync runs on raspi5 as the sender only (`sudo`, because the
+- **Read-only on the repository.** rsync runs on raspi5 as the sender only (`sudo`, because the
   repository is root-only), under a **shared** `flock` on `/var/lock/homelab-backup.lock` — the lock
   `homelab-backup.sh` takes exclusively. A copy never overlaps a backup or `forget --prune`, and a
-  backup never starts in the middle of a copy. The only thing it may create on the node is the
-  empty lock file itself (tmpfs, after a reboot).
+  backup never starts in the middle of a copy. The only node writes are the empty lock file
+  (tmpfs, after a reboot) and, after a successful copy, the freshness marker
+  (`homelab-backup-mark restic-copy`, #301; `--no-mark` skips it).
 - **No password.** The repository is encrypted by restic and copied as is. The copy still holds
   the k3s datastore with every cluster Secret (restic-encrypted): directories mode 700, files 0400,
   outside every git repo, never uploaded.
@@ -3690,7 +3739,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Verify all pods Running | Daily | `kubectl get pods -A` |
 | Check node resource usage | Daily | `kubectl top nodes` |
 | Verify Longhorn volume health | Daily | `kubectl get volumes -n longhorn-system` |
-| Check backup status | Daily | Primarily automatic since #92 — `ResticBackupFailed` / `ResticBackupStale` / `LonghornRecurringJob*` alert to Discord. Manual cross-check: `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
+| Check backup status | Daily | Primarily automatic since #92 — `ResticBackupFailed` / `ResticBackupStale` / `LonghornRecurringJob*` alert to Discord; `homelab_backup_integrity_check_failed` reports a failed nightly `restic check` (#301). Manual cross-check: `ssh raspi5 "journalctl -t homelab-backup --since '24 hours ago'"` + `ssh raspi5 "journalctl -t homelab-backup -p err --since '24 hours ago'"` |
 | Verify Flux reconciliation | Daily | `flux check` |
 | Restart degraded Longhorn volumes | Weekly | Check Longhorn UI for degraded volumes |
 | Verify Longhorn recurring snapshot jobs fired | Weekly | `kubectl -n longhorn-system get recurringjobs.longhorn.io daily-snapshot metrics-snapshot-cleanup metrics-filesystem-trim` + `kubectl -n longhorn-system get snapshots.longhorn.io` (see "Recurring Snapshots (#63)" and "Excluded volumes: the metrics group (#101)" above) |
@@ -3699,7 +3748,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | Test backup restore | Monthly | App-data restore tests (see "App-data backups to the operator's Mac (#64)") + restic non-destructive restore test (see "Backup (Restic)") |
 | Copy the restic repository to the Mac | Monthly, with the app-data dumps, and before SD-card or node work | `./scripts/copy-restic-repo.sh` on the Mac, outside 02:00–03:44 (see "Off-node copy to the operator's Mac (#91)") |
 | Check restic repository size | Monthly | `ssh raspi5 "sudo du -sh /var/lib/backup/restic-repo"` |
-| Check app-data dump and restic copy freshness | Monthly | `ls -lt ~/informatik/homelab/backups/ ~/informatik/homelab/backups/restic/` on the Mac — **not alerted** (the Mac is not a cluster node, see "Backup alerting (#92)") |
+| Check app-data dump and restic copy freshness | At least every 4 weeks | `ls -lt ~/informatik/homelab/backups/ ~/informatik/homelab/backups/restic/` on the Mac; the runs mark `homelab_backup_offnode_last_success_timestamp_seconds{kind}` on raspi5 (#301) — alerted only once the off-node rule is live (see "Backup alerting (#92)") |
 | Update Python packages | Monthly | `pip install --upgrade ansible ansible-lint` |
 | Review k3s security advisories | Monthly | Check [k3s releases](https://github.com/k3s-io/k3s/releases) |
 | Check Ansible collection versions | Monthly | `ansible-galaxy collection list` vs Galaxy API — see CONTRIBUTING.md "Ansible Collection Updates (Manual)" |
