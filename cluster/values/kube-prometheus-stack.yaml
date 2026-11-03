@@ -397,6 +397,44 @@ additionalPrometheusRulesMap:
                 unit lacks --k3s-state-db (re-run 10_base.yml --tags netmon_node), or node-exporter
                 on raspi5 is not scraped. Runbook in DEPLOYMENT.md
                 "k3s datastore (kine/SQLite) maintenance".
+          # Stall detector for the kine compactor (homelab#129), hours before K3sDatastoreLarge. The
+          # gauge (same script, raspi5 only) is MAX(id) - compact_rev_key from a read-only SQLite
+          # read. Healthy: about 1-3k (kine keeps 1000 revisions, plus 5-10 min of churn between
+          # compactions). A stalled compactor falls behind by the full write churn (~200 revisions/min
+          # before the Flux lease tuning), so 50k is passed about 4-6 h into a stall; a working one
+          # clears 50k in a single run, so a sustained 50k cannot be a catch-up. max_over_time keeps
+          # one skipped script run (missing series) from resetting the 2 h.
+          - alert: K3sKineCompactionLagging
+            expr: max_over_time(homelab_k3s_kine_compaction_lag_revisions[10m]) > 50000
+            for: 2h
+            labels:
+              severity: warning
+            annotations:
+              summary: "kine compaction on {{ $labels.node }} is {{ $value | humanize }} revisions behind"
+              description: >-
+                The k3s kine datastore on {{ $labels.node }} has been more than 50k revisions behind its
+                compaction marker for 2h; the online compactor has probably stalled (homelab#129). Check
+                the compaction lag and the Slow SQL rate with the read-only diagnostics, then plan the
+                offline compaction; runbook in DEPLOYMENT.md "k3s datastore (kine/SQLite) maintenance".
+          # The size gauge is present but the lag is not: the script runs, but the SQLite read fails
+          # (k3s stopped cleanly, so no -wal/-shm to open read-only; a locked or damaged database;
+          # an old script without the gauge). Both absent is K3sDatastoreSizeMissing's job.
+          # Rollout order: 10_base.yml --tags netmon_node before 41_monitoring.yml, or this fires after 1h.
+          - alert: K3sKineCompactionLagMissing
+            expr: >-
+              absent(homelab_k3s_kine_compaction_lag_revisions{node="raspi5"})
+              and on() (count(homelab_k3s_state_db_bytes{node="raspi5"}) > 0)
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "kine compaction lag metric missing on raspi5"
+              description: >-
+                homelab_k3s_kine_compaction_lag_revisions{node="raspi5"} has been absent for 1h while the
+                datastore size is still reported, so K3sKineCompactionLagging cannot fire. See
+                `journalctl -u homelab-netmon -n 20` on raspi5 for "k3s kine lag skipped" (k3s stopped,
+                SQLite error), or re-run 10_base.yml --tags netmon_node if the script predates the gauge.
+                Runbook in DEPLOYMENT.md "k3s datastore (kine/SQLite) maintenance".
 
   # --- Network monitoring: coroot-node-agent egress rules (NM-2, #118) ---
   # Contract: docs/060-network-monitoring.md §6.4. Own map key so the NM-1 (`homelab-netmon`),

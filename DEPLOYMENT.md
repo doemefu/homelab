@@ -125,7 +125,7 @@ kubectl get ns
 | Namespace | Expected Pods | Status |
 |-----------|---------------|--------|
 | `kube-system` | traefik, coredns, metrics-server, svclb-* | Running |
-| `platform` | cert-manager (3x), cloudflared | Running |
+| `platform` | cert-manager (3x), cloudflared (2x, on different nodes) | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
 | `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-*, coroot-node-agent-* (only on gated nodes — see "coroot-node-agent (NM-2)") | Running |
 | `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, data-service-*, mcp-hub-*, n8n-*, litellm-*, open-webui-* | Running |
@@ -167,7 +167,14 @@ Home Assistant) between nodes for no benefit.
    `40_platform.yml`.
 2. Verify: all nodes Ready, no unhealthy pods, all Longhorn volumes `healthy`, kine small (see
    "Read-only diagnostics" below), no Longhorn snapshot (02:00), restic (03:00) or metrics trim (05:00)
-   running in the next hour.
+   running in the next hour, and two cloudflared replicas Ready on two different nodes
+   (`kubectl -n platform get pods -l pod=cloudflared -o wide`, see "Cloudflare Tunnel → Replicas and
+   placement"). That last check is what makes a node restart safe off-LAN: `ssh.furchert.ch` runs
+   through cloudflared, and while k3s on a node is down nothing restarts a crashed pod there. Off-LAN,
+   use the SSH jump config ("Off-LAN kubectl / Ansible Access") and judge every step on the nodes, not
+   through the port-forward: `sudo k3s kubectl …` on raspi5 (the agents have no admin kubeconfig), and
+   `systemctl is-active k3s` (raspi5) or `systemctl is-active k3s-agent` (agents) on the node being
+   upgraded.
 3. Keep the previous binary on every node before touching it:
    `ssh ansible@<ip> 'sudo cp -a /usr/local/bin/k3s /usr/local/bin/k3s-<old-version>'`.
 4. raspi5 first, then the agents one at a time (raspi4, mba1, mba2), each with a `--check` run first.
@@ -324,9 +331,20 @@ Healthy after an offline compaction: ≈ 30-90 MB (2026-10-28 00:31: `state.db` 
 alert gives roughly a day of lead time before the symptoms above. When it fires, run the
 read-only diagnostics below and then the offline compaction. SQLite never shrinks a file without
 `VACUUM`, so the alert keeps firing even after the online compactor catches up on its own — only
-the offline compaction (which ends with `VACUUM`) clears it; silencing it is not a fix. The
-compaction lag (`max_id - compact_rev`) is not exported; it needs a read of the live datastore
-(out of scope for #150).
+the offline compaction (which ends with `VACUUM`) clears it; silencing it is not a fix.
+
+**Compaction lag (#129).** The same script also writes
+`homelab_k3s_kine_compaction_lag_revisions{node="raspi5"}` = `MAX(id)` minus `compact_rev_key`, the
+values of the read-only diagnostics below, read with one SQLite statement over a read-only
+connection (`mode=ro`, `query_only`, 1 s busy timeout; the unit sees the directory read-only through
+`ProtectSystem=strict`). Healthy: about 1-3k (kine keeps 1000 revisions plus 5-10 min of churn
+between compactions). The lag passes 50k about 4-6 h into a stall (later once the Flux lease churn
+is reduced), and `K3sKineCompactionLagging` fires after it stayed above 50k for 2 h, so about
+6-8 h into a stall and well before the file reaches 500 MB.
+`K3sKineCompactionLagMissing` fires when the size gauge is reported but the lag is not for 1 h:
+`journalctl -u homelab-netmon -n 20` shows `k3s kine lag skipped: <error>`. Expected skips: k3s
+stopped cleanly (no `-wal`/`-shm` to open read-only) and a damaged or locked database; the LAN
+metrics and the size gauge keep flowing either way.
 
 A missing or unreadable `state.db` skips only this gauge (warning `k3s state db skipped: …` in
 `journalctl -u homelab-netmon`); the LAN metrics keep flowing. The missing series fires
@@ -336,7 +354,8 @@ scraped.
 
 Rollout (owner; playbook runs need a go). The collector script changes on every node, so roll
 `netmon_node` out to all nodes (no `-l`); only raspi5's unit file changes. Run `10_base.yml` before
-`41_monitoring.yml`, otherwise `K3sDatastoreSizeMissing` fires after 1 h.
+`41_monitoring.yml`, otherwise `K3sDatastoreSizeMissing` (or, for the #129 lag gauge,
+`K3sKineCompactionLagMissing`) fires after 1 h.
 
 ```bash
 # Off-LAN: prefix with ANSIBLE_SSH_ARGS=… (see "Off-LAN kubectl / Ansible Access").
@@ -350,12 +369,12 @@ ansible-playbook infra/playbooks/41_monitoring.yml                  # alert rule
 Verify:
 
 ```bash
-ssh raspi5 "grep homelab_k3s_state_db_bytes /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
+ssh raspi5 "grep -E 'homelab_k3s_(state_db_bytes|kine_compaction_lag_revisions)' /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
 ssh raspi5 "sudo ls -la /var/lib/rancher/k3s/server/db/"     # state.db + state.db-wal ≈ the gauge
-kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'K3sDatastore(Large|SizeMissing)'  # expect 2
+kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'alert: (K3sDatastore(Large|SizeMissing)|K3sKineCompactionLag(ging|Missing))$'  # expect 4
 ```
 
-Rollback: `git revert` the #150 commits, then re-run
+Rollback: `git revert` the #150 (or #129 lag) commits, then re-run
 `ansible-playbook infra/playbooks/10_base.yml --tags netmon_node` and
 `ansible-playbook infra/playbooks/41_monitoring.yml`.
 
@@ -446,6 +465,13 @@ sudo /tmp/kine-offline-compact.sh --dry-run   # read-only preview first — k3s 
 sudo /tmp/kine-offline-compact.sh             # full run: stop / backup / compact / start,
                                                # confirms before each stage
 ```
+
+`homelab-netmon` keeps running during the offline compaction: its once-a-minute lag read is a
+read-only statement of about 0.1 ms, and while k3s is stopped it either reads the current value or
+logs `k3s kine lag skipped` (#129). If the script's WAL checkpoint ever reports busy, re-run the
+script.
+Do not stop `homelab-netmon.timer` for it: that would also stop raspi5's LAN metrics and fire
+`NetmonNodeScriptStale`.
 
 `kine-offline-compact.sh` stops k3s, checkpoints the WAL, takes a `cp -a` backup of `state.db`,
 runs `kine-offline-compact.py` — the same `DELETE`/`UPDATE` kine's own compactor runs
@@ -762,12 +788,80 @@ kubectl get secret cloudflare-api-token -n platform -o yaml
 #### Status
 
 ```bash
-# Pod status
-kubectl -n platform get pods -l app=cloudflared
+# Pod status (the chart's only pod label is pod=cloudflared)
+kubectl -n platform get pods -l pod=cloudflared -o wide
 
 # Logs
-kubectl -n platform logs -l app=cloudflared --tail=50
+kubectl -n platform logs -l pod=cloudflared --prefix --tail=50
 ```
+
+#### Replicas and placement (#322)
+
+cloudflared runs as **two replicas of the same tunnel** (same token; Cloudflare allows up to 25 replicas
+per tunnel and spreads requests over all connected replicas). It carries every public route and
+`ssh.furchert.ch`, the only off-LAN way in, so one node's k3s restart must never leave it without a
+supervised replica:
+
+- `replicaCount: 2` in `cluster/values/cloudflared.yaml`.
+- Chart 0.1.2 renders no affinity, probes beyond its liveness probe, resources or security contexts, so
+  `40_platform.yml` patches its Deployment: a **required pod anti-affinity** on `kubernetes.io/hostname`
+  (never two replicas on one node), a **readinessProbe** on `/ready` (200 only with an edge connection)
+  and `minReadySeconds: 10`. With the default rolling update (maxSurge 1, maxUnavailable 0) an old pod
+  is removed only after a new pod holds an edge connection. Helm's three-way merge keeps these fields on
+  later chart upgrades; drop the patch task once a chart version renders them itself.
+- A PodDisruptionBudget `cloudflared` (`minAvailable: 1`). It guards manual drains and other eviction-API
+  callers only; nothing in this repo drains nodes.
+- Consequence: every pod-template change (image bump, ingress change via the restart task) needs a
+  **third schedulable node** for the surge pod. With two nodes down the rollout waits (old pods keep
+  serving) and the Helm task's 3 min wait fails the playbook run.
+
+Apply only the cloudflared part: the namespace, the two Helm repo tasks, the Helm release, the PDB and the patch. No tunnel
+ingress PUT, no restart task, no Traefik values, so it is safe before a k3s upgrade. Off-LAN, add the
+SSH jump config and the tunnel kubeconfig (`~/.kube/tunnel.yaml`, see "Off-LAN kubectl / Ansible
+Access"). Prerequisite for the diff checks below: the helm-diff plugin (`helm plugin list` shows `diff`
+3.4.1 or newer). Without it the helm module prints no diff and always reports the release as changed.
+
+```bash
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --list-tasks   # 6 tasks, ending with the patch
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared
+# off-LAN: ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=60s" \
+#   ansible-playbook … -e kubeconfig="$HOME/.kube/tunnel.yaml"
+```
+
+- **Never run this playbook with `-v`**: the helm module's result includes the release values, which
+  hold the tunnel token. The plain `--diff` is safe (helm-diff masks Secret data).
+- On the first run the "Cloudflared deployen" diff must show only `replicas: 1` → `2`. Any other change
+  restarts the pods during the Helm step, before the placement patch: stop and investigate.
+- Helm only adds the second pod; the patch task then replaces both pods, and a new pod never lands on a
+  node that still runs a cloudflared pod. An SSH session that runs through a replaced pod drops once;
+  reconnect.
+
+Verify:
+
+```bash
+kubectl -n platform rollout status deploy/cloudflared-cloudflare-tunnel-remote --timeout=5m
+kubectl -n platform get deploy cloudflared-cloudflare-tunnel-remote -o jsonpath='{.status.updatedReplicas}/{.status.readyReplicas} {.spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey} {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}'
+                                                       # 2/2 kubernetes.io/hostname /ready
+kubectl -n platform get pods -l pod=cloudflared -o wide   # 2x 1/1 Running, two different nodes
+kubectl -n platform get pdb cloudflared                   # ALLOWED DISRUPTIONS 1
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff   # again: changed=0
+```
+
+Rollback. The patched fields survive Helm and a plain revert, so remove them explicitly:
+
+```bash
+kubectl -n platform rollout undo deploy/cloudflared-cloudflare-tunnel-remote   # abort a stuck rollout only
+# strategic merge with nulls: works with and without a preceding rollout undo
+kubectl -n platform patch deploy cloudflared-cloudflare-tunnel-remote --type strategic -p '{"spec":{"minReadySeconds":null,"template":{"spec":{"affinity":null,"containers":[{"name":"cloudflared","readinessProbe":null}]}}}}'
+kubectl -n platform delete pdb cloudflared
+kubectl -n platform scale deploy/cloudflared-cloudflare-tunnel-remote --replicas=1
+```
+
+Then, before the next playbook-40 run, open a PR that sets `replicaCount: 1` and removes the PDB and patch
+tasks but keeps the `tags: [cloudflared]` lines. A plain `git revert` of #322 also drops the tags, so a
+`--tags cloudflared` run would select nothing, and a full run would re-apply the ingress, the restart and
+the Traefik values.
 
 #### Add New Public Endpoint
 
@@ -802,6 +896,9 @@ tunnel's published application routes in the Cloudflare dashboard (Networking �
 kubectl -n platform rollout restart deployment/cloudflared-cloudflare-tunnel-remote
 kubectl -n platform rollout status deployment/cloudflared-cloudflare-tunnel-remote
 ```
+
+With two replicas the restart rolls one pod at a time and keeps a connected replica (see "Replicas and
+placement"); an off-LAN SSH session through a replaced pod still drops once.
 
 #### Full Tunnel Recreate (Emergency)
 
@@ -987,6 +1084,103 @@ anything beyond a read or a single-file hotfix, run the owning playbook through 
 `Host raspi5` entry from the SSH-access section above already carries `User ansible`,
 the `ProxyCommand` and `IdentityFile`, so `ssh raspi5 'sudo k3s kubectl -n apps get pods'` is the
 short form of the commands above.
+
+---
+
+### Cloudflare Access for grafana, n8n and ssh (#121)
+
+`ssh.furchert.ch` already sits behind a Cloudflare Access application, which `cloudflared access ssh`
+and the off-LAN runbooks need. `grafana.furchert.ch` and `n8n.furchert.ch` are public tunnel routes
+protected only by each app's own login. n8n's is a local account, because OIDC single sign-on is
+enterprise-only in the n8n community edition; account MFA is #280. This runbook puts both behind
+Access with the same owner-only policy. It is done in the Cloudflare dashboard. Codifying it (an API
+token with the Access scope, stored as a new encrypted inventory value by the owner) is a follow-up.
+
+**Who reaches these hosts from outside the browser** (n8n workflow exports in doemefu/homelab-n8n,
+club-assistant repo, all homelab repos, 2026-11-03):
+
+| Host | Caller outside a browser | Path | Handling |
+|---|---|---|---|
+| `n8n.furchert.ch` | Telegram Bot API → Telegram Trigger of the active workflow `m6_telegram_drafting` | `/webhook/<webhookId>/webhook` | **Bypass application** for exactly this path (step 3) |
+| `n8n.furchert.ch` | Open WebUI club pipe → `m6_chat_agent`, `m6_chat_commands` webhooks; club-mcp → `club-mcp-gateway` | — | in-cluster (`n8n.apps.svc.cluster.local`), not affected |
+| `n8n.furchert.ch` | Approve/edit links in the drafting messages: the send-and-wait nodes "Approval SendAndWait" and "Form SendAndWait" of `m6_telegram_drafting`, opened in the phone's Telegram browser | `/webhook-waiting/*` | No bypass. The owner is the only authorized chat, so the phone shows the e-mail PIN page once per 24 h session, then the link works |
+| `n8n.furchert.ch` | Workflow export/import scripts and agents using the n8n public API (`/api/v1/*`) from the Mac | `/api/v1/*` | No bypass: use `kubectl -n apps port-forward svc/n8n 5678:80` and `N8N_BASE_URL=http://localhost:5678` |
+| `n8n.furchert.ch` | Google OAuth credential callback `/rest/oauth2-credential/callback` | — | browser redirect in a session that already passed Access, so no change |
+| `grafana.furchert.ch` | none (browser only; alert links in Discord open in the browser) | — | — |
+
+The exports cover the workflows the backup workflow writes to GitHub. Before step 3, check in the n8n UI
+that no other **active** workflow has a Webhook, Form, Chat or Telegram trigger, or a Send-and-Wait or
+"Wait → On webhook call" node. The Google Drive, Gmail and schedule triggers poll outbound and are not
+affected.
+
+**Pre-checks (owner, before step 2):**
+
+1. n8n → Credentials → "n8n account" (type n8n API), used by "Back up n8n workflows to Github": its
+   Base URL must be `http://localhost:5678/api/v1`. If it is `https://n8n.furchert.ch/api/v1`, the backup
+   request leaves the pod, comes back through Access and fails. Change it first, then run the backup
+   workflow once by hand.
+2. n8n → workflow `m6_telegram_drafting` → Telegram Trigger node → Webhook URLs → **Production URL**.
+   Note the path; it has the form `/webhook/<webhookId>/webhook`. Never put the id into this public repo.
+
+**Steps (Cloudflare dashboard, `one.dash.cloudflare.com`):**
+
+1. **Login method:** Zero Trust → Integrations → Identity providers → Add new identity provider →
+   **One-time PIN** (skip if it is already listed).
+2. **Owner-only application per host.** Zero Trust → Access controls → Applications → Create new
+   application → Self-hosted and private → Add public hostname. Use these values:
+   - Application name: `grafana` (then `n8n` the same way).
+   - Subdomain `grafana` (or `n8n`), Domain `furchert.ch`. Leave the path empty, so the whole host is covered.
+   - Session duration: `24 hours`.
+   - Identity providers: only One-time PIN; enable "Apply instant authentication".
+   - Access policies → create a policy `owner-only`: Action **Allow**, Include → **Emails** → your own
+     e-mail address. Reuse the same policy for the second application.
+   - Create.
+3. **Telegram bypass (n8n only).** Create new application → Self-hosted and private → Add public hostname
+   with these values:
+   - Application name: `n8n-telegram-webhook`.
+   - Subdomain `n8n`, Domain `furchert.ch`, Path `webhook/<webhookId>/webhook` (from pre-check 2).
+   - Policy: Action **Bypass**. Include → **IP ranges** → Telegram's webhook source ranges
+     `149.154.160.0/20` and `91.108.4.0/22` (or Include → **Everyone** if Telegram deliveries fail).
+
+   Access applies the most specific path, so only this one URL skips the login. Bypass requests are not
+   logged by Access. On that path, n8n's Telegram Trigger, which checks Telegram's secret-token header,
+   is then the control. Do not add bypass rules for other n8n paths.
+4. **ssh.furchert.ch (already exists):** Zero Trust → Access controls → Applications → the SSH
+   application. Attach the `owner-only` policy. Remove its old policy only after `cloudflared access
+   login https://ssh.furchert.ch` and an off-LAN `ssh raspi5` still work. Record the IdP and session
+   length in #121, not here.
+
+**Verification:**
+
+```bash
+# expect 302 to <team>.cloudflareaccess.com for each host (no Access session in curl)
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://grafana.furchert.ch/
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://n8n.furchert.ch/
+curl -s -o /dev/null -w '%{http_code}\n' https://n8n.furchert.ch/rest/settings     # not 200 from n8n
+# Telegram path: with the IP-range bypass, a request from the Mac is outside the ranges and gets an
+# Access response (redirect or block page), not n8n; Telegram itself is tested below.
+# With the Everyone bypass, n8n answers 403 (missing Telegram secret-token header).
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -X POST "https://n8n.furchert.ch/webhook/<webhookId>/webhook"
+```
+
+Then:
+- Browser: both hosts ask for the e-mail PIN once, then show the app login.
+- Telegram: send a message to the club bot; `m6_telegram_drafting` shows a new execution (this is the real
+  test of the bypass). From the phone, approve one draft and open the edit form once: the PIN page appears
+  at most once per session, then the link works.
+- The backup run started by hand in pre-check 1, and the next scheduled run, succeed. "Backup Watchdog"
+  stays silent.
+- Off-LAN `cloudflared access ssh` still works.
+
+**Rollback:** in Zero Trust → Access controls → Applications, delete the application or detach the
+`owner-only` policy from that one application. Do not edit the shared `owner-only` policy itself,
+because ssh uses it too. The tunnel and the apps themselves are unchanged.
+
+**Follow-up (club-assistant repo):**
+- Its laptop red-team cases against `n8n.furchert.ch` (RT-M05 404 checks, the RT-A webhook probe) now
+  meet the Access redirect first.
+- Its docs still call n8n "SSO-protected".
+- Its n8n API scripts should default to the port-forward.
 
 ---
 
@@ -1928,6 +2122,7 @@ Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the ap
 | `homelab_netmon_last_success_timestamp_seconds{node}` | last successful run → alert `NetmonNodeScriptStale` (> 10 min, warning) |
 | `homelab_netmon_truncated_series{node,metric}` | series folded into `src_ip="other"` by the cap `netmon_node_max_series` (200) → alert `NetmonSeriesTruncated` (info) |
 | `homelab_k3s_state_db_bytes{node}` | raspi5 only (`netmon_node_k3s_state_db` in `group_vars/k3s_server.yml`): kine `state.db` + WAL bytes → alerts `K3sDatastoreLarge` (> 500 MB for 30 min, warning) and `K3sDatastoreSizeMissing` (absent 1 h, warning); see "k3s datastore (kine/SQLite) maintenance" (#150) |
+| `homelab_k3s_kine_compaction_lag_revisions{node}` | raspi5 only (same flag): `MAX(id) - compact_rev_key` from a read-only SQLite read → alerts `K3sKineCompactionLagging` (> 50k for 2 h, warning) and `K3sKineCompactionLagMissing` (absent 1 h while the size gauge is present, warning); see "k3s datastore (kine/SQLite) maintenance" → "Compaction lag (#129)" |
 
 **Dependency: homelab PR #109.** node-exporter's `--collector.textfile.directory` + hostPath (kube-prometheus-stack values) come from #109; merge #109 first. The textfile directory itself is created by this role and by #109's storage role with identical attributes, so the file is written even before #109 — it is just not scraped yet. Conntrack data is IPv4 only. The alert rules sit in `additionalPrometheusRulesMap.homelab-netmon-node` and need `41_monitoring.yml`.
 
@@ -1966,6 +2161,7 @@ Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(
 
 - **`NetmonNodeScriptStale`**: `journalctl -u homelab-netmon -n 20` on the node. `CalledProcessError` = conntrack, ip or journalctl failed; `FileNotFoundError` = textfile directory missing (re-run `10_base.yml --tags netmon_node`).
 - **`K3sDatastoreSizeMissing`** (raspi5): a missing or unreadable `state.db` does **not** make the script stale — it skips only `homelab_k3s_state_db_bytes` and logs `k3s state db skipped: <error>` to `journalctl -u homelab-netmon`. See "k3s datastore (kine/SQLite) maintenance" → "Early warning".
+- **`K3sKineCompactionLagMissing`** (raspi5): the SQLite read failed but the script still ran; `journalctl -u homelab-netmon -n 20` shows `k3s kine lag skipped: <error>` (k3s stopped cleanly, a locked or damaged database, or a script older than the gauge: re-run `10_base.yml --tags netmon_node`).
 - **Metric has `exported_node` instead of `node`**: would mean the node-exporter ServiceMonitor stopped honouring labels (`honorLabels: true` in chart 69.3.1); data-service's queries rely on `node`.
 - **Unit tests** (stdlib only, run before changing the script): `python3 -m unittest discover -s infra/roles/netmon_node/tests -v`.
 - **`nf_conntrack_acct`** stays at the kernel default; `netmon_node_conntrack_acct: true` is reserved for the NM-2 fallback (docs/060 §5.5/§6.6).
@@ -3945,7 +4141,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik (`--tags cloudflared`: no ingress PUT, restart task or Traefik values, #322) | 3-5 min | Yes |
 | `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |
 | `51_homeassistant.yml` | Home Assistant | 3-5 min | Yes |

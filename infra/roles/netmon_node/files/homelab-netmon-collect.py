@@ -13,6 +13,10 @@
 #   - homelab_k3s_state_db_bytes    k3s kine datastore size (state.db + WAL), only with
 #                                   --k3s-state-db (control-plane node, homelab#150); a missing
 #                                   state.db skips only this gauge (warning on stderr)
+#   - homelab_k3s_kine_compaction_lag_revisions
+#                                   MAX(id) - compact_rev_key of the same datastore (homelab#129),
+#                                   read with a read-only SQLite connection; any error skips only
+#                                   this gauge (warning on stderr)
 #
 # No state is kept on the node: the bucket is recomputed from the journal on every run.
 # All-or-nothing: if any command fails, the previous file stays in place (its last-success
@@ -26,9 +30,11 @@ import argparse
 import ipaddress
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
+import urllib.parse
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 OTHER = "other"
@@ -40,6 +46,7 @@ METRIC_BUCKET_END = "homelab_netmon_bucket_end_timestamp_seconds"
 METRIC_LAST_SUCCESS = "homelab_netmon_last_success_timestamp_seconds"
 METRIC_TRUNCATED = "homelab_netmon_truncated_series"
 METRIC_K3S_DB = "homelab_k3s_state_db_bytes"
+METRIC_KINE_LAG = "homelab_k3s_kine_compaction_lag_revisions"
 
 HELP = {
     METRIC_LAN: "Current conntrack TCP entries to a watched local port, by original source.",
@@ -52,6 +59,8 @@ HELP = {
     METRIC_TRUNCATED: 'Series dropped into src_ip="other" because netmon_node_max_series '
     "was exceeded, per metric.",
     METRIC_K3S_DB: "Size on disk of the k3s kine SQLite datastore (state.db plus state.db-wal).",
+    METRIC_KINE_LAG: "Revisions between the newest kine row and the compaction marker "
+    "(MAX(id) - compact_rev_key).",
 }
 
 # Label order per metric, as in the contract examples.
@@ -270,6 +279,42 @@ def k3s_state_db_bytes(path: str) -> int:
     return size
 
 
+# One statement = one read transaction = one consistent snapshot. Both subqueries are index
+# lookups (INTEGER PRIMARY KEY and kine_name_index), the same values as the read-only diagnostics
+# in DEPLOYMENT.md "k3s datastore (kine/SQLite) maintenance" and kine's own compact-revision query.
+KINE_LAG_SQL = (
+    "SELECT (SELECT MAX(id) FROM kine), "
+    "(SELECT MAX(prev_revision) FROM kine WHERE name = 'compact_rev_key')"
+)
+
+
+def k3s_kine_compaction_lag(path: str) -> int:
+    """Compaction lag of the live kine datastore: newest revision minus compact_rev_key (#129).
+
+    Strictly read-only: `mode=ro` never creates or writes the database (the unit sees the
+    directory read-only anyway, ProtectSystem=strict; SQLite then uses its read-only -shm path
+    and takes only shared locks), and `query_only` refuses any write. The statement is two index
+    lookups (~0.1 ms) and never makes kine's writes wait. The 1 s busy timeout bounds lock waits;
+    SQLite's internal WAL retry loop is bounded separately, and the unit's TimeoutStartSec caps
+    the whole run. Raises sqlite3.Error or ValueError when the value cannot be read; collect()
+    then skips only this gauge.
+    """
+    uri = "file:{}?mode=ro".format(urllib.parse.quote(path))
+    conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        max_id, compact_rev = conn.execute(KINE_LAG_SQL).fetchone()
+    finally:
+        conn.close()
+    if max_id is None or compact_rev is None:
+        raise ValueError("no kine rows or no compact_rev_key row")
+    if not isinstance(max_id, int) or not isinstance(compact_rev, int):
+        raise ValueError("non-integer revision values")
+    if compact_rev > max_id:
+        raise ValueError("compact_rev_key {} is ahead of MAX(id) {}".format(compact_rev, max_id))
+    return int(max_id - compact_rev)
+
+
 def render(
     node: str,
     data: Dict[str, Series],
@@ -277,6 +322,7 @@ def render(
     bucket_end: int,
     now: int,
     k3s_db_bytes: Optional[int] = None,
+    kine_lag: Optional[int] = None,
 ) -> str:
     lines: List[str] = []
 
@@ -304,6 +350,9 @@ def render(
     if k3s_db_bytes is not None:
         header(METRIC_K3S_DB)
         lines.append("{}{} {}".format(METRIC_K3S_DB, _labels([("node", node)]), k3s_db_bytes))
+    if kine_lag is not None:
+        header(METRIC_KINE_LAG)
+        lines.append("{}{} {}".format(METRIC_KINE_LAG, _labels([("node", node)]), kine_lag))
     return "\n".join(lines) + "\n"
 
 
@@ -378,6 +427,7 @@ def collect(
     for metric in list(data):
         data[metric], truncated[metric] = apply_cap(metric, data[metric], max_series)
     k3s_db_bytes = None
+    kine_lag = None
     if k3s_state_db:
         try:
             k3s_db_bytes = k3s_state_db_bytes(k3s_state_db)
@@ -390,7 +440,18 @@ def collect(
                 ),
                 file=sys.stderr,
             )
-    return render(node, data, truncated, end, int(now), k3s_db_bytes)
+        try:
+            kine_lag = k3s_kine_compaction_lag(k3s_state_db)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            # Same rule: skip only this gauge. A missing series while the size gauge is present
+            # fires K3sKineCompactionLagMissing.
+            print(
+                "homelab-netmon-collect: k3s kine lag skipped: {}: {}".format(
+                    type(exc).__name__, exc
+                ),
+                file=sys.stderr,
+            )
+    return render(node, data, truncated, end, int(now), k3s_db_bytes, kine_lag)
 
 
 def _ports(value: str) -> List[int]:
