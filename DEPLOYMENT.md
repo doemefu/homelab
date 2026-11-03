@@ -1377,11 +1377,12 @@ n8n's TypeORM migrations against its SQLite database are forward-only in practic
 runbook below before upgrading, and never point an older image at a database a newer image has
 already migrated.
 
-> **Note:** n8n 2.36.8's `/rest/settings` reports `sso.oidc.loginEnabled: false` /
-> `enterprise.oidc: false` even though env-managed OIDC (`N8N_SSO_MANAGED_BY_ENV`,
-> `N8N_SSO_OIDC_*`) is applied and the n8n log shows "OIDC login is enabled — applying OIDC SSO
-> env vars" — the OIDC login button appears to be gated by an unlicensed enterprise feature flag.
-> This was not verified end-to-end; verify with an actual login attempt before relying on it.
+> **Note:** OIDC single sign-on is an enterprise feature that the n8n community edition does not
+> unlock (owner confirmed 2026-10-22): `/rest/settings` reports `enterprise.oidc: false` although
+> the env-managed OIDC settings (`N8N_SSO_MANAGED_BY_ENV`, `N8N_SSO_OIDC_*`) are applied and the log
+> prints "OIDC login is enabled — applying OIDC SSO env vars" — that log line is not evidence of a
+> working SSO login. The owner signs in with a local n8n account; hardening of that login is tracked
+> in #121 and #280. Post-upgrade smoke tests use the local account, not OIDC.
 
 ---
 
@@ -1421,6 +1422,33 @@ ansible-playbook infra/playbooks/53_litellm.yml -e litellm_config_change_ack=<sh
 The ack goes on the command line only, never into inventory/group_vars. A playbook run with an
 unchanged config needs no ack.
 
+#### SSO roles
+
+LiteLLM derives a user's role from auth-service on every SSO login (#164): the
+`GENERIC_ROLE_MAPPINGS_*` env in `cluster/apps/litellm/deployment.yaml` maps the userinfo claim
+`role` = `ADMIN` to `proxy_admin` and every other user to `internal_user_viewer`, and LiteLLM writes
+that role to the user's row in its database. Club members need no LiteLLM role: Open WebUI, n8n and
+the club scripts call the LLM routes with virtual keys, which every role may use. So LiteLLM admin =
+auth-service `ADMIN` — before the first apply, check that `/dashboard/auth` on furchert.ch lists only
+the owner as `ADMIN`.
+
+- **Stale rows:** a user's row changes only at their next SSO login, and users who only own virtual
+  keys may never sign in again. After the first apply, open `https://ai.furchert.ch/ui` → Internal
+  Users and set every row except the owner's to `internal_user_viewer`.
+- **Break-glass:** the LiteLLM login form (always reachable at `https://ai.furchert.ch/fallback/login`)
+  accepts username `admin` with the master key as password
+  (`UI_USERNAME`/`UI_PASSWORD` unset) and grants `proxy_admin`; the master key also works on the API.
+  Check that this login works before the first apply.
+- **Rollback:** the playbook's apply never removes env entries, so deleting them from the manifest is
+  not enough. With the owner's go:
+  `kubectl -n apps set env deploy/litellm GENERIC_ROLE_MAPPINGS_ROLES- GENERIC_ROLE_MAPPINGS_GROUP_CLAIM- GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE-`
+  and then set roles by hand in Internal Users.
+- **Upgrades:** the three env names exist only in LiteLLM's code (`litellm/proxy/management_endpoints/ui_sso.py`,
+  `_setup_role_mappings`), not in its docs. Check that they still exist in the new tag before bumping.
+  Add or remove the three together: a malformed `GENERIC_ROLE_MAPPINGS_ROLES`, an invalid
+  `GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE` or `ROLES` without `GROUP_CLAIM` makes every SSO login fail
+  (use break-glass).
+
 #### Verify
 
 ```bash
@@ -1435,16 +1463,14 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 #### Upgrade
 
 1. Update image tag in `cluster/apps/litellm/deployment.yaml` to new pinned version
-2. Check [LiteLLM release notes](https://github.com/BerriAI/litellm/releases) — avoid known malicious versions (e.g., 1.82.7, 1.82.8)
+2. Check [LiteLLM release notes](https://github.com/BerriAI/litellm/releases) — avoid known malicious versions (e.g., 1.82.7, 1.82.8) — and that the `GENERIC_ROLE_MAPPINGS_*` env names still exist (see "SSO roles")
 3. Re-run: `ansible-playbook infra/playbooks/53_litellm.yml`
 4. Confirm: `kubectl rollout status deployment/litellm -n apps`
 
-> **Why step 4 matters:** the playbook's own rollout-wait task ("LiteLLM Rollout warten") polls
-> `status.availableReplicas == spec.replicas`, which is already true from the *old* pod under the
-> Deployment's default `RollingUpdate` strategy — it does not gate on the new pod actually coming
-> up. The playbook can report success while the old image is still serving. Always confirm the
-> new image landed with `kubectl -n apps rollout status deploy/litellm --timeout=10m` rather than
-> trusting the playbook's "changed" result alone.
+> **Rollout wait:** the playbook's rollout-wait task ("LiteLLM Rollout warten") uses the
+> `kubectl rollout status` conditions (#58) except its progress-deadline check: new spec observed,
+> every replica updated, no old pod left, every updated pod available. It waits up to 900 s (image pull plus the 10-min startupProbe
+> budget) and fails after that while the rollout itself continues; step 4 stays as the final check.
 
 ---
 
