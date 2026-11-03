@@ -86,8 +86,8 @@ data:
       # D40 standing remediation (club_assist worklog 20260711-114552): the
       # OCR backfill (468 PDFs, $0.91) proved out mistral-ocr; this route is
       # for the future recurring OCR drain, which calls LiteLLM's native
-      # /v1/ocr endpoint (BerriAI/litellm PR #15571, in this deployment's
-      # v1.98.0) with a scoped virtual key — never the
+      # /v1/ocr endpoint (BerriAI/litellm PR #15571, present in
+      # v1.98.0 and later) with a scoped virtual key — never the
       # provider master key. Dated snapshot per G2 (no -latest).
       - model_name: club-ocr
         litellm_params:
@@ -171,5 +171,5 @@ data:
       master_key: os.environ/LITELLM_MASTER_KEY
       database_url: os.environ/DATABASE_URL
       store_model_in_db: true   # intentionally true to allow dashboard-managed model config
-      default_user_params:
-        user_role: admin
+      # SSO user roles come from the GENERIC_ROLE_MAPPINGS_* env in deployment.yaml (#164). The former
+      # `default_user_params` key here was not a LiteLLM setting (never read) and has been removed.

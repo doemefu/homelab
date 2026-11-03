@@ -20,6 +20,8 @@ This document is a **hand-off guide for developers** who want to deploy their ap
 
 > **Do not create namespaces outside this list** without explicit discussion.
 
+Pod Security Admission (#160): `platform`, `monitoring`, `apps` and `homeassistant` carry `warn` + `audit` labels for the `baseline` profile (nothing enforced yet). Workloads in `apps` and `platform` must stay baseline-clean, e.g. no privileged containers, host namespaces, hostPath volumes or hostPorts (DEPLOYMENT.md "Pod Security Admission").
+
 **Create the `apps` namespace once before your first deployment**:
 ```bash
 kubectl create namespace apps

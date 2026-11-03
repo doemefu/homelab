@@ -9,9 +9,9 @@ Type=exec
 EnvironmentFile=-/etc/default/k3s
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-Environment=K3S_TOKEN={{ k3s_token }}
 ExecStart=/usr/local/bin/k3s agent \
   --server=https://{{ k3s_server_host }}:6443 \
+  --token-file={{ k3s_token_file }} \
   --node-ip={{ ansible_host }}
 KillMode=process
 Delegate=yes

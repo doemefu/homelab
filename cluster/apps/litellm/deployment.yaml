@@ -25,11 +25,14 @@ spec:
         - name: litellm
           # Avoid 1.82.7 and 1.82.8 (malicious releases on PyPI, March 2026).
           # The non_root image auto-migrates the Postgres schema on startup (prisma migrate deploy).
-          # Pinned v1.98.0 (2026-08-23). No '-stable' suffix since v1.84.0 (weekly releases bump MINOR).
-          # Fixes CVE-2026-49468 (critical host-header auth bypass) + 4 further advisories since 1.83.7.
-          # Multi-arch index digest sha256:157aaf0a519713663ec6abefe73fa48bf12f638b0e63fb2b209ba0eae68e6bd7
-          # resolved 2026-09-04 via `docker buildx imagetools inspect` (#57).
-          image: docker.litellm.ai/berriai/litellm-non_root:v1.102.1@sha256:ce9eec5907c9828706183dc9b80962f932ad2e34171fc8c7f131e3deda439f36
+          # Pinned v1.102.2 (#305, 2026-11-03): patch release of v1.102.1 that fixes GHSA-7hp6-4w63-5g45
+          # (high; experimental-UI and CLI session tokens get their own AES-GCM context; the default SSO
+          # UI session used here is unaffected).
+          # No '-stable' suffix since v1.84.0 (weekly releases bump MINOR). Newer than v1.98.0, so it keeps
+          # the CVE-2026-49468 fix (critical host-header auth bypass) + 4 further advisory fixes since 1.83.7.
+          # Multi-arch index digest sha256:b485a445ad2b53cae19df83e6e90b3f05ffc4394fe7039b76249fa60d00d181b
+          # (linux/amd64 + linux/arm64) resolved 2026-11-03 via the registry API.
+          image: docker.litellm.ai/berriai/litellm-non_root:v1.102.2@sha256:b485a445ad2b53cae19df83e6e90b3f05ffc4394fe7039b76249fa60d00d181b
           args:
             - "--config"
             - "/app/proxy_config.yaml"
@@ -110,6 +113,23 @@ spec:
             # auth-service has requireProofKey(true) globally — all clients must use PKCE.
             - name: GENERIC_CLIENT_USE_PKCE
               value: "true"
+            # SSO roles (#164). LiteLLM v1.102.x maps the auth-service userinfo claim `role` (USER|ADMIN)
+            # to a LiteLLM role on EVERY SSO login and writes it to the user's DB row
+            # (ui_sso.py _setup_role_mappings / generic_response_convertor / upsert_sso_user):
+            # auth-service ADMIN -> proxy_admin, everyone else -> internal_user_viewer (can sign in and see
+            # own keys/spend, cannot manage keys; LLM calls with existing virtual keys work for every role).
+            # These env names are code-only (not in the LiteLLM docs): re-check them on every LiteLLM bump.
+            # Add or remove the three together: a malformed ROLES, an invalid DEFAULT_ROLE or ROLES without
+            # GROUP_CLAIM breaks every SSO login (LiteLLM only catches TypeError there).
+            # Break-glass: UI login "admin" + master key (UI_USERNAME/UI_PASSWORD unset) is proxy_admin.
+            # Rollback: the playbook's apply never removes env entries — use `kubectl -n apps set env
+            # deploy/litellm <NAME>-` for the three names below (DEPLOYMENT.md "LiteLLM" -> "SSO roles").
+            - name: GENERIC_ROLE_MAPPINGS_GROUP_CLAIM
+              value: "role"
+            - name: GENERIC_ROLE_MAPPINGS_ROLES
+              value: "{'proxy_admin': ['ADMIN']}"
+            - name: GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE
+              value: "internal_user_viewer"
           # ConfigMap mounted as a file — ordering: ConfigMap must exist before Deployment is applied.
           volumeMounts:
             - name: config-volume
@@ -117,10 +137,9 @@ spec:
               subPath: config.yaml
               readOnly: true
           # startupProbe budget: 20 s initial delay + 58 × 10 s ≈ 10 min — covers the Prisma migration
-          # jump 1.83.7 → 1.98.0 (~15 minor versions). Roll out with 'kubectl -n apps rollout status
-          # deploy/litellm --timeout=10m' — the playbook's availableReplicas wait does not gate on the
-          # new pod under the default RollingUpdate strategy. A kubelet kill mid-migration can leave
-          # the Prisma migration state inconsistent.
+          # jump 1.83.7 → 1.98.0 (~15 minor versions). The playbook's rollout wait gates on the new pod
+          # (rollout-status conditions, #58). A kubelet kill mid-migration can leave the Prisma
+          # migration state inconsistent.
           startupProbe:
             httpGet:
               path: /health/liveliness

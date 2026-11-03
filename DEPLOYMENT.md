@@ -125,7 +125,7 @@ kubectl get ns
 | Namespace | Expected Pods | Status |
 |-----------|---------------|--------|
 | `kube-system` | traefik, coredns, metrics-server, svclb-* | Running |
-| `platform` | cert-manager (3x), cloudflared | Running |
+| `platform` | cert-manager (3x), cloudflared (2x, on different nodes) | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
 | `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-*, coroot-node-agent-* (only on gated nodes — see "coroot-node-agent (NM-2)") | Running |
 | `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, data-service-*, mcp-hub-*, n8n-*, litellm-*, open-webui-* | Running |
@@ -140,35 +140,75 @@ kubectl get ns
 
 #### Version Pin
 
-Set in `infra/roles/k3s/defaults/main.yml`:
+Set in `infra/roles/k3s/defaults/main.yml`, together with the sha256 of both binaries (#158 — the
+download task fails if the file does not match):
 ```yaml
-k3s_version: "v1.32.2+k3s1"
+k3s_version: "v1.32.13+k3s1"
+k3s_binary_sha256:
+  aarch64: "66b5f999..."   # line "k3s-arm64" of the release asset sha256sum-arm64.txt
+  x86_64: "4aaf9825..."    # line "k3s" of the release asset sha256sum-amd64.txt
 ```
+
+On every bump, copy both hashes from the release assets of the new tag (for example
+`curl -sSL https://github.com/k3s-io/k3s/releases/download/v1.32.13%2Bk3s1/sha256sum-arm64.txt`)
+and update them in the same commit as `k3s_version`. On a minor bump, also raise the Pod Security
+Admission `-version` labels (see "Pod Security Admission (#160)").
 
 #### Upgrade Procedure
 
-1. Read [k3s Changelog](https://github.com/k3s-io/k3s/releases) for breaking changes
-2. Verify monitoring is green: `kubectl get nodes` — all Ready
-3. Verify Longhorn volumes healthy: `kubectl get -n longhorn-system volumes`
+Patch upgrades within one minor are done in place, without draining: `k3s.service` and
+`k3s-agent.service` use `KillMode=process`, so containers keep running while k3s restarts. Draining
+would move the single-replica RWO workloads (postgresql-0, influxdb2-0, mosquitto, n8n, open-webui,
+Home Assistant) between nodes for no benefit.
 
-**Upgrade one node at a time**:
+1. Read the [k3s release notes](https://github.com/k3s-io/k3s/releases) of every release in between,
+   especially the embedded component table (kine, containerd, Traefik chart, CoreDNS) — e.g. the
+   Traefik chart 39 shipped with v1.32.13 needed the `ports.web.http.redirections` key in
+   `40_platform.yml`.
+2. Verify: all nodes Ready, no unhealthy pods, all Longhorn volumes `healthy`, kine small (see
+   "Read-only diagnostics" below), no Longhorn snapshot (02:00), restic (03:00) or metrics trim (05:00)
+   running in the next hour, and two cloudflared replicas Ready on two different nodes
+   (`kubectl -n platform get pods -l pod=cloudflared -o wide`, see "Cloudflare Tunnel → Replicas and
+   placement"). That last check is what makes a node restart safe off-LAN: `ssh.furchert.ch` runs
+   through cloudflared, and while k3s on a node is down nothing restarts a crashed pod there. Off-LAN,
+   use the SSH jump config ("Off-LAN kubectl / Ansible Access") and judge every step on the nodes, not
+   through the port-forward: `sudo k3s kubectl …` on raspi5 (the agents have no admin kubeconfig), and
+   `systemctl is-active k3s` (raspi5) or `systemctl is-active k3s-agent` (agents) on the node being
+   upgraded.
+3. Keep the previous binary on every node before touching it:
+   `ssh ansible@<ip> 'sudo cp -a /usr/local/bin/k3s /usr/local/bin/k3s-<old-version>'`.
+4. raspi5 first, then the agents one at a time (raspi4, mba1, mba2), each with a `--check` run first.
+   Use `--check` without `--diff` for this playbook (see "Join token and admin kubeconfig").
 
 ```bash
-# Control-Plane first (raspi5)
-kubectl drain raspi5 --ignore-daemonsets --delete-emptydir-data
-ansible-playbook infra/playbooks/20_k3s.yml -l raspi5
-kubectl uncordon raspi5
-kubectl get nodes -w  # Wait for Ready
-
-# Then workers (one at a time)
-for NODE in raspi4 mba1 mba2; do
-  kubectl drain $NODE --ignore-daemonsets --delete-emptydir-data
-  ansible-playbook infra/playbooks/20_k3s.yml -l $NODE
-  kubectl uncordon $NODE
-  kubectl get nodes -w  # Wait for Ready before next
-  sleep 30
-done
+ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5 --check
+ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
+kubectl get nodes -o wide          # raspi5 Ready with the new version within ~2 min
+# then the same two commands with --limit raspi4, mba1, mba2 — one node at a time, wait for Ready
 ```
+
+5. When the bundled Traefik chart changes (it does with v1.32.13), apply the Traefik values right after
+   raspi5 — until then `helm-install-traefik` fails the new chart's schema check and the old Traefik
+   keeps running:
+   `ansible-playbook infra/playbooks/40_platform.yml --start-at-task "Traefik HelmChartConfig — HTTP zu HTTPS Redirect + Metrics"`,
+   then `kubectl -n kube-system get job helm-install-traefik` (1/1) and `curl -s -o /dev/null -w '%{http_code}' http://192.168.1.61/` (301).
+6. While the #102 graceful-shutdown rollout is not live on the Macs, add
+   `-e '{"k3s_graceful_shutdown_enabled": false}'` to the mba1/mba2 runs (JSON form — a `key=false` extra
+   var is the string `"false"` and breaks the boolean condition).
+7. After each apply, confirm the node really runs the new binary (`kubectl get nodes` VERSION equals
+   `k3s --version` on the node). A run that dies after a changed task loses its handlers, and a re-run
+   no longer sees a change — restart k3s/k3s-agent by hand in that case.
+
+**Rollback** (per node, the unit flags work with the previous patch release too):
+
+```bash
+ssh ansible@<ip> 'sudo systemd-run --unit=k3s-rollback --collect /bin/sh -c \
+  "install -m 0755 /usr/local/bin/k3s-<old-version> /usr/local/bin/k3s && systemctl restart k3s --no-block"'
+# agents: systemctl restart k3s-agent --no-block
+```
+
+Delete the kept binaries after 24 h of stable operation. A rollback of raspi5 also rolls back the
+bundled Traefik chart; re-apply the matching HelmChartConfig values from the old `40_platform.yml`.
 
 #### Check Current Version
 
@@ -182,15 +222,79 @@ After major k3s upgrades, verify service templates against current k3s documenta
 - `infra/roles/k3s/templates/k3s-server.service.j2` (control-plane)
 - `infra/roles/k3s/templates/k3s-agent.service.j2` (workers)
 
+#### Join token and admin kubeconfig (#156)
+
+- The cluster join token is written to `/etc/rancher/k3s/cluster-token` (root, `0600`) on every node
+  and passed with `--token-file`; the systemd units (mode `0644`) no longer contain it. The token-file
+  task, both unit templates and the kubeconfig fetch in `20_k3s.yml` run with `no_log`/`diff: false`,
+  because the pre-#156 units embedded the token and a `--diff` of that migration would print it.
+  Still prefer `--check` without `--diff` for `20_k3s.yml`.
+- The admin kubeconfig `/etc/rancher/k3s/k3s.yaml` on raspi5 is `0600` (`--write-kubeconfig-mode`);
+  on the node use `sudo k3s kubectl`. The operator's copy `~/.kube/homelab.yaml` is unaffected — the
+  playbook still fetches it (now with `become`).
+
+#### API audit log (#158)
+
+The kube-apiserver on raspi5 writes an audit log to `/var/log/k3s-audit/audit.log`; the policy is
+`/etc/rancher/k3s/audit-policy.yaml` (template `infra/roles/k3s/templates/audit-policy.yaml.j2`).
+
+- **Content:** level `Metadata` at most — who did what to which object, never request or response
+  bodies. Logged: every access to Secrets and service-account tokens except reads by kubelets
+  (`system:nodes`); exec/attach/port-forward/proxy (already when the session opens) and
+  container log reads; all writes. Dropped: leases, events, token/access reviews, status heartbeats,
+  kubelet reads, all other reads, non-resource URLs (health, metrics, discovery).
+- **Retention:** the apiserver rotates the file at 20 MB and keeps up to 10 gzip-compressed backups for
+  at most 7 days (`k3s_audit_log_maxsize`, `_maxbackup`, `_maxage`), so it stays around 50 MB on the
+  SD card. Expected volume is ~20 MB/day (mostly Flux server-side-apply dry-runs); measure it a day
+  after rollout (`sudo ls -la /var/log/k3s-audit/`) and adjust `_maxbackup` if 7 days do not fit.
+  `--audit-log-mode=batch` keeps the writes out of the request path.
+- **Read:** `ssh ansible@192.168.1.61 "sudo tail -n 20 /var/log/k3s-audit/audit.log | jq -c '{user: .user.username, verb, uri: .requestURI, code: .responseStatus.code}'"`
+- **Disable** (rollback): `ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5 -e '{"k3s_audit_log_enabled": false}'`
+  (restarts k3s on raspi5).
+
+#### Pod Security Admission (#160)
+
+The four namespaces created by the playbooks carry Pod Security Admission labels for the `baseline`
+profile in `warn` and `audit` mode. Nothing is enforced yet.
+
+| Namespace | Set by | Labels | Workloads that violate baseline (2026-11-03, offline check of the pinned charts and manifests) |
+|---|---|---|---|
+| `apps` | `50_apps_infra.yml` | warn + audit `baseline`, `v1.32` | none |
+| `platform` | `40_platform.yml` | warn + audit `baseline`, `v1.32` | none |
+| `monitoring` | `41_monitoring.yml` | warn + audit `baseline`, `v1.32` | `kube-prometheus-stack-prometheus-node-exporter` (hostNetwork, hostPID, hostPath, hostPort 9100); `coroot-node-agent` (privileged, hostPID, hostPath; approved, NM-2) |
+| `homeassistant` | `51_homeassistant.yml` | warn + audit `baseline`, `v1.32` | `home-assistant` (hostNetwork, hostPort 8123; needed for mDNS discovery) |
+
+- **Effect:** admission never rejects a pod. `warn` returns a warning when a workload is created or
+  updated, so existing pods are not re-evaluated. `audit` adds a `pod-security.kubernetes.io/audit-violations`
+  annotation to that request's audit event (the API audit log above) and counts it in
+  `pod_security_evaluations_total{mode="audit"}`.
+- **Live check (read-only; also the gate before any `enforce` label):**
+  `kubectl label --dry-run=server --overwrite ns <namespace> pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/enforce-version=v1.32`
+  lists the running pods that `enforce=baseline` would reject. Audit log over the current and the rotated
+  (gzipped) files (about 7 days; the directory is root-only, `jq` runs locally):
+  `ssh ansible@192.168.1.61 "sudo sh -c 'gzip -cdf /var/log/k3s-audit/audit*'" | jq -c 'select(.annotations["pod-security.kubernetes.io/audit-violations"]) | {ns: .objectRef.namespace, res: .objectRef.resource, verb, name: .objectRef.name, v: .annotations["pod-security.kubernetes.io/audit-violations"]}'`
+  Expected entries: Flux/Helm updates of the known violators (coroot-node-agent, node-exporter, home-assistant).
+- **Next steps (#160):** `apps` and `platform` can get `enforce: baseline` after a clean audit
+  period. For `monitoring` and `homeassistant`, either set `enforce: privileged` explicitly or move the
+  violators out first. `restricted` comes later, per workload. Every new workload in `apps` and
+  `platform` has to stay baseline-clean.
+- **Version pin:** the `-version` labels pin the policy to `v1.32` in the four namespace tasks. Raise them
+  (and the `enforce-version` in the live check) with the next k3s minor upgrade.
+- **Rollback:** a revert does not remove labels, because the playbooks patch namespaces with a merge.
+  Run `kubectl label ns apps platform monitoring homeassistant pod-security.kubernetes.io/warn- pod-security.kubernetes.io/warn-version- pod-security.kubernetes.io/audit- pod-security.kubernetes.io/audit-version-`.
+
 #### k3s datastore (kine/SQLite) maintenance
 
 k3s's embedded datastore is [kine](https://github.com/k3s-io/kine) on SQLite
 (`/var/lib/rancher/k3s/server/db/state.db`, control-plane node only — raspi5). kine's online
 compactor runs every 5 minutes, with a 5 second per-batch `DELETE` timeout and a 1,000-row batch
 size (`compactInterval`, `compactTimeout`, `compactBatchSize` in
-`pkg/logstructured/sqllog/sql.go`, kine v0.13.9 — none of these are tunable via k3s flags). On a
+`pkg/logstructured/sqllog/sql.go`, kine v0.13.9 — none of these are tunable via k3s flags; since
+k3s v1.32.13 (kine v0.14.12) k3s starts kine with `--compact-interval=0s`, so the kube-apiserver
+drives the same compaction through its own `--etcd-compaction-interval`, default 5 min). On a
 large enough backlog, a batch can exceed the 5 second timeout; Go's `database/sql` rolls that
-transaction back, and the compactor stalls permanently instead of retrying — the datastore keeps
+transaction back, and (with kine v0.13.9, k3s up to v1.32.2) the compactor stalls permanently instead
+of retrying — the datastore keeps
 growing and query latency keeps degrading until someone intervenes by hand. This happened on
 raspi5 on 2026-09-23 (homelab#129): compaction had silently stalled for ~5 days, `state.db` grew
 to 5.02 GB / 1.49M rows, and the cluster degraded. Details, full timeline and root-cause analysis
@@ -225,9 +329,20 @@ Healthy after an offline compaction: ≈ 30-90 MB (2026-10-28 00:31: `state.db` 
 alert gives roughly a day of lead time before the symptoms above. When it fires, run the
 read-only diagnostics below and then the offline compaction. SQLite never shrinks a file without
 `VACUUM`, so the alert keeps firing even after the online compactor catches up on its own — only
-the offline compaction (which ends with `VACUUM`) clears it; silencing it is not a fix. The
-compaction lag (`max_id - compact_rev`) is not exported; it needs a read of the live datastore
-(out of scope for #150).
+the offline compaction (which ends with `VACUUM`) clears it; silencing it is not a fix.
+
+**Compaction lag (#129).** The same script also writes
+`homelab_k3s_kine_compaction_lag_revisions{node="raspi5"}` = `MAX(id)` minus `compact_rev_key`, the
+values of the read-only diagnostics below, read with one SQLite statement over a read-only
+connection (`mode=ro`, `query_only`, 1 s busy timeout; the unit sees the directory read-only through
+`ProtectSystem=strict`). Healthy: about 1-3k (kine keeps 1000 revisions plus 5-10 min of churn
+between compactions). The lag passes 50k about 4-6 h into a stall (later once the Flux lease churn
+is reduced), and `K3sKineCompactionLagging` fires after it stayed above 50k for 2 h, so about
+6-8 h into a stall and well before the file reaches 500 MB.
+`K3sKineCompactionLagMissing` fires when the size gauge is reported but the lag is not for 1 h:
+`journalctl -u homelab-netmon -n 20` shows `k3s kine lag skipped: <error>`. Expected skips: k3s
+stopped cleanly (no `-wal`/`-shm` to open read-only) and a damaged or locked database; the LAN
+metrics and the size gauge keep flowing either way.
 
 A missing or unreadable `state.db` skips only this gauge (warning `k3s state db skipped: …` in
 `journalctl -u homelab-netmon`); the LAN metrics keep flowing. The missing series fires
@@ -237,7 +352,8 @@ scraped.
 
 Rollout (owner; playbook runs need a go). The collector script changes on every node, so roll
 `netmon_node` out to all nodes (no `-l`); only raspi5's unit file changes. Run `10_base.yml` before
-`41_monitoring.yml`, otherwise `K3sDatastoreSizeMissing` fires after 1 h.
+`41_monitoring.yml`, otherwise `K3sDatastoreSizeMissing` (or, for the #129 lag gauge,
+`K3sKineCompactionLagMissing`) fires after 1 h.
 
 ```bash
 # Off-LAN: prefix with ANSIBLE_SSH_ARGS=… (see "Off-LAN kubectl / Ansible Access").
@@ -251,12 +367,12 @@ ansible-playbook infra/playbooks/41_monitoring.yml                  # alert rule
 Verify:
 
 ```bash
-ssh raspi5 "grep homelab_k3s_state_db_bytes /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
+ssh raspi5 "grep -E 'homelab_k3s_(state_db_bytes|kine_compaction_lag_revisions)' /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
 ssh raspi5 "sudo ls -la /var/lib/rancher/k3s/server/db/"     # state.db + state.db-wal ≈ the gauge
-kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'K3sDatastore(Large|SizeMissing)'  # expect 2
+kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'alert: (K3sDatastore(Large|SizeMissing)|K3sKineCompactionLag(ging|Missing))$'  # expect 4
 ```
 
-Rollback: `git revert` the #150 commits, then re-run
+Rollback: `git revert` the #150 (or #129 lag) commits, then re-run
 `ansible-playbook infra/playbooks/10_base.yml --tags netmon_node` and
 `ansible-playbook infra/playbooks/41_monitoring.yml`.
 
@@ -283,7 +399,8 @@ sudo ls -la /var/lib/rancher/k3s/server/db/
 journalctl -u k3s --since '1 hour ago' --no-pager | grep -c 'Slow SQL'
 
 # has the online compactor made progress recently? silence across several 5-min windows
-# means it has stalled
+# means it has stalled — or that there was nothing to compact: confirm with the compact_rev
+# query above (it must move forward between two runs ~10 min apart)
 journalctl -u k3s --since '30 min ago' --no-pager | grep -E 'COMPACT compacted|Compact failed'
 
 # k3s restart count and current state
@@ -346,6 +463,13 @@ sudo /tmp/kine-offline-compact.sh --dry-run   # read-only preview first — k3s 
 sudo /tmp/kine-offline-compact.sh             # full run: stop / backup / compact / start,
                                                # confirms before each stage
 ```
+
+`homelab-netmon` keeps running during the offline compaction: its once-a-minute lag read is a
+read-only statement of about 0.1 ms, and while k3s is stopped it either reads the current value or
+logs `k3s kine lag skipped` (#129). If the script's WAL checkpoint ever reports busy, re-run the
+script.
+Do not stop `homelab-netmon.timer` for it: that would also stop raspi5's LAN metrics and fire
+`NetmonNodeScriptStale`.
 
 `kine-offline-compact.sh` stops k3s, checkpoints the WAL, takes a `cp -a` backup of `state.db`,
 runs `kine-offline-compact.py` — the same `DELETE`/`UPDATE` kine's own compactor runs
@@ -662,12 +786,80 @@ kubectl get secret cloudflare-api-token -n platform -o yaml
 #### Status
 
 ```bash
-# Pod status
-kubectl -n platform get pods -l app=cloudflared
+# Pod status (the chart's only pod label is pod=cloudflared)
+kubectl -n platform get pods -l pod=cloudflared -o wide
 
 # Logs
-kubectl -n platform logs -l app=cloudflared --tail=50
+kubectl -n platform logs -l pod=cloudflared --prefix --tail=50
 ```
+
+#### Replicas and placement (#322)
+
+cloudflared runs as **two replicas of the same tunnel** (same token; Cloudflare allows up to 25 replicas
+per tunnel and spreads requests over all connected replicas). It carries every public route and
+`ssh.furchert.ch`, the only off-LAN way in, so one node's k3s restart must never leave it without a
+supervised replica:
+
+- `replicaCount: 2` in `cluster/values/cloudflared.yaml`.
+- Chart 0.1.2 renders no affinity, probes beyond its liveness probe, resources or security contexts, so
+  `40_platform.yml` patches its Deployment: a **required pod anti-affinity** on `kubernetes.io/hostname`
+  (never two replicas on one node), a **readinessProbe** on `/ready` (200 only with an edge connection)
+  and `minReadySeconds: 10`. With the default rolling update (maxSurge 1, maxUnavailable 0) an old pod
+  is removed only after a new pod holds an edge connection. Helm's three-way merge keeps these fields on
+  later chart upgrades; drop the patch task once a chart version renders them itself.
+- A PodDisruptionBudget `cloudflared` (`minAvailable: 1`). It guards manual drains and other eviction-API
+  callers only; nothing in this repo drains nodes.
+- Consequence: every pod-template change (image bump, ingress change via the restart task) needs a
+  **third schedulable node** for the surge pod. With two nodes down the rollout waits (old pods keep
+  serving) and the Helm task's 3 min wait fails the playbook run.
+
+Apply only the cloudflared part: the namespace, the two Helm repo tasks, the Helm release, the PDB and the patch. No tunnel
+ingress PUT, no restart task, no Traefik values, so it is safe before a k3s upgrade. Off-LAN, add the
+SSH jump config and the tunnel kubeconfig (`~/.kube/tunnel.yaml`, see "Off-LAN kubectl / Ansible
+Access"). Prerequisite for the diff checks below: the helm-diff plugin (`helm plugin list` shows `diff`
+3.4.1 or newer). Without it the helm module prints no diff and always reports the release as changed.
+
+```bash
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --list-tasks   # 6 tasks, ending with the patch
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared
+# off-LAN: ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=60s" \
+#   ansible-playbook … -e kubeconfig="$HOME/.kube/tunnel.yaml"
+```
+
+- **Never run this playbook with `-v`**: the helm module's result includes the release values, which
+  hold the tunnel token. The plain `--diff` is safe (helm-diff masks Secret data).
+- On the first run the "Cloudflared deployen" diff must show only `replicas: 1` → `2`. Any other change
+  restarts the pods during the Helm step, before the placement patch: stop and investigate.
+- Helm only adds the second pod; the patch task then replaces both pods, and a new pod never lands on a
+  node that still runs a cloudflared pod. An SSH session that runs through a replaced pod drops once;
+  reconnect.
+
+Verify:
+
+```bash
+kubectl -n platform rollout status deploy/cloudflared-cloudflare-tunnel-remote --timeout=5m
+kubectl -n platform get deploy cloudflared-cloudflare-tunnel-remote -o jsonpath='{.status.updatedReplicas}/{.status.readyReplicas} {.spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey} {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}'
+                                                       # 2/2 kubernetes.io/hostname /ready
+kubectl -n platform get pods -l pod=cloudflared -o wide   # 2x 1/1 Running, two different nodes
+kubectl -n platform get pdb cloudflared                   # ALLOWED DISRUPTIONS 1
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff   # again: changed=0
+```
+
+Rollback. The patched fields survive Helm and a plain revert, so remove them explicitly:
+
+```bash
+kubectl -n platform rollout undo deploy/cloudflared-cloudflare-tunnel-remote   # abort a stuck rollout only
+# strategic merge with nulls: works with and without a preceding rollout undo
+kubectl -n platform patch deploy cloudflared-cloudflare-tunnel-remote --type strategic -p '{"spec":{"minReadySeconds":null,"template":{"spec":{"affinity":null,"containers":[{"name":"cloudflared","readinessProbe":null}]}}}}'
+kubectl -n platform delete pdb cloudflared
+kubectl -n platform scale deploy/cloudflared-cloudflare-tunnel-remote --replicas=1
+```
+
+Then, before the next playbook-40 run, open a PR that sets `replicaCount: 1` and removes the PDB and patch
+tasks but keeps the `tags: [cloudflared]` lines. A plain `git revert` of #322 also drops the tags, so a
+`--tags cloudflared` run would select nothing, and a full run would re-apply the ingress, the restart and
+the Traefik values.
 
 #### Add New Public Endpoint
 
@@ -677,12 +869,34 @@ kubectl -n platform logs -l app=cloudflared --tail=50
 
 Worked example: `mcp.furchert.ch` in "mcp-hub (Flux, #170 onboarding)".
 
+#### Internal-only paths on public hosts
+
+Some paths of a public host answer `404` at the tunnel because only in-cluster callers use them.
+These are `path` rules in `cf_ingress_body`, placed before the host's general rule (first match wins):
+
+- `n8n.furchert.ch`: every `webhook*` variant of `…/club-mcp-gateway` (see "club-mcp").
+- `auth.furchert.ch` (#306): the admin API `/api/v1/*`, the Swagger UI (`/swagger-ui.html`,
+  `/swagger-ui/*`) and the OpenAPI documents (`/api-docs*`, `/v3/api-docs*`). The OIDC/OAuth paths
+  stay public. Admin work goes through furchert.ch `/dashboard/auth`. For the raw API or the Swagger UI
+  from the Mac use `kubectl -n apps port-forward svc/auth-service 18080:8080` and
+  `http://localhost:18080/swagger-ui.html`.
+
+A `40_platform.yml` run replaces the whole tunnel configuration with `cf_ingress_body` from the
+checkout. `--check` skips that PUT (the task has `no_log`), so it never shows the new ingress list; it
+only reports the cloudflared restart task as changed when the list differs. Run it from an up-to-date
+`main` on the home network: the restart drops an off-LAN SSH forward. Before the run, compare the
+tunnel's published application routes in the Cloudflare dashboard (Networking → Tunnels → the tunnel
+→ Routes; formerly "Public Hostname") with `cf_ingress_body`.
+
 #### Restart Tunnel Pod
 
 ```bash
 kubectl -n platform rollout restart deployment/cloudflared-cloudflare-tunnel-remote
 kubectl -n platform rollout status deployment/cloudflared-cloudflare-tunnel-remote
 ```
+
+With two replicas the restart rolls one pod at a time and keeps a connected replica (see "Replicas and
+placement"); an off-LAN SSH session through a replaced pod still drops once.
 
 #### Full Tunnel Recreate (Emergency)
 
@@ -871,6 +1085,103 @@ short form of the commands above.
 
 ---
 
+### Cloudflare Access for grafana, n8n and ssh (#121)
+
+`ssh.furchert.ch` already sits behind a Cloudflare Access application, which `cloudflared access ssh`
+and the off-LAN runbooks need. `grafana.furchert.ch` and `n8n.furchert.ch` are public tunnel routes
+protected only by each app's own login. n8n's is a local account, because OIDC single sign-on is
+enterprise-only in the n8n community edition; account MFA is #280. This runbook puts both behind
+Access with the same owner-only policy. It is done in the Cloudflare dashboard. Codifying it (an API
+token with the Access scope, stored as a new encrypted inventory value by the owner) is a follow-up.
+
+**Who reaches these hosts from outside the browser** (n8n workflow exports in doemefu/homelab-n8n,
+club-assistant repo, all homelab repos, 2026-11-03):
+
+| Host | Caller outside a browser | Path | Handling |
+|---|---|---|---|
+| `n8n.furchert.ch` | Telegram Bot API → Telegram Trigger of the active workflow `m6_telegram_drafting` | `/webhook/<webhookId>/webhook` | **Bypass application** for exactly this path (step 3) |
+| `n8n.furchert.ch` | Open WebUI club pipe → `m6_chat_agent`, `m6_chat_commands` webhooks; club-mcp → `club-mcp-gateway` | — | in-cluster (`n8n.apps.svc.cluster.local`), not affected |
+| `n8n.furchert.ch` | Approve/edit links in the drafting messages: the send-and-wait nodes "Approval SendAndWait" and "Form SendAndWait" of `m6_telegram_drafting`, opened in the phone's Telegram browser | `/webhook-waiting/*` | No bypass. The owner is the only authorized chat, so the phone shows the e-mail PIN page once per 24 h session, then the link works |
+| `n8n.furchert.ch` | Workflow export/import scripts and agents using the n8n public API (`/api/v1/*`) from the Mac | `/api/v1/*` | No bypass: use `kubectl -n apps port-forward svc/n8n 5678:80` and `N8N_BASE_URL=http://localhost:5678` |
+| `n8n.furchert.ch` | Google OAuth credential callback `/rest/oauth2-credential/callback` | — | browser redirect in a session that already passed Access, so no change |
+| `grafana.furchert.ch` | none (browser only; alert links in Discord open in the browser) | — | — |
+
+The exports cover the workflows the backup workflow writes to GitHub. Before step 3, check in the n8n UI
+that no other **active** workflow has a Webhook, Form, Chat or Telegram trigger, or a Send-and-Wait or
+"Wait → On webhook call" node. The Google Drive, Gmail and schedule triggers poll outbound and are not
+affected.
+
+**Pre-checks (owner, before step 2):**
+
+1. n8n → Credentials → "n8n account" (type n8n API), used by "Back up n8n workflows to Github": its
+   Base URL must be `http://localhost:5678/api/v1`. If it is `https://n8n.furchert.ch/api/v1`, the backup
+   request leaves the pod, comes back through Access and fails. Change it first, then run the backup
+   workflow once by hand.
+2. n8n → workflow `m6_telegram_drafting` → Telegram Trigger node → Webhook URLs → **Production URL**.
+   Note the path; it has the form `/webhook/<webhookId>/webhook`. Never put the id into this public repo.
+
+**Steps (Cloudflare dashboard, `one.dash.cloudflare.com`):**
+
+1. **Login method:** Zero Trust → Integrations → Identity providers → Add new identity provider →
+   **One-time PIN** (skip if it is already listed).
+2. **Owner-only application per host.** Zero Trust → Access controls → Applications → Create new
+   application → Self-hosted and private → Add public hostname. Use these values:
+   - Application name: `grafana` (then `n8n` the same way).
+   - Subdomain `grafana` (or `n8n`), Domain `furchert.ch`. Leave the path empty, so the whole host is covered.
+   - Session duration: `24 hours`.
+   - Identity providers: only One-time PIN; enable "Apply instant authentication".
+   - Access policies → create a policy `owner-only`: Action **Allow**, Include → **Emails** → your own
+     e-mail address. Reuse the same policy for the second application.
+   - Create.
+3. **Telegram bypass (n8n only).** Create new application → Self-hosted and private → Add public hostname
+   with these values:
+   - Application name: `n8n-telegram-webhook`.
+   - Subdomain `n8n`, Domain `furchert.ch`, Path `webhook/<webhookId>/webhook` (from pre-check 2).
+   - Policy: Action **Bypass**. Include → **IP ranges** → Telegram's webhook source ranges
+     `149.154.160.0/20` and `91.108.4.0/22` (or Include → **Everyone** if Telegram deliveries fail).
+
+   Access applies the most specific path, so only this one URL skips the login. Bypass requests are not
+   logged by Access. On that path, n8n's Telegram Trigger, which checks Telegram's secret-token header,
+   is then the control. Do not add bypass rules for other n8n paths.
+4. **ssh.furchert.ch (already exists):** Zero Trust → Access controls → Applications → the SSH
+   application. Attach the `owner-only` policy. Remove its old policy only after `cloudflared access
+   login https://ssh.furchert.ch` and an off-LAN `ssh raspi5` still work. Record the IdP and session
+   length in #121, not here.
+
+**Verification:**
+
+```bash
+# expect 302 to <team>.cloudflareaccess.com for each host (no Access session in curl)
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://grafana.furchert.ch/
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://n8n.furchert.ch/
+curl -s -o /dev/null -w '%{http_code}\n' https://n8n.furchert.ch/rest/settings     # not 200 from n8n
+# Telegram path: with the IP-range bypass, a request from the Mac is outside the ranges and gets an
+# Access response (redirect or block page), not n8n; Telegram itself is tested below.
+# With the Everyone bypass, n8n answers 403 (missing Telegram secret-token header).
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -X POST "https://n8n.furchert.ch/webhook/<webhookId>/webhook"
+```
+
+Then:
+- Browser: both hosts ask for the e-mail PIN once, then show the app login.
+- Telegram: send a message to the club bot; `m6_telegram_drafting` shows a new execution (this is the real
+  test of the bypass). From the phone, approve one draft and open the edit form once: the PIN page appears
+  at most once per session, then the link works.
+- The backup run started by hand in pre-check 1, and the next scheduled run, succeed. "Backup Watchdog"
+  stays silent.
+- Off-LAN `cloudflared access ssh` still works.
+
+**Rollback:** in Zero Trust → Access controls → Applications, delete the application or detach the
+`owner-only` policy from that one application. Do not edit the shared `owner-only` policy itself,
+because ssh uses it too. The tunnel and the apps themselves are unchanged.
+
+**Follow-up (club-assistant repo):**
+- Its laptop red-team cases against `n8n.furchert.ch` (RT-M05 404 checks, the RT-A webhook probe) now
+  meet the Access redirect first.
+- Its docs still call n8n "SSO-protected".
+- Its n8n API scripts should default to the port-forward.
+
+---
+
 ### Monitoring (Prometheus + Grafana)
 
 #### Status
@@ -915,6 +1226,7 @@ Expected UP targets:
 - `serviceMonitor/monitoring/mosquitto` → apps
 - `serviceMonitor/monitoring/data-service` → apps (job `data-service`, `/actuator/prometheus` — see "data-service NM-1: Cloudflare keys, scrape and alerts")
 - `serviceMonitor/monitoring/cert-manager` → platform (job `cert-manager`, port 9402 — see "Platform alerting (#284)")
+- `serviceMonitor/monitoring/mcp-hub` → apps (job `mcp-hub`, Service port `internal` 8084, `/metrics` — see "mcp-hub alerts (#178)")
 - `serviceMonitor/monitoring/coroot-node-agent` → monitoring (one target per gated node; none while the gate is closed)
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
@@ -1141,7 +1453,10 @@ Design notes:
   each Flux object into `gotk_resource_info{namespace,name,customresource_kind,ready,suspended}`
   (about 28 series). A PodMonitor on the six controllers would add thousands of series to a
   Prometheus that was already near its memory limit. Adding a Flux kind means one more
-  `groupVersionKind` entry and its plural in `kube-state-metrics.rbac.extraRules`.
+  `groupVersionKind` entry **with its own help text** and its plural in
+  `kube-state-metrics.rbac.extraRules`. kube-state-metrics (v2.12+) de-duplicates same-named
+  families with an identical HELP line and drops the later kinds' samples (kube-state-metrics#2366);
+  the first rollout exported only 3 of the 5 kinds in use and `FluxResourceMetricsMissing` fired.
 - **cert-manager** is scraped by an inline ServiceMonitor in `41_monitoring.yml`, not by the chart's
   `prometheus.servicemonitor.enabled`, which would need a `40_platform.yml` run. No Certificate exists
   today (public TLS terminates at Cloudflare), so the certificate rules stay dormant until one does.
@@ -1194,6 +1509,45 @@ stop. Today `Watchdog` goes to Discord every 12 h with everything else.
 kube-prometheus-stack <revision before the change>`, then
 `kubectl -n monitoring delete servicemonitor cert-manager` (Ansible-applied, not part of the
 release), and revert the PR so the next playbook run does not re-apply it.
+
+**mcp-hub alerts (#178):** the hub's own metrics (`docs/080-mcp-hub.md` §9.7, live since hub#90) are
+scraped by the ServiceMonitor `monitoring/mcp-hub` (`41_monitoring.yml`; Service port `internal`,
+8084, `/metrics`, 30 s, job `mcp-hub`). Rules in `additionalPrometheusRulesMap.homelab-mcp-hub`
+(tests `cluster/values/tests/mcp-hub.test.yml`), expressions verbatim from spec 080 §7.4:
+
+| Alert | Fires when | `for` |
+|-------|-----------|-------|
+| `McpHubAccountAuthExpired` | an account × capability reports `auth_expired` (one-hot `mcp_hub_account_status`) | 30m |
+| `McpHubDown` | the hub target scrapes with `up == 0`, or there is no target while `spec.replicas > 0` | 10m |
+
+- **Action for `McpHubAccountAuthExpired`:** Graph accounts re-login with `mcp-hub login <account>`
+  ("mcp-hub token store and the Outlook account (#171 onboarding)"); app-password accounts get a
+  new app password in the encrypted group vars plus playbook 59 ("mcp-hub (Flux, #170 onboarding)",
+  "mcp-hub: Gmail account (#172)"). A pod restart resets the status to `unknown` and restarts the
+  30 min.
+- **Checks for `McpHubDown`:** `kubectl -n apps get pods -l app=mcp-hub`,
+  `kubectl -n monitoring get servicemonitor mcp-hub`, the Service port name `internal`, and
+  `kubectl -n apps get networkpolicy -o custom-columns=NAME:.metadata.name,SEL:.spec.podSelector.matchLabels`
+  (no policy may select `app=mcp-hub` without admitting `monitoring` → 8084; #127).
+- **One message per outage:** while `WorkloadUnavailable` fires for `apps/mcp-hub`, an inhibit rule
+  in `41_monitoring.yml` mutes `McpHubDown` and the chart's `TargetDown` for job `mcp-hub`; while
+  only the scrape fails (pod available), a second rule lets `McpHubDown` mute `TargetDown` for the
+  job. The `equal` lists are empty on purpose: the absent() branch of `McpHubDown` carries only
+  `job="mcp-hub"`. `KubePodCrashLooping` / `KubePodNotReady` (pod-level) are not muted.
+- **Planned stop with replicas left at 1:** silence `WorkloadUnavailable`, `McpHubDown` and
+  `TargetDown` for the hub. A scale to 0 (kill switch L3) needs no silence.
+- **Rollout (owner):** playbook 41 after merge, from an up-to-date main checkout. It upgrades the
+  release (rules) before it applies the ServiceMonitor; if the run aborts in between,
+  `McpHubDown` fires after 10 min (a true signal). Verify: `up{job="mcp-hub"} == 1`,
+  `count(mcp_hub_account_status)` = 6 × the configured account × capability pairs (24 today),
+  `kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-mcp-hub`, no `McpHub*`
+  alert firing, and the inhibit rules loaded: `alertmanager_config_last_reload_successful == 1`
+  **and** `alertmanager_config_last_reload_success_timestamp_seconds` later than the playbook run
+  (a config the operator rejects leaves the old one running with the gauge still 1). Never print
+  the generated Alertmanager config; it holds the Discord webhook.
+- **Rollback:** `helm -n monitoring rollback kube-prometheus-stack <revision before the change>`,
+  `kubectl -n monitoring delete servicemonitor mcp-hub` (Ansible-applied), revert the PR. Do this
+  **before** rolling the hub back below hub#90, or the 404 on `/metrics` fires `McpHubDown`.
 
 ### coroot-node-agent (NM-2)
 
@@ -1439,11 +1793,12 @@ n8n's TypeORM migrations against its SQLite database are forward-only in practic
 runbook below before upgrading, and never point an older image at a database a newer image has
 already migrated.
 
-> **Note:** n8n 2.36.8's `/rest/settings` reports `sso.oidc.loginEnabled: false` /
-> `enterprise.oidc: false` even though env-managed OIDC (`N8N_SSO_MANAGED_BY_ENV`,
-> `N8N_SSO_OIDC_*`) is applied and the n8n log shows "OIDC login is enabled — applying OIDC SSO
-> env vars" — the OIDC login button appears to be gated by an unlicensed enterprise feature flag.
-> This was not verified end-to-end; verify with an actual login attempt before relying on it.
+> **Note:** OIDC single sign-on is an enterprise feature that the n8n community edition does not
+> unlock (owner confirmed 2026-10-22): `/rest/settings` reports `enterprise.oidc: false` although
+> the env-managed OIDC settings (`N8N_SSO_MANAGED_BY_ENV`, `N8N_SSO_OIDC_*`) are applied and the log
+> prints "OIDC login is enabled — applying OIDC SSO env vars" — that log line is not evidence of a
+> working SSO login. The owner signs in with a local n8n account; hardening of that login is tracked
+> in #121 and #280. Post-upgrade smoke tests use the local account, not OIDC.
 
 ---
 
@@ -1483,6 +1838,33 @@ ansible-playbook infra/playbooks/53_litellm.yml -e litellm_config_change_ack=<sh
 The ack goes on the command line only, never into inventory/group_vars. A playbook run with an
 unchanged config needs no ack.
 
+#### SSO roles
+
+LiteLLM derives a user's role from auth-service on every SSO login (#164): the
+`GENERIC_ROLE_MAPPINGS_*` env in `cluster/apps/litellm/deployment.yaml` maps the userinfo claim
+`role` = `ADMIN` to `proxy_admin` and every other user to `internal_user_viewer`, and LiteLLM writes
+that role to the user's row in its database. Club members need no LiteLLM role: Open WebUI, n8n and
+the club scripts call the LLM routes with virtual keys, which every role may use. So LiteLLM admin =
+auth-service `ADMIN` — before the first apply, check that `/dashboard/auth` on furchert.ch lists only
+the owner as `ADMIN`.
+
+- **Stale rows:** a user's row changes only at their next SSO login, and users who only own virtual
+  keys may never sign in again. After the first apply, open `https://ai.furchert.ch/ui` → Internal
+  Users and set every row except the owner's to `internal_user_viewer`.
+- **Break-glass:** the LiteLLM login form (always reachable at `https://ai.furchert.ch/fallback/login`)
+  accepts username `admin` with the master key as password
+  (`UI_USERNAME`/`UI_PASSWORD` unset) and grants `proxy_admin`; the master key also works on the API.
+  Check that this login works before the first apply.
+- **Rollback:** the playbook's apply never removes env entries, so deleting them from the manifest is
+  not enough. With the owner's go:
+  `kubectl -n apps set env deploy/litellm GENERIC_ROLE_MAPPINGS_ROLES- GENERIC_ROLE_MAPPINGS_GROUP_CLAIM- GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE-`
+  and then set roles by hand in Internal Users.
+- **Upgrades:** the three env names exist only in LiteLLM's code (`litellm/proxy/management_endpoints/ui_sso.py`,
+  `_setup_role_mappings`), not in its docs. Check that they still exist in the new tag before bumping.
+  Add or remove the three together: a malformed `GENERIC_ROLE_MAPPINGS_ROLES`, an invalid
+  `GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE` or `ROLES` without `GROUP_CLAIM` makes every SSO login fail
+  (use break-glass).
+
 #### Verify
 
 ```bash
@@ -1497,16 +1879,14 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 #### Upgrade
 
 1. Update image tag in `cluster/apps/litellm/deployment.yaml` to new pinned version
-2. Check [LiteLLM release notes](https://github.com/BerriAI/litellm/releases) — avoid known malicious versions (e.g., 1.82.7, 1.82.8)
+2. Check [LiteLLM release notes](https://github.com/BerriAI/litellm/releases) — avoid known malicious versions (e.g., 1.82.7, 1.82.8) — and that the `GENERIC_ROLE_MAPPINGS_*` env names still exist (see "SSO roles")
 3. Re-run: `ansible-playbook infra/playbooks/53_litellm.yml`
 4. Confirm: `kubectl rollout status deployment/litellm -n apps`
 
-> **Why step 4 matters:** the playbook's own rollout-wait task ("LiteLLM Rollout warten") polls
-> `status.availableReplicas == spec.replicas`, which is already true from the *old* pod under the
-> Deployment's default `RollingUpdate` strategy — it does not gate on the new pod actually coming
-> up. The playbook can report success while the old image is still serving. Always confirm the
-> new image landed with `kubectl -n apps rollout status deploy/litellm --timeout=10m` rather than
-> trusting the playbook's "changed" result alone.
+> **Rollout wait:** the playbook's rollout-wait task ("LiteLLM Rollout warten") uses the
+> `kubectl rollout status` conditions (#58) except its progress-deadline check: new spec observed,
+> every replica updated, no old pod left, every updated pod available. It waits up to 900 s (image pull plus the 10-min startupProbe
+> budget) and fails after that while the rollout itself continues; step 4 stays as the final check.
 
 ---
 
@@ -1761,6 +2141,7 @@ Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the ap
 | `homelab_netmon_last_success_timestamp_seconds{node}` | last successful run → alert `NetmonNodeScriptStale` (> 10 min, warning) |
 | `homelab_netmon_truncated_series{node,metric}` | series folded into `src_ip="other"` by the cap `netmon_node_max_series` (200) → alert `NetmonSeriesTruncated` (info) |
 | `homelab_k3s_state_db_bytes{node}` | raspi5 only (`netmon_node_k3s_state_db` in `group_vars/k3s_server.yml`): kine `state.db` + WAL bytes → alerts `K3sDatastoreLarge` (> 500 MB for 30 min, warning) and `K3sDatastoreSizeMissing` (absent 1 h, warning); see "k3s datastore (kine/SQLite) maintenance" (#150) |
+| `homelab_k3s_kine_compaction_lag_revisions{node}` | raspi5 only (same flag): `MAX(id) - compact_rev_key` from a read-only SQLite read → alerts `K3sKineCompactionLagging` (> 50k for 2 h, warning) and `K3sKineCompactionLagMissing` (absent 1 h while the size gauge is present, warning); see "k3s datastore (kine/SQLite) maintenance" → "Compaction lag (#129)" |
 
 **Dependency: homelab PR #109.** node-exporter's `--collector.textfile.directory` + hostPath (kube-prometheus-stack values) come from #109; merge #109 first. The textfile directory itself is created by this role and by #109's storage role with identical attributes, so the file is written even before #109 — it is just not scraped yet. Conntrack data is IPv4 only. The alert rules sit in `additionalPrometheusRulesMap.homelab-netmon-node` and need `41_monitoring.yml`.
 
@@ -1799,6 +2180,7 @@ Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(
 
 - **`NetmonNodeScriptStale`**: `journalctl -u homelab-netmon -n 20` on the node. `CalledProcessError` = conntrack, ip or journalctl failed; `FileNotFoundError` = textfile directory missing (re-run `10_base.yml --tags netmon_node`).
 - **`K3sDatastoreSizeMissing`** (raspi5): a missing or unreadable `state.db` does **not** make the script stale — it skips only `homelab_k3s_state_db_bytes` and logs `k3s state db skipped: <error>` to `journalctl -u homelab-netmon`. See "k3s datastore (kine/SQLite) maintenance" → "Early warning".
+- **`K3sKineCompactionLagMissing`** (raspi5): the SQLite read failed but the script still ran; `journalctl -u homelab-netmon -n 20` shows `k3s kine lag skipped: <error>` (k3s stopped cleanly, a locked or damaged database, or a script older than the gauge: re-run `10_base.yml --tags netmon_node`).
 - **Metric has `exported_node` instead of `node`**: would mean the node-exporter ServiceMonitor stopped honouring labels (`honorLabels: true` in chart 69.3.1); data-service's queries rely on `node`.
 - **Unit tests** (stdlib only, run before changing the script): `python3 -m unittest discover -s infra/roles/netmon_node/tests -v`.
 - **`nf_conntrack_acct`** stays at the kernel default; `netmon_node_conntrack_acct: true` is reserved for the NM-2 fallback (docs/060 §5.5/§6.6).
@@ -2832,6 +3214,24 @@ This pre-copy covers `webui.db` only, not `vector_db`/`uploads` — it does not 
 `/app/backend/data/webui.db` specifically, with any `webui.db-wal` / `webui.db-shm` files next to
 it removed first.
 
+#### App database CONNECT restriction (#163)
+
+`59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service` and
+`mcp_hub` (task "App databases — revoke CONNECT from PUBLIC (#163)"). The owning role and superusers
+can still connect; every other role gets `permission denied`. The task fails if one of these databases
+is owned by a superuser: a database recreated without `OWNER <role>` would otherwise lock its app out.
+Sessions that were already open stay connected, so restart the clients after the first run.
+
+```bash
+# expect t only for each role on its own database
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -tAc "SELECT r.rolname, d.datname, has_database_privilege(r.rolname, d.datname, 'CONNECT') FROM pg_roles r CROSS JOIN pg_database d WHERE r.rolname IN ('homelab','litellm','data_service','mcp_hub','club_assistant') AND d.datname IN ('homelabdb','litellm','data_service','mcp_hub') ORDER BY 1,2"
+# a real cross-database attempt must fail with "permission denied for database"
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U litellm -d homelabdb -c 'select 1'
+```
+
+Rollback: revert the change in `59_app_services.yml` first, otherwise the next run revokes again. Then
+run `GRANT CONNECT ON DATABASE <db> TO PUBLIC` as `postgres` for each database.
+
 #### LiteLLM (Postgres `litellm` database)
 
 ```bash
@@ -2981,6 +3381,9 @@ If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps dele
   kubectl -n apps exec postgresql-0 -c postgresql -- pg_restore -U postgres -d litellm --no-owner --role=litellm /tmp/litellm.dump
   kubectl -n apps scale deploy/litellm --replicas=1
   ```
+  A database recreated with `CREATE DATABASE`, or restored from a `pg_dumpall` taken before #163, gets the
+  default ACL back, with CONNECT for PUBLIC:
+  re-run `ansible-playbook infra/playbooks/59_app_services.yml` afterwards (#163, "App databases").
 - **PostgreSQL image revert** — pick the path that matches how far the upgrade progressed:
   - (a) **Tag revert only**, safe while `ALTER EXTENSION vector UPDATE;` has **not** yet been run
     against `club_assistant` (the underlying PG minor bump is on-disk compatible either way).
@@ -3522,8 +3925,8 @@ at a time — mba2 first, mba1 at least 60 minutes later.
 ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks --check --diff
 ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks
 
-# 20_k3s.yml: --check only, NEVER --diff. k3s-agent.service.j2 embeds K3S_TOKEN, so a
-# diff of that template prints the token to the terminal and into any log.
+# 20_k3s.yml: --check only, no --diff. Before #156 k3s-agent.service.j2 embedded K3S_TOKEN;
+# the token-bearing tasks now run with diff: false, but keep --diff off for this playbook.
 ansible-playbook infra/playbooks/20_k3s.yml -l mba2 --check
 ansible-playbook infra/playbooks/20_k3s.yml -l mba2
 
@@ -3615,7 +4018,7 @@ pointless reboot per cycle without preventing the reset:
 
 ```bash
 ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
-ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e k3s_graceful_shutdown_enabled=false
+ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e '{"k3s_graceful_shutdown_enabled": false}'
 ```
 
 **If a warm reboot does not reset the T2 countdown**, the timer cannot prevent the reset — it can
@@ -3785,7 +4188,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik (`--tags cloudflared`: no ingress PUT, restart task or Traefik values, #322) | 3-5 min | Yes |
 | `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |
 | `51_homeassistant.yml` | Home Assistant | 3-5 min | Yes |
