@@ -178,6 +178,8 @@ All services are discoverable via Kubernetes internal DNS.
 | `https://auth.furchert.ch/oauth2/token` | Token endpoint |
 | `https://auth.furchert.ch/userinfo` | UserInfo endpoint |
 
+**Internal only** (#306): the tunnel answers `404` for the admin API `/api/v1/*`, the Swagger UI and the OpenAPI documents on `auth.furchert.ch`. Callers use the internal URL (furchert-ch `/dashboard/auth`, data-service login-event pull) or a `kubectl port-forward` (DEPLOYMENT.md "Internal-only paths on public hosts").
+
 **Registered OIDC Clients** (from `59_app_services.yml`):
 - `n8n` — for n8n SSO
 - `litellm` — for LiteLLM UI SSO

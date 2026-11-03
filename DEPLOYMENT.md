@@ -743,6 +743,25 @@ kubectl -n platform logs -l app=cloudflared --tail=50
 
 Worked example: `mcp.furchert.ch` in "mcp-hub (Flux, #170 onboarding)".
 
+#### Internal-only paths on public hosts
+
+Some paths of a public host answer `404` at the tunnel because only in-cluster callers use them.
+These are `path` rules in `cf_ingress_body`, placed before the host's general rule (first match wins):
+
+- `n8n.furchert.ch`: every `webhook*` variant of `…/club-mcp-gateway` (see "club-mcp").
+- `auth.furchert.ch` (#306): the admin API `/api/v1/*`, the Swagger UI (`/swagger-ui.html`,
+  `/swagger-ui/*`) and the OpenAPI documents (`/api-docs*`, `/v3/api-docs*`). The OIDC/OAuth paths
+  stay public. Admin work goes through furchert.ch `/dashboard/auth`. For the raw API or the Swagger UI
+  from the Mac use `kubectl -n apps port-forward svc/auth-service 18080:8080` and
+  `http://localhost:18080/swagger-ui.html`.
+
+A `40_platform.yml` run replaces the whole tunnel configuration with `cf_ingress_body` from the
+checkout. `--check` skips that PUT (the task has `no_log`), so it never shows the new ingress list; it
+only reports the cloudflared restart task as changed when the list differs. Run it from an up-to-date
+`main` on the home network: the restart drops an off-LAN SSH forward. Before the run, compare the
+tunnel's published application routes in the Cloudflare dashboard (Networking → Tunnels → the tunnel
+→ Routes; formerly "Public Hostname") with `cf_ingress_body`.
+
 #### Restart Tunnel Pod
 
 ```bash
