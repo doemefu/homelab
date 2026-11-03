@@ -3053,6 +3053,24 @@ This pre-copy covers `webui.db` only, not `vector_db`/`uploads` — it does not 
 `/app/backend/data/webui.db` specifically, with any `webui.db-wal` / `webui.db-shm` files next to
 it removed first.
 
+#### App database CONNECT restriction (#163)
+
+`59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service` and
+`mcp_hub` (task "App databases — revoke CONNECT from PUBLIC (#163)"). The owning role and superusers
+can still connect; every other role gets `permission denied`. The task fails if one of these databases
+is owned by a superuser: a database recreated without `OWNER <role>` would otherwise lock its app out.
+Sessions that were already open stay connected, so restart the clients after the first run.
+
+```bash
+# expect t only for each role on its own database
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -tAc "SELECT r.rolname, d.datname, has_database_privilege(r.rolname, d.datname, 'CONNECT') FROM pg_roles r CROSS JOIN pg_database d WHERE r.rolname IN ('homelab','litellm','data_service','mcp_hub','club_assistant') AND d.datname IN ('homelabdb','litellm','data_service','mcp_hub') ORDER BY 1,2"
+# a real cross-database attempt must fail with "permission denied for database"
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U litellm -d homelabdb -c 'select 1'
+```
+
+Rollback: revert the change in `59_app_services.yml` first, otherwise the next run revokes again. Then
+run `GRANT CONNECT ON DATABASE <db> TO PUBLIC` as `postgres` for each database.
+
 #### LiteLLM (Postgres `litellm` database)
 
 ```bash
@@ -3202,7 +3220,8 @@ If no reconnect shows up within about 2 minutes, force it: `kubectl -n apps dele
   kubectl -n apps exec postgresql-0 -c postgresql -- pg_restore -U postgres -d litellm --no-owner --role=litellm /tmp/litellm.dump
   kubectl -n apps scale deploy/litellm --replicas=1
   ```
-  A recreated database (and a restored `pg_dumpall`) gets the default ACL back, with CONNECT for PUBLIC:
+  A database recreated with `CREATE DATABASE`, or restored from a `pg_dumpall` taken before #163, gets the
+  default ACL back, with CONNECT for PUBLIC:
   re-run `ansible-playbook infra/playbooks/59_app_services.yml` afterwards (#163, "App databases").
 - **PostgreSQL image revert** — pick the path that matches how far the upgrade progressed:
   - (a) **Tag revert only**, safe while `ALTER EXTENSION vector UPDATE;` has **not** yet been run

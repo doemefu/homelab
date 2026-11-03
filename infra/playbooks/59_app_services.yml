@@ -1107,9 +1107,10 @@
     # app database. Revoke it on the databases this playbook creates. The owning role keeps CONNECT through
     # its owner privileges; device-service shares the homelabdb owner role until #153. Databases that do
     # not exist yet (mcp_hub before its token store is configured) are skipped. club_assistant (54) and n8n
-    # are a follow-up. Fail-closed: ON_ERROR_STOP + a single transaction, so any psql error fails the
-    # task. A restore that recreates one of these databases brings PUBLIC CONNECT back: re-run this
-    # playbook (DEPLOYMENT.md "Backup & rollback for image updates").
+    # are a follow-up (#320). Fail-closed: ON_ERROR_STOP + a single transaction, so any psql error fails
+    # the task; it also fails if a database is owned by a superuser (its app would be locked out). A
+    # restore that recreates one of these databases brings PUBLIC CONNECT back: re-run this playbook
+    # (DEPLOYMENT.md "App database CONNECT restriction (#163)").
     - name: App databases — revoke CONNECT from PUBLIC (#163)
       ansible.builtin.command:
         argv:
@@ -1131,6 +1132,14 @@
           - -f
           - "-"
         stdin: |
+          DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba
+                       WHERE d.datname IN ('homelabdb', 'litellm', 'data_service', 'mcp_hub') AND r.rolsuper) THEN
+              RAISE EXCEPTION 'an app database is owned by a superuser; recreate it with OWNER <app role> first (#163)';
+            END IF;
+          END
+          $$;
           SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', d.datname)
           FROM pg_database d
           WHERE d.datname IN ('homelabdb', 'litellm', 'data_service', 'mcp_hub')
