@@ -45,7 +45,7 @@ Repo-specific additions for the `homelab-workflow` agents (Ansible + k3s + Helm 
 - New ports opened: UFW rules must be documented in `DEPLOYMENT.md`.
 - Longhorn replication factor stays at 2 or higher.
 - Keep diffs minimal: no unrelated refactors, style-only churn or renames.
-- Gates to confirm (the reviewer has no Bash, so check the worklog or CI output instead of running them): `ansible-lint infra/`, `helm lint`, kubeconform, conftest (`conftest verify` plus enforcement on rendered manifests).
+- Gates to confirm (the reviewer has no Bash, so check the worklog or CI output instead of running them): `ansible-lint infra/`, `helm lint`, kubeconform (`scripts/validate-manifests.sh`: live Kubernetes version blocking, next minors report-only), promtool (`scripts/promtool-test-rules.sh`), conftest (`conftest verify` plus enforcement on rendered manifests).
 
 ## documenter
 
@@ -87,7 +87,7 @@ Checklist items specific to this repo (apply in addition to the generic checks):
 - **Cloudflare tunnel ingress**: `cf_ingress_body` in `infra/playbooks/40_platform.yml` replaces the full ingress list; keep all existing routes and the `http_status:404` catch-all last.
 - **Flux vs Pattern B**: auth-service, device-service, furchert-ch, data-service, mcp-hub are Flux-managed (merge deploys). n8n (`52`), litellm (`53`), open-webui (`54_club_assistant.yml`) are Pattern B (raw manifests applied by a numbered Ansible playbook); the plan must include the playbook run as a user-approved step.
 - **UFW / become**: new ports need UFW docs in `DEPLOYMENT.md`; `become: yes` outside the hardening or base role is flagged.
-- **CI gates** (`.github/workflows/ci.yml`): yamllint, shell lint, actionlint, `ansible-lint infra/`, kubeconform per app overlay, conftest (`conftest verify` plus enforcement on rendered manifests). The plan lists the local commands.
+- **CI gates** (`.github/workflows/ci.yml`): yamllint, shell lint, actionlint, `ansible-lint infra/`, kubeconform per app overlay (`scripts/validate-manifests.sh`), promtool rule tests (`scripts/promtool-test-rules.sh`), conftest (`conftest verify` plus enforcement on rendered manifests). The plan lists the local commands.
 - **Rollback path**: git revert + Flux reconcile, previous Helm revision, or previous image tag; backup before image updates per `DEPLOYMENT.md`.
 - **Plan tests** must include the idempotency run (2nd run, 0 changes) and a `--check` run.
 - Architectural questions: is an existing role/chart reusable (new roles or Helm dependencies need user approval); does it fit `cluster/values/` and `cluster/apps/<app>/`; what happens on node loss or reboot (MacBook nodes hard-reset periodically); is the failure mode acceptable if PostgreSQL, InfluxDB or Mosquitto is temporarily down.

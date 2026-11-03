@@ -914,6 +914,7 @@ Expected UP targets:
 - `serviceMonitor/monitoring/influxdb2` → apps
 - `serviceMonitor/monitoring/mosquitto` → apps
 - `serviceMonitor/monitoring/data-service` → apps (job `data-service`, `/actuator/prometheus` — see "data-service NM-1: Cloudflare keys, scrape and alerts")
+- `serviceMonitor/monitoring/cert-manager` → platform (job `cert-manager`, port 9402 — see "Platform alerting (#284)")
 - `serviceMonitor/monitoring/coroot-node-agent` → monitoring (one target per gated node; none while the gate is closed)
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
@@ -1057,6 +1058,80 @@ Decision: raised `postgres-exporter`'s `limits.cpu` to `250m` in `infra/playbook
 (`requests` unchanged); kept the alert itself (severity `info`, already excluded from paging by
 `InfoInhibitor`) rather than tuning its expression — it was correctly identifying a genuinely
 undersized CPU quota, not a false positive.
+
+**Platform alerting (#284):** Flux, cert-manager and whole-workload outages, in
+`additionalPrometheusRulesMap.homelab-platform` (tests: `cluster/values/tests/platform.test.yml`).
+All `severity: warning`, routed to Discord through the single route.
+
+| Alert | Fires when | `for` |
+|-------|-----------|-------|
+| `FluxReconciliationFailed` | a Flux object (Kustomization, GitRepository, OCIRepository, HelmRepository, HelmRelease, Image*) is not `Ready=True` and not suspended | 15m |
+| `FluxResourceMetricsMissing` | kube-state-metrics is up but exports no `gotk_resource_info` for a Flux kind in use | 30m |
+| `WorkloadUnavailable` | a Deployment or StatefulSet in `apps`, `platform` or `flux-system` has 0 available/ready replicas while `spec.replicas > 0` | 5m |
+| `WorkloadMissing` | one of the named workloads (list in INTERFACES.md §9) no longer exists | 15m |
+| `CertManagerCertificateExpiringSoon` | an issued Certificate expires in less than 14 days | 1h |
+| `CertManagerCertificateNotReady` | a Certificate is `Ready=False/Unknown` | 15m |
+| `CertManagerDown` | no successful scrape of the cert-manager controller | 15m |
+
+Design notes:
+- **Flux state comes from kube-state-metrics**, not from the controllers: Flux v2.1 removed
+  `gotk_reconcile_condition`; the upstream replacement is a custom-resource-state config that turns
+  each Flux object into `gotk_resource_info{namespace,name,customresource_kind,ready,suspended}`
+  (about 28 series). A PodMonitor on the six controllers would add thousands of series to a
+  Prometheus that was already near its memory limit. Adding a Flux kind means one more
+  `groupVersionKind` entry and its plural in `kube-state-metrics.rbac.extraRules`.
+- **cert-manager** is scraped by an inline ServiceMonitor in `41_monitoring.yml`, not by the chart's
+  `prometheus.servicemonitor.enabled`, which would need a `40_platform.yml` run. No Certificate exists
+  today (public TLS terminates at Cloudflare), so the certificate rules stay dormant until one does.
+- **WorkloadUnavailable vs. the chart rules:** `KubeDeploymentReplicasMismatch` /
+  `KubeStatefulSetReplicasMismatch` need 15 min plus 10 min of an unchanged rollout and also fire for
+  partial outages. While `WorkloadUnavailable` fires, an Alertmanager inhibit rule in
+  `41_monitoring.yml` mutes the chart alert for the same object, so one outage gives one message.
+  Expected short firings: a Recreate-strategy upgrade with a slow image pull (open-webui ≈ 7 min,
+  n8n) and a node reboot that evicts a single-replica pod with an RWO volume.
+- **The #125 key move** also put the long-ignored KSM/node-exporter `resources` into effect (they
+  had none before); KSM's memory limit is 256Mi because custom-resource-state caches every CRD.
+  Prometheus' memory limit went from 1Gi to 1536Mi in the same change (RSS peaked at 1009 Mi).
+
+Known blind spots: a Flux controller that is alive but has stopped reconciling leaves `Ready=True`
+(`WorkloadUnavailable` catches a dead one, `WorkloadMissing` a deleted one); nothing outside the
+cluster watches the cluster. A deleted `kustomize-controller` cannot heal itself through Flux:
+re-apply the bundle from a main checkout with `kubectl apply -k cluster/flux-system/` (owner step).
+
+**Off-cluster dead-man's switch (owner step, not set up):** Alertmanager runs inside the cluster,
+so if raspi5 or the whole cluster dies, nothing reaches Discord. The chart's always-firing
+`Watchdog` alert is the heartbeat; it needs an external receiver that pages when the heartbeats
+stop. Today `Watchdog` goes to Discord every 12 h with everything else.
+1. Create a heartbeat check at an external service (a hosted heartbeat/cron-monitoring service, or
+   a Cloudflare Worker cron on the existing account). Period 5 min, grace 10 min, notify via
+   Discord or e-mail. This is a new external service, so it is the owner's choice.
+2. Store its ping URL as `alertmanager_watchdog_heartbeat_url` in
+   `infra/inventory/group_vars/all.sops.yml`. With the URL in the clipboard:
+   `pbpaste | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))' | sops set --value-stdin infra/inventory/group_vars/all.sops.yml '["alertmanager_watchdog_heartbeat_url"]'`
+3. In `infra/playbooks/41_monitoring.yml` (inline `alertmanager.config`), add a sub-route and a
+   receiver, then run the playbook. The sub-route also stops the 12-hourly Watchdog message in Discord:
+
+   ```yaml
+   route:
+     # ...existing keys...
+     routes:
+       - matchers: ['alertname = Watchdog']
+         receiver: 'heartbeat'
+         group_wait: 0s
+         group_interval: 1m
+         repeat_interval: 1m
+   receivers:
+     # ...existing receivers...
+     - name: 'heartbeat'
+       webhook_configs:
+         - url: "{{ alertmanager_watchdog_heartbeat_url }}"
+           send_resolved: false
+   ```
+
+**Rollback (#284):** `helm -n monitoring history kube-prometheus-stack` → `helm -n monitoring rollback
+kube-prometheus-stack <revision before the change>`, then
+`kubectl -n monitoring delete servicemonitor cert-manager` (Ansible-applied, not part of the
+release), and revert the PR so the next playbook run does not re-apply it.
 
 ### coroot-node-agent (NM-2)
 
