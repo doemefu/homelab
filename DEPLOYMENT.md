@@ -79,6 +79,7 @@ ansible-playbook infra/playbooks/51_homeassistant.yml
 ansible-playbook infra/playbooks/52_n8n.yml
 ansible-playbook infra/playbooks/53_litellm.yml
 ansible-playbook infra/playbooks/54_club_assistant.yml
+ansible-playbook infra/playbooks/55_club_mcp.yml
 
 # 9) Re-apply platform playbook to ensure Cloudflare Tunnel has all routes
 ansible-playbook infra/playbooks/40_platform.yml
@@ -3859,7 +3860,8 @@ ssh raspi5 "sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/ranc
 # then: ansible-playbook infra/playbooks/20_k3s.yml -l raspi5   (same k3s_token as before)
 ```
 
-**Node that still runs k3s** (only when k3s is stopped and the node is freshly provisioned):
+**Same card, k3s installed** (e.g. a damaged datastore; never a new card on which `20_k3s.yml`
+already ran):
 
 ```bash
 # Stop k3s

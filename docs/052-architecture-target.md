@@ -410,7 +410,7 @@ Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 | InfluxDB writer | Telegraf (separate container) | device-service (direct, Telegraf removed) |
 | Scheduled tasks | schedules.json (static) | PostgreSQL table (runtime editable via REST) |
 | Database | MariaDB | PostgreSQL 17 |
-| Request logging | DB-backed (every request) | Application logs to stdout (collected by cluster) |
+| Request logging | DB-backed (every request) | Application logs to stdout (`kubectl logs`; no log collection pipeline yet) |
 | Repo structure | Monorepo | Multi-repo (one per service) |
 | Deployment | Docker Compose (7 containers) | K3s on Raspberry Pi (pods in apps namespace) |
 | TLS | Nginx + Certbot | Cloudflare Tunnel (TLS at edge) |

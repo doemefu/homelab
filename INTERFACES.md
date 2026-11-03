@@ -134,7 +134,7 @@ All services are discoverable via Kubernetes internal DNS.
 |---------|------|------|----------|
 | Traefik metrics | `traefik.kube-system.svc.cluster.local` | 9101 | `kube-system` |
 | cert-manager | `cert-manager.platform.svc.cluster.local` | 9402 | `platform` |
-| cloudflared | `cloudflared-cloudflare-tunnel-remote.platform.svc.cluster.local` | - | `platform` |
+| cloudflared | no Service — Deployment `cloudflared-cloudflare-tunnel-remote` (chart `cloudflare-tunnel-remote` 0.1.2 renders only a Deployment, a Secret and a ServiceAccount; the connector only dials out) | - | `platform` |
 
 ---
 
