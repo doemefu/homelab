@@ -179,6 +179,18 @@ kubectl get nodes -o wide          # raspi5 Ready with the new version within ~2
 # then the same two commands with --limit raspi4, mba1, mba2 — one node at a time, wait for Ready
 ```
 
+5. When the bundled Traefik chart changes (it does with v1.32.13), apply the Traefik values right after
+   raspi5 — until then `helm-install-traefik` fails the new chart's schema check and the old Traefik
+   keeps running:
+   `ansible-playbook infra/playbooks/40_platform.yml --start-at-task "Traefik HelmChartConfig — HTTP zu HTTPS Redirect + Metrics"`,
+   then `kubectl -n kube-system get job helm-install-traefik` (1/1) and `curl -s -o /dev/null -w '%{http_code}' http://192.168.1.61/` (301).
+6. While the #102 graceful-shutdown rollout is not live on the Macs, add
+   `-e '{"k3s_graceful_shutdown_enabled": false}'` to the mba1/mba2 runs (JSON form — a `key=false` extra
+   var is the string `"false"` and breaks the boolean condition).
+7. After each apply, confirm the node really runs the new binary (`kubectl get nodes` VERSION equals
+   `k3s --version` on the node). A run that dies after a changed task loses its handlers, and a re-run
+   no longer sees a change — restart k3s/k3s-agent by hand in that case.
+
 **Rollback** (per node, the unit flags work with the previous patch release too):
 
 ```bash
@@ -219,14 +231,17 @@ The kube-apiserver on raspi5 writes an audit log to `/var/log/k3s-audit/audit.lo
 `/etc/rancher/k3s/audit-policy.yaml` (template `infra/roles/k3s/templates/audit-policy.yaml.j2`).
 
 - **Content:** level `Metadata` at most — who did what to which object, never request or response
-  bodies. Logged: every access to Secrets and service-account tokens; exec/attach/port-forward/proxy and
+  bodies. Logged: every access to Secrets and service-account tokens except reads by kubelets
+  (`system:nodes`); exec/attach/port-forward/proxy (already when the session opens) and
   container log reads; all writes. Dropped: leases, events, token/access reviews, status heartbeats,
   kubelet reads, all other reads, non-resource URLs (health, metrics, discovery).
-- **Retention:** the apiserver rotates the file at 20 MB, keeps 3 gzip-compressed backups for at most
-  7 days (`k3s_audit_log_maxsize`, `_maxbackup`, `_maxage`), so it stays under ~30 MB on the SD card.
+- **Retention:** the apiserver rotates the file at 20 MB and keeps up to 10 gzip-compressed backups for
+  at most 7 days (`k3s_audit_log_maxsize`, `_maxbackup`, `_maxage`), so it stays around 50 MB on the
+  SD card. Expected volume is ~20 MB/day (mostly Flux server-side-apply dry-runs); measure it a day
+  after rollout (`sudo ls -la /var/log/k3s-audit/`) and adjust `_maxbackup` if 7 days do not fit.
   `--audit-log-mode=batch` keeps the writes out of the request path.
 - **Read:** `ssh ansible@192.168.1.61 "sudo tail -n 20 /var/log/k3s-audit/audit.log | jq -c '{user: .user.username, verb, uri: .requestURI, code: .responseStatus.code}'"`
-- **Disable** (rollback): `ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5 -e k3s_audit_log_enabled=false`
+- **Disable** (rollback): `ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5 -e '{"k3s_audit_log_enabled": false}'`
   (restarts k3s on raspi5).
 
 #### k3s datastore (kine/SQLite) maintenance
@@ -239,7 +254,8 @@ size (`compactInterval`, `compactTimeout`, `compactBatchSize` in
 k3s v1.32.13 (kine v0.14.12) k3s starts kine with `--compact-interval=0s`, so the kube-apiserver
 drives the same compaction through its own `--etcd-compaction-interval`, default 5 min). On a
 large enough backlog, a batch can exceed the 5 second timeout; Go's `database/sql` rolls that
-transaction back, and the compactor stalls permanently instead of retrying — the datastore keeps
+transaction back, and (with kine v0.13.9, k3s up to v1.32.2) the compactor stalls permanently instead
+of retrying — the datastore keeps
 growing and query latency keeps degrading until someone intervenes by hand. This happened on
 raspi5 on 2026-09-23 (homelab#129): compaction had silently stalled for ~5 days, `state.db` grew
 to 5.02 GB / 1.49M rows, and the cluster degraded. Details, full timeline and root-cause analysis
@@ -3596,7 +3612,7 @@ pointless reboot per cycle without preventing the reset:
 
 ```bash
 ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
-ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e k3s_graceful_shutdown_enabled=false
+ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e '{"k3s_graceful_shutdown_enabled": false}'
 ```
 
 **If a warm reboot does not reset the T2 countdown**, the timer cannot prevent the reset — it can

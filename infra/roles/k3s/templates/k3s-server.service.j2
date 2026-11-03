@@ -15,7 +15,7 @@ ExecStart=/usr/local/bin/k3s server \
   --tls-san={{ ansible_host }} \
   --node-ip={{ ansible_host }} \
   --flannel-backend=vxlan \
-{% if k3s_audit_log_enabled %}
+{% if k3s_audit_log_enabled | bool %}
   --kube-apiserver-arg=audit-policy-file={{ k3s_audit_policy_file }} \
   --kube-apiserver-arg=audit-log-path={{ k3s_audit_log_path }} \
   --kube-apiserver-arg=audit-log-maxsize={{ k3s_audit_log_maxsize }} \

@@ -23,12 +23,13 @@ k3s_write_kubeconfig_mode: "0600"
 # only (never request/response bodies) and drops the high-volume lease/event/heartbeat traffic;
 # the apiserver rotates the file itself, so the SD card holds at most
 # k3s_audit_log_maxsize MB plus k3s_audit_log_maxbackup gzip-compressed files.
-# Set k3s_audit_log_enabled to false to remove the audit flags again (rollback switch).
+# Set k3s_audit_log_enabled to false to remove the audit flags again (rollback switch); pass it
+# as JSON (-e '{"k3s_audit_log_enabled": false}'), a key=value -e gives the string "false".
 k3s_audit_log_enabled: true
 k3s_audit_policy_file: "{{ k3s_kubeconfig_dir }}/audit-policy.yaml"
 k3s_audit_log_path: /var/log/k3s-audit/audit.log
 k3s_audit_log_maxsize: 20  # MB per file before rotation
-k3s_audit_log_maxbackup: 3  # rotated files kept
+k3s_audit_log_maxbackup: 10  # rotated files kept (~20 MB/day expected, mostly Flux apply dry-runs)
 k3s_audit_log_maxage: 7  # days
 
 # Kubelet graceful node shutdown (homelab#102) — enabled for the mac group only, so the

@@ -12,7 +12,7 @@
     owner: root
     group: root
     mode: "0600"
-  when: k3s_audit_log_enabled
+  when: k3s_audit_log_enabled | bool
   notify: Restart k3s
 
 - name: Create the kube-apiserver audit log directory
@@ -22,7 +22,7 @@
     owner: root
     group: root
     mode: "0700"
-  when: k3s_audit_log_enabled
+  when: k3s_audit_log_enabled | bool
 
 # diff: false — before homelab#156 this unit embedded the join token, so a --diff of the
 # migration would print it. The unit itself holds no secret any more.

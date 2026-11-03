@@ -8,7 +8,6 @@ apiVersion: audit.k8s.io/v1
 kind: Policy
 omitStages:
   - RequestReceived
-  - ResponseStarted
 rules:
   # 1. Health, metrics, discovery and OpenAPI endpoints.
   - level: None
@@ -66,12 +65,15 @@ rules:
     verbs: ["get", "list", "watch"]
 
   # 5. Secrets and service-account tokens: who read or changed which one (never the value).
+  #    Kubelet reads are already dropped by rule 4.
   - level: Metadata
+    omitStages: ["ResponseStarted"]
     resources:
       - group: ""
         resources: ["secrets", "serviceaccounts/token"]
 
   # 6. Interactive access into workloads and nodes, and container logs (may contain secrets).
+  #    Keeps ResponseStarted so a long exec/attach/port-forward session is logged when it opens.
   - level: Metadata
     resources:
       - group: ""
@@ -90,3 +92,4 @@ rules:
 
   # 8. Everything else (create, update, patch, delete, deletecollection): metadata only.
   - level: Metadata
+    omitStages: ["ResponseStarted"]
