@@ -322,9 +322,19 @@ Healthy after an offline compaction: ≈ 30-90 MB (2026-10-28 00:31: `state.db` 
 alert gives roughly a day of lead time before the symptoms above. When it fires, run the
 read-only diagnostics below and then the offline compaction. SQLite never shrinks a file without
 `VACUUM`, so the alert keeps firing even after the online compactor catches up on its own — only
-the offline compaction (which ends with `VACUUM`) clears it; silencing it is not a fix. The
-compaction lag (`max_id - compact_rev`) is not exported; it needs a read of the live datastore
-(out of scope for #150).
+the offline compaction (which ends with `VACUUM`) clears it; silencing it is not a fix.
+
+**Compaction lag (#129).** The same script also writes
+`homelab_k3s_kine_compaction_lag_revisions{node="raspi5"}` = `MAX(id)` minus `compact_rev_key`, the
+values of the read-only diagnostics below, read with one SQLite statement over a read-only
+connection (`mode=ro`, `query_only`, 1 s busy timeout; the unit sees the directory read-only through
+`ProtectSystem=strict`). Healthy: about 1-3k (kine keeps 1000 revisions plus 5-10 min of churn
+between compactions). `K3sKineCompactionLagging` fires when the lag stays above 50k for 2 h, which
+is about 4-6 h into a stall and well before the file reaches 500 MB.
+`K3sKineCompactionLagMissing` fires when the size gauge is reported but the lag is not for 1 h:
+`journalctl -u homelab-netmon -n 20` shows `k3s kine lag skipped: <error>`. Expected skips: k3s
+stopped cleanly (no `-wal`/`-shm` to open read-only) and a damaged or locked database; the LAN
+metrics and the size gauge keep flowing either way.
 
 A missing or unreadable `state.db` skips only this gauge (warning `k3s state db skipped: …` in
 `journalctl -u homelab-netmon`); the LAN metrics keep flowing. The missing series fires
@@ -334,7 +344,8 @@ scraped.
 
 Rollout (owner; playbook runs need a go). The collector script changes on every node, so roll
 `netmon_node` out to all nodes (no `-l`); only raspi5's unit file changes. Run `10_base.yml` before
-`41_monitoring.yml`, otherwise `K3sDatastoreSizeMissing` fires after 1 h.
+`41_monitoring.yml`, otherwise `K3sDatastoreSizeMissing` (or, for the #129 lag gauge,
+`K3sKineCompactionLagMissing`) fires after 1 h.
 
 ```bash
 # Off-LAN: prefix with ANSIBLE_SSH_ARGS=… (see "Off-LAN kubectl / Ansible Access").
@@ -348,12 +359,12 @@ ansible-playbook infra/playbooks/41_monitoring.yml                  # alert rule
 Verify:
 
 ```bash
-ssh raspi5 "grep homelab_k3s_state_db_bytes /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
+ssh raspi5 "grep -E 'homelab_k3s_(state_db_bytes|kine_compaction_lag_revisions)' /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
 ssh raspi5 "sudo ls -la /var/lib/rancher/k3s/server/db/"     # state.db + state.db-wal ≈ the gauge
-kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'K3sDatastore(Large|SizeMissing)'  # expect 2
+kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'K3sDatastore(Large|SizeMissing)|K3sKineCompactionLag(ging|Missing)'  # expect 4
 ```
 
-Rollback: `git revert` the #150 commits, then re-run
+Rollback: `git revert` the #150 (or #129 lag) commits, then re-run
 `ansible-playbook infra/playbooks/10_base.yml --tags netmon_node` and
 `ansible-playbook infra/playbooks/41_monitoring.yml`.
 
@@ -440,9 +451,12 @@ compact offline with k3s stopped, using `scripts/kine-offline-compact.sh` and
 ```bash
 scp scripts/kine-offline-compact.py scripts/kine-offline-compact.sh raspi5:/tmp/
 ssh raspi5
+sudo systemctl stop homelab-netmon.timer      # no lag read while the WAL is checkpointed (#129);
+                                               # start it again after the run
 sudo /tmp/kine-offline-compact.sh --dry-run   # read-only preview first — k3s stays up
 sudo /tmp/kine-offline-compact.sh             # full run: stop / backup / compact / start,
                                                # confirms before each stage
+sudo systemctl start homelab-netmon.timer
 ```
 
 `kine-offline-compact.sh` stops k3s, checkpoints the WAL, takes a `cp -a` backup of `state.db`,
@@ -1885,6 +1899,7 @@ Role `netmon_node` (`10_base.yml`, tag `netmon_node`, all nodes) installs the ap
 | `homelab_netmon_last_success_timestamp_seconds{node}` | last successful run → alert `NetmonNodeScriptStale` (> 10 min, warning) |
 | `homelab_netmon_truncated_series{node,metric}` | series folded into `src_ip="other"` by the cap `netmon_node_max_series` (200) → alert `NetmonSeriesTruncated` (info) |
 | `homelab_k3s_state_db_bytes{node}` | raspi5 only (`netmon_node_k3s_state_db` in `group_vars/k3s_server.yml`): kine `state.db` + WAL bytes → alerts `K3sDatastoreLarge` (> 500 MB for 30 min, warning) and `K3sDatastoreSizeMissing` (absent 1 h, warning); see "k3s datastore (kine/SQLite) maintenance" (#150) |
+| `homelab_k3s_kine_compaction_lag_revisions{node}` | raspi5 only (same flag): `MAX(id) - compact_rev_key` from a read-only SQLite read → alerts `K3sKineCompactionLagging` (> 50k for 2 h, warning) and `K3sKineCompactionLagMissing` (absent 1 h while the size gauge is present, warning); see "k3s datastore (kine/SQLite) maintenance" → "Compaction lag (#129)" |
 
 **Dependency: homelab PR #109.** node-exporter's `--collector.textfile.directory` + hostPath (kube-prometheus-stack values) come from #109; merge #109 first. The textfile directory itself is created by this role and by #109's storage role with identical attributes, so the file is written even before #109 — it is just not scraped yet. Conntrack data is IPv4 only. The alert rules sit in `additionalPrometheusRulesMap.homelab-netmon-node` and need `41_monitoring.yml`.
 
@@ -1923,6 +1938,7 @@ Series per node must stay under the cap (`count by (node) ({__name__=~"homelab_(
 
 - **`NetmonNodeScriptStale`**: `journalctl -u homelab-netmon -n 20` on the node. `CalledProcessError` = conntrack, ip or journalctl failed; `FileNotFoundError` = textfile directory missing (re-run `10_base.yml --tags netmon_node`).
 - **`K3sDatastoreSizeMissing`** (raspi5): a missing or unreadable `state.db` does **not** make the script stale — it skips only `homelab_k3s_state_db_bytes` and logs `k3s state db skipped: <error>` to `journalctl -u homelab-netmon`. See "k3s datastore (kine/SQLite) maintenance" → "Early warning".
+- **`K3sKineCompactionLagMissing`** (raspi5): the SQLite read failed but the script still ran; `journalctl -u homelab-netmon -n 20` shows `k3s kine lag skipped: <error>` (k3s stopped cleanly, a locked or damaged database, or a script older than the gauge: re-run `10_base.yml --tags netmon_node`).
 - **Metric has `exported_node` instead of `node`**: would mean the node-exporter ServiceMonitor stopped honouring labels (`honorLabels: true` in chart 69.3.1); data-service's queries rely on `node`.
 - **Unit tests** (stdlib only, run before changing the script): `python3 -m unittest discover -s infra/roles/netmon_node/tests -v`.
 - **`nf_conntrack_acct`** stays at the kernel default; `netmon_node_conntrack_acct: true` is reserved for the NM-2 fallback (docs/060 §5.5/§6.6).

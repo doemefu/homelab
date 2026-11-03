@@ -250,6 +250,152 @@ class K3sStateDbTest(unittest.TestCase):
         self.assertNotIn("homelab_k3s_", self.collect(None))
 
 
+LAG_HEADER = (
+    "# HELP homelab_k3s_kine_compaction_lag_revisions Revisions between the newest kine row and the "
+    "compaction marker (MAX(id) - compact_rev_key).\n"
+    "# TYPE homelab_k3s_kine_compaction_lag_revisions gauge\n"
+)
+
+
+def _kine_writer(path, rows=5000, compact_rev=3800):
+    """A kine-like WAL database with an open writer whose frames are not checkpointed."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute(
+        "CREATE TABLE kine (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, created INTEGER, "
+        "deleted INTEGER, create_revision INTEGER, prev_revision INTEGER, lease INTEGER, "
+        "value BLOB, old_value BLOB)"
+    )
+    conn.execute("CREATE INDEX kine_name_index ON kine (name)")
+    if compact_rev is not None:
+        conn.execute("INSERT INTO kine (name, prev_revision) VALUES ('compact_rev_key', 0)")
+    conn.executemany(
+        "INSERT INTO kine (name, prev_revision) VALUES (?, 0)",
+        [("/registry/leases/flux-system/x",)] * rows,
+    )
+    if compact_rev is not None:
+        conn.execute(
+            "UPDATE kine SET prev_revision = ? WHERE name = 'compact_rev_key'", (compact_rev,)
+        )
+    conn.commit()
+    return conn
+
+
+def _snapshot(directory):
+    return {
+        name: (os.stat(os.path.join(directory, name)).st_size,
+               os.stat(os.path.join(directory, name)).st_mtime_ns)
+        for name in sorted(os.listdir(directory))
+    }
+
+
+class K3sKineLagTest(unittest.TestCase):
+    """homelab_k3s_kine_compaction_lag_revisions (homelab#129): read-only, never fatal."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = os.path.join(self.tmp.name, "db")
+        os.mkdir(self.dir)
+        self.db = os.path.join(self.dir, "state.db")
+        self.stderr = io.StringIO()
+        self._patch = mock.patch.object(collect_mod.sys, "stderr", self.stderr)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        os.chmod(self.dir, 0o755)
+        for name in os.listdir(self.dir):
+            os.chmod(os.path.join(self.dir, name), 0o644)
+        self.tmp.cleanup()
+
+    def collect(self):
+        return collect_mod.collect(
+            node="raspi5", lan_cidr=LAN, pod_cidr=POD, ports=PORTS, max_series=200,
+            bucket_seconds=900, now=NOW, runner=FixtureRunner(), k3s_state_db=self.db,
+        )
+
+    def read_only(self):
+        """What ProtectSystem=strict gives the unit: read-only files and directory."""
+        for name in os.listdir(self.dir):
+            os.chmod(os.path.join(self.dir, name), 0o444)
+        os.chmod(self.dir, 0o555)
+
+    def assert_lag(self, out, value):
+        self.assertIn(LAG_HEADER + 'homelab_k3s_kine_compaction_lag_revisions{node="raspi5"} '
+                      + str(value) + "\n", out)
+
+    def assert_lag_skipped(self, out):
+        self.assertNotIn("homelab_k3s_kine_compaction_lag_revisions", out)
+        self.assertIn("k3s kine lag skipped", self.stderr.getvalue())
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
+    def test_live_wal_read_only_and_unchanged(self):
+        writer = _kine_writer(self.db)  # 5001 rows, compact_rev 3800 -> lag 1201
+        self.addCleanup(writer.close)  # cleanups run after tearDown restored the file modes
+        self.assertGreater(os.path.getsize(self.db + "-wal"), 0)  # the rows live in WAL frames
+        self.read_only()
+        before = _snapshot(self.dir)
+        out = self.collect()
+        self.assertEqual(before, _snapshot(self.dir))
+        self.assert_lag(out, 1201)
+        self.assertIn('homelab_k3s_state_db_bytes{node="raspi5"}', out)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
+    def test_wal_left_behind_without_writer(self):
+        # A crash-like copy: -wal and -shm exist but no process holds the database open.
+        src = os.path.join(self.tmp.name, "src")
+        os.mkdir(src)
+        writer = _kine_writer(os.path.join(src, "state.db"), rows=10, compact_rev=5)
+        for name in os.listdir(src):
+            with open(os.path.join(src, name), "rb") as fin, \
+                    open(os.path.join(self.dir, name), "wb") as fout:
+                fout.write(fin.read())
+        writer.close()
+        self.read_only()
+        out = self.collect()
+        self.assert_lag(out, 6)  # 11 rows, compact_rev 5
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
+    def test_no_wal_and_read_only_dir_never_fails_or_writes(self):
+        # k3s stopped cleanly: WAL-mode database without -wal/-shm in a read-only directory.
+        _kine_writer(self.db, rows=10, compact_rev=5).close()
+        self.read_only()
+        before = _snapshot(self.dir)
+        out = self.collect()
+        self.assertEqual(before, _snapshot(self.dir))
+        if "homelab_k3s_kine_compaction_lag_revisions" in out:
+            self.assert_lag(out, 6)
+        else:
+            self.assert_lag_skipped(out)
+
+    def test_missing_db_is_not_created(self):
+        out = self.collect()
+        self.assertFalse(os.path.exists(self.db))
+        self.assertEqual(out, fixture("expected.prom"))
+        self.assert_lag_skipped(out)
+
+    def test_missing_compact_rev_key_skips_only_lag(self):
+        _kine_writer(self.db, rows=10, compact_rev=None).close()
+        out = self.collect()
+        self.assertIn('homelab_k3s_state_db_bytes{node="raspi5"}', out)
+        self.assert_lag_skipped(out)
+
+    def test_empty_table_skips_only_lag(self):
+        _kine_writer(self.db, rows=0, compact_rev=None).close()
+        out = self.collect()
+        self.assert_lag_skipped(out)
+
+    def test_not_a_database_skips_only_lag(self):
+        with open(self.db, "wb") as handle:
+            handle.write(b"\0" * 4096)
+        out = self.collect()
+        self.assertIn('homelab_k3s_state_db_bytes{node="raspi5"} 4096\n', out)
+        self.assert_lag_skipped(out)
+
+
 class MainTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
