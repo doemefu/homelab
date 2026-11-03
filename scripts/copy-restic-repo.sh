@@ -5,8 +5,10 @@
 # on raspi5's root SD card, the same disk it protects. This script pulls a byte-identical copy into
 # a dated directory on the Mac, next to the app-data dumps of scripts/backup-app-data.sh.
 #
-# - Read-only on the node: rsync runs there as the sender only, under a SHARED flock on the lock
-#   homelab-backup.sh takes exclusively, so the copy never overlaps a backup or prune.
+# - Read-only on the repository: rsync runs on the node as the sender only, under a SHARED flock on
+#   the lock homelab-backup.sh takes exclusively, so the copy never overlaps a backup or prune.
+#   The only node writes are that lock file and, after a successful run, the freshness marker
+#   (`homelab-backup-mark restic-copy`, #301; skip with --no-mark).
 # - No password: the repository is encrypted by restic and is copied as is. Restoring from the copy
 #   needs the restic password (DEPLOYMENT.md "Off-node copy to the operator's Mac (#91)").
 # - Every copy is an independent full copy (no hard links), verified by file list + sizes against
@@ -15,7 +17,7 @@
 #
 # Usage:
 #   ./scripts/copy-restic-repo.sh [--host USER@HOST] [--ssh-config FILE] [--repo PATH]
-#                                 [--dest DIR] [--retain N] [--accept-shrink] [--dry-run]
+#                                 [--dest DIR] [--retain N] [--accept-shrink] [--no-mark] [--dry-run]
 #
 # See DEPLOYMENT.md "Off-node copy to the operator's Mac (#91)".
 
@@ -57,20 +59,24 @@ readonly RSYNC_BIN="/usr/bin/rsync"
 readonly LOCAL_LOCK_DIR="${TMPDIR:-/tmp}/copy-restic-repo.lock"
 
 # --- Options ---------------------------------------------------------------------------------
+readonly DEFAULT_REPO="/var/lib/backup/restic-repo"
 HOST="ansible@192.168.1.61"
 SSH_CONFIG=""
-REPO="/var/lib/backup/restic-repo"
+REPO="$DEFAULT_REPO"
 DEST="${HOME}/informatik/homelab/backups/restic"
 RETAIN=5
 DRY_RUN=false
 ACCEPT_SHRINK=false
+NO_MARK=false
 
 usage() {
   cat <<'USAGE'
 copy-restic-repo.sh — off-node copy of raspi5's restic repository to this Mac (#91)
 
 Pulls the restic repository from raspi5 with rsync over SSH into a new dated directory and
-verifies it. Read-only on the node; needs no restic password and no restic on the Mac.
+verifies it. Read-only on the repository; needs no restic password and no restic on the Mac.
+After a successful run it records the copy's freshness on the node (homelab-backup-mark
+restic-copy, #301), which feeds an alert when the newest copy gets old.
 
 Options:
   --host USER@HOST    SSH target (default: ansible@192.168.1.61, needs passwordless sudo)
@@ -85,6 +91,8 @@ Options:
   --accept-shrink     accept a source that shrank since the last good copy (after checking the
                       repository on the node); the copy is recorded as accepted and retention
                       runs again.
+  --no-mark           do not record the freshness marker on the node (it is also skipped for a
+                      non-default --repo and when the shrink guard trips).
   --dry-run           run every check and print the totals and the rsync command; copies,
                       creates and deletes nothing.
   --help              show this help.
@@ -131,6 +139,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "--retain needs a value"
       RETAIN="$2"; shift 2 ;;
     --accept-shrink) ACCEPT_SHRINK=true; shift ;;
+    --no-mark)  NO_MARK=true; shift ;;
     --dry-run)  DRY_RUN=true; shift ;;
     --help|-h)  usage; exit 0 ;;
     *)          err "unknown option: $1"; echo; usage; exit 1 ;;
@@ -292,6 +301,23 @@ run_rsync() {
   fi
 }
 
+# mark_freshness — best effort: a failed mark never fails the copy.
+mark_freshness() {
+  if [[ "$NO_MARK" == true ]]; then
+    log "Freshness marker skipped (--no-mark)"
+    return 0
+  fi
+  if [[ "$REPO" != "$DEFAULT_REPO" ]]; then
+    log "Freshness marker skipped (non-default --repo)"
+    return 0
+  fi
+  if remote "sudo -n /usr/local/bin/homelab-backup-mark restic-copy" < /dev/null; then
+    log "Freshness marker recorded on ${HOST} (restic-copy)"
+  else
+    warn "could not record the freshness marker on ${HOST} (storage role not rolled out yet?) — later: ssh ${SSH_CONFIG:+-F ${SSH_CONFIG} }${HOST} sudo -n /usr/local/bin/homelab-backup-mark restic-copy"
+  fi
+}
+
 # --- Main ------------------------------------------------------------------------------------
 command -v ssh >/dev/null 2>&1 || die "ssh not found"
 [[ -x "$RSYNC_BIN" ]] || die "${RSYNC_BIN} not found"
@@ -385,6 +411,7 @@ if [[ "$DRY_RUN" == true ]]; then
   log "      [dry-run] mkdir -p ${WORK_DIR}/repo"
   log "      [dry-run] ${RSYNC_BIN} ${RSYNC_ARGS[*]}"
   log "      [dry-run] verify, write MANIFEST.txt, mv ${WORK_DIR} ${RUN_DIR}"
+  log "      [dry-run] ssh ${HOST} sudo -n /usr/local/bin/homelab-backup-mark restic-copy (unless --no-mark)"
   count="$(list_copies | grep -c . || true)"
   excess=$(( count + 1 - RETAIN ))
   if [[ "$excess" -gt 0 ]]; then
@@ -559,9 +586,12 @@ else
     rm -rf "${DEST:?}/${old}.deleting"
   done
 fi
-# Leftovers of an interrupted delete.
+# Leftovers of an interrupted delete — only this script's own <YYYY-MM-DD_HHMMSS>.deleting names.
 find "${DEST}/" -mindepth 1 -maxdepth 1 -type d -name '*.deleting' -print | while IFS= read -r left; do
+  base="${left##*/}"
+  [[ "${base%.deleting}" =~ $RUN_DIR_PATTERN ]] || continue
   log "  removing leftover ${left}"
   rm -rf "${left:?}"
 done
+mark_freshness
 exit 0
