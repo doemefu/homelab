@@ -239,7 +239,7 @@
       # cycle. A failure does not fail the backup (the snapshot above is taken); it sets the
       # sticky marker that homelab_backup_integrity_check_failed reports.
       if [ "$CHECK_SUBSET_DAYS" -gt 0 ]; then
-        slice=$(( ($(date +%-j) - 1) % CHECK_SUBSET_DAYS + 1 ))
+        slice=$(( $(date +%s) / 86400 % CHECK_SUBSET_DAYS + 1 ))
         if restic check --repo "${REPO}" --read-data-subset="${slice}/${CHECK_SUBSET_DAYS}"; then
           logger -t "homelab-backup" "restic check ok (subset ${slice}/${CHECK_SUBSET_DAYS})"
         else
