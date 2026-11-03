@@ -1004,19 +1004,22 @@ club-assistant repo, all homelab repos, 2026-11-03):
 |---|---|---|---|
 | `n8n.furchert.ch` | Telegram Bot API → Telegram Trigger of the active workflow `m6_telegram_drafting` | `/webhook/<webhookId>/webhook` | **Bypass application** for exactly this path (step 3) |
 | `n8n.furchert.ch` | Open WebUI club pipe → `m6_chat_agent`, `m6_chat_commands` webhooks; club-mcp → `club-mcp-gateway` | — | in-cluster (`n8n.apps.svc.cluster.local`), not affected |
-| `n8n.furchert.ch` | Workflow export/import scripts and agents using the n8n public API (`/api/v1/*`) from the Mac | `/api/v1/*` | No bypass: use `kubectl -n apps port-forward svc/n8n 5678:80` and `N8N_BASE_URL=http://localhost:5678`, or an Access service token |
+| `n8n.furchert.ch` | Approve/edit links in the drafting messages: the send-and-wait nodes "Approval SendAndWait" and "Form SendAndWait" of `m6_telegram_drafting`, opened in the phone's Telegram browser | `/webhook-waiting/*` | No bypass. The owner is the only authorized chat, so the phone shows the e-mail PIN page once per 24 h session, then the link works |
+| `n8n.furchert.ch` | Workflow export/import scripts and agents using the n8n public API (`/api/v1/*`) from the Mac | `/api/v1/*` | No bypass: use `kubectl -n apps port-forward svc/n8n 5678:80` and `N8N_BASE_URL=http://localhost:5678` |
 | `n8n.furchert.ch` | Google OAuth credential callback `/rest/oauth2-credential/callback` | — | browser redirect in a session that already passed Access, so no change |
 | `grafana.furchert.ch` | none (browser only; alert links in Discord open in the browser) | — | — |
 
 The exports cover the workflows the backup workflow writes to GitHub. Before step 3, check in the n8n UI
-that no other **active** workflow has a Webhook, Form, Chat or Telegram trigger. The Google Drive, Gmail and
-schedule triggers poll outbound and are not affected.
+that no other **active** workflow has a Webhook, Form, Chat or Telegram trigger, or a Send-and-Wait or
+"Wait → On webhook call" node. The Google Drive, Gmail and schedule triggers poll outbound and are not
+affected.
 
 **Pre-checks (owner, before step 2):**
 
-1. n8n → Credentials → the "n8n API" credential used by "Back up n8n workflows to Github": its Base URL
-   must be `http://localhost:5678/api/v1`. If it is `https://n8n.furchert.ch/api/v1`, the backup
-   request leaves the pod, comes back through Access and fails. Change it first.
+1. n8n → Credentials → "n8n account" (type n8n API), used by "Back up n8n workflows to Github": its
+   Base URL must be `http://localhost:5678/api/v1`. If it is `https://n8n.furchert.ch/api/v1`, the backup
+   request leaves the pod, comes back through Access and fails. Change it first, then run the backup
+   workflow once by hand.
 2. n8n → workflow `m6_telegram_drafting` → Telegram Trigger node → Webhook URLs → **Production URL**.
    Note the path; it has the form `/webhook/<webhookId>/webhook`. Never put the id into this public repo.
 
@@ -1027,7 +1030,7 @@ schedule triggers poll outbound and are not affected.
 2. **Owner-only application per host.** Zero Trust → Access controls → Applications → Create new
    application → Self-hosted and private → Add public hostname. Use these values:
    - Application name: `grafana` (then `n8n` the same way).
-   - Domain: `grafana.furchert.ch` (or `n8n.furchert.ch`). Leave the path empty, so the whole host is covered.
+   - Subdomain `grafana` (or `n8n`), Domain `furchert.ch`. Leave the path empty, so the whole host is covered.
    - Session duration: `24 hours`.
    - Identity providers: only One-time PIN; enable "Apply instant authentication".
    - Access policies → create a policy `owner-only`: Action **Allow**, Include → **Emails** → your own
@@ -1036,14 +1039,17 @@ schedule triggers poll outbound and are not affected.
 3. **Telegram bypass (n8n only).** Create new application → Self-hosted and private → Add public hostname
    with these values:
    - Application name: `n8n-telegram-webhook`.
-   - Domain `n8n.furchert.ch`, path `webhook/<webhookId>/webhook` (from pre-check 2).
-   - Policy: Action **Bypass**, Include → **Everyone**.
+   - Subdomain `n8n`, Domain `furchert.ch`, Path `webhook/<webhookId>/webhook` (from pre-check 2).
+   - Policy: Action **Bypass**. Include → **IP ranges** → Telegram's webhook source ranges
+     `149.154.160.0/20` and `91.108.4.0/22` (or Include → **Everyone** if Telegram deliveries fail).
 
    Access applies the most specific path, so only this one URL skips the login. Bypass requests are not
-   logged by Access, and n8n's trigger is then the only control on that path. Do not add bypass rules
-   for other n8n paths.
-4. **ssh.furchert.ch (already exists):** Zero Trust → Access controls → Applications → the SSH application.
-   Check that its policy is the same `owner-only` Allow policy, and record the session duration here once checked.
+   logged by Access. On that path, n8n's Telegram Trigger, which checks Telegram's secret-token header,
+   is then the control. Do not add bypass rules for other n8n paths.
+4. **ssh.furchert.ch (already exists):** Zero Trust → Access controls → Applications → the SSH
+   application. Attach the `owner-only` policy. Remove its old policy only after `cloudflared access
+   login https://ssh.furchert.ch` and an off-LAN `ssh raspi5` still work. Record the IdP and session
+   length in #121, not here.
 
 **Verification:**
 
@@ -1052,18 +1058,30 @@ schedule triggers poll outbound and are not affected.
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://grafana.furchert.ch/
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://n8n.furchert.ch/
 curl -s -o /dev/null -w '%{http_code}\n' https://n8n.furchert.ch/rest/settings     # not 200 from n8n
-# the Telegram path still reaches n8n (any n8n answer, but no redirect to cloudflareaccess.com):
+# The Telegram path must answer from n8n itself, not redirect to cloudflareaccess.com.
+# With the IP-range bypass, a request from the Mac is not in range and gets the Access redirect;
+# with the Everyone bypass, n8n answers 403 (missing Telegram secret-token header).
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -X POST "https://n8n.furchert.ch/webhook/<webhookId>/webhook"
 ```
 
 Then:
 - Browser: both hosts ask for the e-mail PIN once, then show the app login.
-- Telegram: send a message to the club bot. `m6_telegram_drafting` shows a new execution.
-- The next run of "Back up n8n workflows to Github" succeeds. "Backup Watchdog" stays silent.
+- Telegram: send a message to the club bot; `m6_telegram_drafting` shows a new execution (this is the real
+  test of the bypass). From the phone, approve one draft and open the edit form once: the PIN page appears
+  at most once per session, then the link works.
+- The backup run started by hand in pre-check 1, and the next scheduled run, succeed. "Backup Watchdog"
+  stays silent.
 - Off-LAN `cloudflared access ssh` still works.
 
-**Rollback:** in Zero Trust → Access controls → Applications, delete the application (or set its policy
-to Bypass Everyone). The tunnel and the apps themselves are unchanged.
+**Rollback:** in Zero Trust → Access controls → Applications, delete the application or detach the
+`owner-only` policy from that one application. Do not edit the shared `owner-only` policy itself,
+because ssh uses it too. The tunnel and the apps themselves are unchanged.
+
+**Follow-up (club-assistant repo):**
+- Its laptop red-team cases against `n8n.furchert.ch` (RT-M05 404 checks, the RT-A webhook probe) now
+  meet the Access redirect first.
+- Its docs still call n8n "SSO-protected".
+- Its n8n API scripts should default to the port-forward.
 
 ---
 
