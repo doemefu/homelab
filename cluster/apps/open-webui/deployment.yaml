@@ -23,17 +23,13 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: open-webui
-          # Pinned version: v0.11.4 (released 2026-09-21; Dependabot PR #144). OCI index digest
-          # sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f verified
-          # 2026-10-14 via the GHCR anonymous-token API (linux/amd64 + linux/arm64 entries).
-          # Security bump: v0.11.3 (live since 2026-09-09) is affected by 19 published advisories
-          # (4 high, e.g. GHSA-vpq8-f445-hcq7 session-token theft by any website,
-          # GHSA-f9xp-mfmq-x6cg session-token theft via DOCX preview); all 19 list v0.11.4 as
-          # patched and none affects v0.11.4 (GHSA API, 2026-10-14).
-          # Source: https://github.com/open-webui/open-webui/security/advisories . v0.12.0
-          # (2026-10-10) is a new minor — not adopted yet. Python 3.11 / pydantic / httpx unchanged
-          # since v0.10.2, so the club pipe function needs no change. Image still runs as UID 0
-          # (Dockerfile ARG UID=0) — the SECURITY DEVIATION block below remains valid.
+          # Pinned version: v0.12.5 (Dependabot PR #261, merged 2026-11-02). OCI index digest
+          # sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded verified
+          # 2026-11-02 via the GHCR anonymous-token API (linux/amd64 + linux/arm64 entries) (#165).
+          # Version history and advisory notes: Dependabot PRs #144 (v0.11.4), #207 (v0.12.2), #261.
+          # The image moves from Python 3.11 (v0.12.2: 3.11.17) to 3.12.16 (image config, 2026-11-02):
+          # re-verify the club pipe function when playbook 54 rolls this tag out. User is 0:0 (Dockerfile
+          # ARG UID=0) — the SECURITY DEVIATION block below remains valid.
           #
           # ┌─────────────────────────────────────────────────────────────────────────┐
           # │  SECURITY DEVIATION — CONTAINER RUNS AS ROOT (UID 0)                   │
