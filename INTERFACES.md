@@ -165,6 +165,7 @@ All services are discoverable via Kubernetes internal DNS.
 - Client Secret: `LITELLM_OIDC_CLIENT_SECRET` (from `litellm-secrets`)
 - PKCE: Required (`GENERIC_CLIENT_USE_PKCE: true`)
 - Callback: `https://ai.furchert.ch/sso/callback` (via `PROXY_BASE_URL`)
+- Roles: from the userinfo claim `role` on every login — `ADMIN` → `proxy_admin`, anything else → `internal_user_viewer` (`GENERIC_ROLE_MAPPINGS_*`, DEPLOYMENT.md "SSO roles")
 
 ### Auth Service (Public: `https://auth.furchert.ch`, Internal: `http://auth-service.apps.svc.cluster.local:8080`)
 
