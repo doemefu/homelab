@@ -30,8 +30,9 @@ readonly REMOTE_LOCK="/var/lock/homelab-backup.lock"
 # Upper bound for every remote command that holds the lock, so a vanished Mac (sleep, Wi-Fi)
 # cannot keep the lock past the 03:00 backup. Must stay below the start-guard margin.
 readonly REMOTE_TIMEOUT=3600
-# No run may start while the node clock reads 02:00-03:44: the restic cron runs at 03:00 and a
-# copy started before 02:00 is cut off by REMOTE_TIMEOUT before 03:00.
+# No run may start while the node clock reads 02:00-03:44: the restic cron runs at 03:00, and
+# each remote command of a run started before 02:00 is cut off by REMOTE_TIMEOUT before 03:00
+# (a whole run is three short remote commands; today's copy takes about 12 s).
 readonly GUARD_FROM=200
 readonly GUARD_UNTIL=345
 # Exit status of `flock -E` when the backup holds the lock.
@@ -99,9 +100,11 @@ When it refuses to run:
   - homelab-backup.sh holds the lock (exit 75), or restic holds a lock younger than 60 min
   - <dest> contains a YYYY-MM-DD_HHMMSS directory that is not a restic copy
 
+Copies made while the shrink guard tripped count against --retain once --accept-shrink is
+given, so the oldest copies from before the shrink are pruned first.
+
 Exit status: 0 success; 1 error; 2 copy verified but the source shrank (no pruning, see
---accept-shrink);
-75 the backup is running, try again later.
+--accept-shrink); 75 the backup is running, try again later; 130 interrupted.
 USAGE
 }
 
@@ -341,6 +344,8 @@ if grep -q '^ERR ' "$PREFLIGHT"; then
   sed -n 's/^ERR /ERROR /p' "$PREFLIGHT" >&2
   exit 1
 fi
+# COPY_RESTIC_NOW_HHMM is a test hook for the time guard (it replaces the node clock); never
+# set it for a real run — it can switch the 02:00-03:44 guard off.
 NODE_NOW="${COPY_RESTIC_NOW_HHMM:-$(awk '$1 == "NOW" { print $2 }' "$PREFLIGHT")}"
 [[ "$NODE_NOW" =~ ^[0-9]{4}$ ]] || die "could not read the node clock"
 if (( 10#$NODE_NOW >= GUARD_FROM && 10#$NODE_NOW < GUARD_UNTIL )); then
@@ -448,12 +453,16 @@ while read -r sum path; do
   elif [[ "$sum" == "$name" ]]; then
     hash_ok=$(( hash_ok + 1 ))
   else
-    err "content does not match its name: ${path}"
+    # rsync's quick check (size + mtime) would skip this file on the next run; remove it so the
+    # resume fetches it again.
+    err "content does not match its name: ${path} — removed from the copy"
+    rm -f "${WORK_DIR}/repo/${path}"
     hash_bad=$(( hash_bad + 1 ))
   fi
 done < "$HASHES"
 if [[ "$hash_bad" -ne 0 || "$unexpected" -ne 0 ]]; then
-  die "${hash_bad} damaged and ${unexpected} unexpected file(s) — ${WORK_DIR} is kept; run again to re-fetch"
+  err "${hash_bad} damaged and ${unexpected} unexpected file(s); ${WORK_DIR} is kept and the next run re-fetches the damaged files"
+  die "if the same file fails again, the source is damaged: run 'restic check --read-data' on raspi5 (DEPLOYMENT.md \"Backup (Restic)\")"
 fi
 if [[ $(( hash_ok + 1 )) -ne "$FILES" ]]; then
   die "hashed ${hash_ok} files + config, but the copy has ${FILES} files"
@@ -544,7 +553,15 @@ else
   { list_copies | grep -v -x "$RUN_TS" || true; } | sed -n "1,${excess}p" | while IFS= read -r old; do
     [[ -n "$old" ]] || continue
     log "  deleting ${DEST}/${old}"
-    rm -rf "${DEST:?}/${old}"
+    # Rename first: an interrupted delete must not leave a dated directory without MANIFEST.txt,
+    # which refuse_foreign_dirs would then treat as a foreign directory on every later run.
+    mv "${DEST}/${old}" "${DEST}/${old}.deleting"
+    rm -rf "${DEST:?}/${old}.deleting"
   done
 fi
+# Leftovers of an interrupted delete.
+find "${DEST}/" -mindepth 1 -maxdepth 1 -type d -name '*.deleting' -print | while IFS= read -r left; do
+  log "  removing leftover ${left}"
+  rm -rf "${left:?}"
+done
 exit 0

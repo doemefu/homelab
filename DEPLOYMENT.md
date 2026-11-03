@@ -1013,8 +1013,8 @@ forward instead of erasing it; `0` means "never succeeded".
   manual monthly check — see the maintenance checklist.
 - `scripts/copy-restic-repo.sh` holds the same lock (shared) while it copies. A 03:00 run that
   starts during a copy exits on the lock collision like a manual run would; the script refuses to
-  start between 02:00 and 03:44 and caps its remote side at one hour, so this needs a copy that
-  was started by hand at the wrong time.
+  start between 02:00 and 03:44 and caps each remote command at one hour, so a copy cannot reach
+  03:00 in normal operation.
 - A lock collision (a manual run while the 03:00 cron holds the lock) exits before any metric is
   written, on purpose: the run holding the lock owns the metrics. A permanently stuck lock surfaces
   as `ResticBackupStale` after about 26 h.
@@ -3186,7 +3186,7 @@ an external SSD or an off-site target exists (#161; owner decision 2026-11-02: M
   the k3s datastore with every cluster Secret (restic-encrypted): directories mode 700, files 0400,
   outside every git repo, never uploaded.
 - **Independent copies.** Every run writes a complete copy (no hard links); 5 copies of today's
-  259 MB repository need ≈ 1.3 GB.
+  ≈ 270 MB repository need ≈ 1.35 GB.
 
 ```bash
 ./scripts/copy-restic-repo.sh --help
@@ -3205,7 +3205,10 @@ so `backup-app-data.sh`'s retention never counts or deletes them.
 after the copy; both must equal the copy (file count + bytes). Every file under `data/`, `index/`,
 `keys/` and `snapshots/` must hash to its own name — restic names them by the SHA-256 of their
 content — and `config` must hash like the source. This proves the copy equals the source byte for
-byte; it does not prove the source is intact (`restic check --read-data` does, below).
+byte; it does not prove the source is intact (`restic check --read-data` does, below). A file that
+fails its hash is removed from `.in-progress/` and fetched again by the next run; if the same file
+fails again, the file on raspi5 is damaged — run the "Integrity check" under "Status" with
+`--read-data`.
 
 **It refuses** when the node clock reads 02:00–03:44 (restic cron at 03:00; the remote side is
 capped at one hour), when the backup holds the lock (exit 75, try later), when restic holds a lock
@@ -3218,11 +3221,12 @@ verified run. **Shrink guard:** if the source lost more than 3 snapshot files or
 since the last good copy, the new copy is kept, nothing is pruned and the script exits 2 — on every
 run until you check the repository on the node and re-run with `--accept-shrink`.
 
-**Re-check a copy later** (no password, no network):
+**Re-check a copy later** (no password, no network; the hashed file count must be `files` from
+`MANIFEST.txt` minus 1 for `config`, because a missing file cannot fail a hash):
 
 ```bash
 COPY="$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)"
-tail -n +2 "${COPY}MANIFEST.txt"
+tail -n +2 "${COPY}MANIFEST.txt"     # note the "files" line
 (cd "${COPY}repo" && find data index keys snapshots -type f -exec shasum -a 256 {} + \
   | awk '{ n = split($2, p, "/"); if (p[n] != $1) { print "BAD " $2; bad++ } }
          END { print NR " files, " bad + 0 " bad"; exit bad > 0 }')
@@ -3235,14 +3239,16 @@ against it — never into the live repository.
 
 ```bash
 COPY="$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)repo"
-ssh ansible@192.168.1.61 "sudo -n install -d -m 0700 /var/lib/backup/copy-check /var/lib/backup/restore-test"
+# start from empty scratch paths (an aborted earlier test must not be merged in)
+ssh ansible@192.168.1.61 "sudo -n rm -rf /var/lib/backup/copy-check /var/lib/backup/restore-test && sudo -n install -d -m 0700 /var/lib/backup/copy-check /var/lib/backup/restore-test"
 rsync -rlpt --rsync-path="sudo -n rsync" "$COPY/" ansible@192.168.1.61:/var/lib/backup/copy-check/
 # The copy opens with the live password and every pack reads back
 # (for a large repository use --read-data-subset=1/10 instead of --read-data)
-ssh ansible@192.168.1.61 "sudo -n restic --repo /var/lib/backup/copy-check --password-file /etc/restic-password snapshots"
-ssh ansible@192.168.1.61 "sudo -n restic --repo /var/lib/backup/copy-check --password-file /etc/restic-password check --read-data"
+# --no-cache: the copy has the live repository's ID, so it would share root's restic cache
+ssh ansible@192.168.1.61 "sudo -n restic --no-cache --repo /var/lib/backup/copy-check --password-file /etc/restic-password snapshots"
+ssh ansible@192.168.1.61 "sudo -n restic --no-cache --repo /var/lib/backup/copy-check --password-file /etc/restic-password check --read-data"
 # Restore the newest snapshot from the copy and check the datastore copy (expect ('ok',))
-ssh ansible@192.168.1.61 "sudo -n restic --repo /var/lib/backup/copy-check --password-file /etc/restic-password restore latest --target /var/lib/backup/restore-test"
+ssh ansible@192.168.1.61 "sudo -n restic --no-cache --repo /var/lib/backup/copy-check --password-file /etc/restic-password restore latest --target /var/lib/backup/restore-test"
 ssh ansible@192.168.1.61 "sudo -n python3 -c \"import sqlite3; print(sqlite3.connect('/var/lib/backup/restore-test/var/lib/backup/k3s-state.db').execute('PRAGMA integrity_check').fetchone())\""
 # Cleanup — MANDATORY, restore-test holds every cluster Secret in plaintext
 ssh ansible@192.168.1.61 "sudo -n rm -rf /var/lib/backup/copy-check /var/lib/backup/restore-test"
@@ -3264,13 +3270,17 @@ new disk **before** the storage role runs. `10_base.yml` runs `restic init` unle
 key — never copy into one, and never use `--delete` for this push.
 
 ```bash
-# after 00_bootstrap.yml on the new SD card, before 10_base.yml
+# after 00_bootstrap.yml on the new SD card, ideally before 10_base.yml
 COPY="$(ls -d ~/informatik/homelab/backups/restic/2*/ | tail -n 1)repo"
+# 1) only if 10_base.yml already ran (it initialised a new, empty repository): move it aside
+ssh ansible@192.168.1.61 "sudo -n test -e /var/lib/backup/restic-repo/config && sudo -n mv /var/lib/backup/restic-repo /var/lib/backup/restic-repo.fresh || true"
+# 2) empty target directory; the push runs only if it really is empty
 ssh ansible@192.168.1.61 "sudo -n install -d -m 0750 /var/lib/backup && sudo -n install -d -m 0700 /var/lib/backup/restic-repo"
-ssh ansible@192.168.1.61 "sudo -n find /var/lib/backup/restic-repo -mindepth 1 | head -n 1"   # must print nothing
-rsync -rlpt --rsync-path="sudo -n rsync" "$COPY/" ansible@192.168.1.61:/var/lib/backup/restic-repo/
-# if 10_base.yml already ran, move its new repository aside first:
-#   ssh ansible@192.168.1.61 "sudo -n mv /var/lib/backup/restic-repo /var/lib/backup/restic-repo.fresh"
+if ssh ansible@192.168.1.61 'sudo -n test ! -e /var/lib/backup/restic-repo/config && test -z "$(sudo -n find /var/lib/backup/restic-repo -mindepth 1 -print -quit)"'; then
+  rsync -rlpt --rsync-path="sudo -n rsync" "$COPY/" ansible@192.168.1.61:/var/lib/backup/restic-repo/
+else
+  echo "NOT pushed: /var/lib/backup/restic-repo on raspi5 is not empty (or not reachable)"
+fi
 ```
 
 Then `10_base.yml` (writes `/etc/restic-password`, skips `restic init`) and the steps below.
