@@ -167,7 +167,14 @@ Home Assistant) between nodes for no benefit.
    `40_platform.yml`.
 2. Verify: all nodes Ready, no unhealthy pods, all Longhorn volumes `healthy`, kine small (see
    "Read-only diagnostics" below), no Longhorn snapshot (02:00), restic (03:00) or metrics trim (05:00)
-   running in the next hour.
+   running in the next hour, and two cloudflared replicas Ready on two different nodes
+   (`kubectl -n platform get pods -l pod=cloudflared -o wide`, see "Cloudflare Tunnel → Replicas and
+   placement"). That last check is what makes a node restart safe off-LAN: `ssh.furchert.ch` runs
+   through cloudflared, and while k3s on a node is down nothing restarts a crashed pod there. Off-LAN,
+   use the SSH jump config ("Off-LAN kubectl / Ansible Access") and judge every step on the nodes, not
+   through the port-forward: `sudo k3s kubectl …` on raspi5 (the agents have no admin kubeconfig), and
+   `systemctl is-active k3s` (raspi5) or `systemctl is-active k3s-agent` (agents) on the node being
+   upgraded.
 3. Keep the previous binary on every node before touching it:
    `ssh ansible@<ip> 'sudo cp -a /usr/local/bin/k3s /usr/local/bin/k3s-<old-version>'`.
 4. raspi5 first, then the agents one at a time (raspi4, mba1, mba2), each with a `--check` run first.
@@ -779,12 +786,80 @@ kubectl get secret cloudflare-api-token -n platform -o yaml
 #### Status
 
 ```bash
-# Pod status
-kubectl -n platform get pods -l app=cloudflared
+# Pod status (the chart's only pod label is pod=cloudflared)
+kubectl -n platform get pods -l pod=cloudflared -o wide
 
 # Logs
-kubectl -n platform logs -l app=cloudflared --tail=50
+kubectl -n platform logs -l pod=cloudflared --prefix --tail=50
 ```
+
+#### Replicas and placement (#322)
+
+cloudflared runs as **two replicas of the same tunnel** (same token; Cloudflare allows up to 25 replicas
+per tunnel and spreads requests over all connected replicas). It carries every public route and
+`ssh.furchert.ch`, the only off-LAN way in, so one node's k3s restart must never leave it without a
+supervised replica:
+
+- `replicaCount: 2` in `cluster/values/cloudflared.yaml`.
+- Chart 0.1.2 renders no affinity, probes beyond its liveness probe, resources or security contexts, so
+  `40_platform.yml` patches its Deployment: a **required pod anti-affinity** on `kubernetes.io/hostname`
+  (never two replicas on one node), a **readinessProbe** on `/ready` (200 only with an edge connection)
+  and `minReadySeconds: 10`. With the default rolling update (maxSurge 1, maxUnavailable 0) an old pod
+  is removed only after a new pod holds an edge connection. Helm's three-way merge keeps these fields on
+  later chart upgrades; drop the patch task once a chart version renders them itself.
+- A PodDisruptionBudget `cloudflared` (`minAvailable: 1`). It guards manual drains and other eviction-API
+  callers only; nothing in this repo drains nodes.
+- Consequence: every pod-template change (image bump, ingress change via the restart task) needs a
+  **third schedulable node** for the surge pod. With two nodes down the rollout waits (old pods keep
+  serving) and the Helm task's 3 min wait fails the playbook run.
+
+Apply only the cloudflared part: the namespace, the Helm release, the PDB and the patch. No tunnel
+ingress PUT, no restart task, no Traefik values, so it is safe before a k3s upgrade. Off-LAN, add the
+SSH jump config and the tunnel kubeconfig (`~/.kube/tunnel.yaml`, see "Off-LAN kubectl / Ansible
+Access"). Prerequisite for the diff checks below: the helm-diff plugin (`helm plugin list` shows `diff`
+3.4.1 or newer). Without it the helm module prints no diff and always reports the release as changed.
+
+```bash
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --list-tasks   # 6 tasks, ending with the patch
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared
+# off-LAN: ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=60s" \
+#   ansible-playbook … -e kubeconfig="$HOME/.kube/tunnel.yaml"
+```
+
+- **Never run this playbook with `-v`**: the helm module's result includes the release values, which
+  hold the tunnel token. The plain `--diff` is safe (helm-diff masks Secret data).
+- On the first run the "Cloudflared deployen" diff must show only `replicas: 1` → `2`. Any other change
+  restarts the pods during the Helm step, before the placement patch: stop and investigate.
+- Helm only adds the second pod; the patch task then replaces both pods, and a new pod never lands on a
+  node that still runs a cloudflared pod. An SSH session that runs through a replaced pod drops once;
+  reconnect.
+
+Verify:
+
+```bash
+kubectl -n platform rollout status deploy/cloudflared-cloudflare-tunnel-remote --timeout=5m
+kubectl -n platform get deploy cloudflared-cloudflare-tunnel-remote -o jsonpath='{.status.updatedReplicas}/{.status.readyReplicas} {.spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey} {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}'
+                                                       # 2/2 kubernetes.io/hostname /ready
+kubectl -n platform get pods -l pod=cloudflared -o wide   # 2x 1/1 Running, two different nodes
+kubectl -n platform get pdb cloudflared                   # ALLOWED DISRUPTIONS 1
+ansible-playbook infra/playbooks/40_platform.yml --tags cloudflared --check --diff   # again: changed=0
+```
+
+Rollback. The patched fields survive Helm and a plain revert, so remove them explicitly:
+
+```bash
+kubectl -n platform rollout undo deploy/cloudflared-cloudflare-tunnel-remote   # abort a stuck rollout only
+# strategic merge with nulls: works with and without a preceding rollout undo
+kubectl -n platform patch deploy cloudflared-cloudflare-tunnel-remote --type strategic -p '{"spec":{"minReadySeconds":null,"template":{"spec":{"affinity":null,"containers":[{"name":"cloudflared","readinessProbe":null}]}}}}'
+kubectl -n platform delete pdb cloudflared
+kubectl -n platform scale deploy/cloudflared-cloudflare-tunnel-remote --replicas=1
+```
+
+Then, before the next playbook-40 run, open a PR that sets `replicaCount: 1` and removes the PDB and patch
+tasks but keeps the `tags: [cloudflared]` lines. A plain `git revert` of #322 also drops the tags, so a
+`--tags cloudflared` run would select nothing, and a full run would re-apply the ingress, the restart and
+the Traefik values.
 
 #### Add New Public Endpoint
 
@@ -819,6 +894,9 @@ tunnel's published application routes in the Cloudflare dashboard (Networking �
 kubectl -n platform rollout restart deployment/cloudflared-cloudflare-tunnel-remote
 kubectl -n platform rollout status deployment/cloudflared-cloudflare-tunnel-remote
 ```
+
+With two replicas the restart rolls one pod at a time and keeps a connected replica (see "Replicas and
+placement"); an off-LAN SSH session through a replaced pod still drops once.
 
 #### Full Tunnel Recreate (Emergency)
 
