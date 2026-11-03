@@ -11,7 +11,11 @@ transaction back ("transaction has already been committed or rolled back"), and 
 never makes forward progress — `state.db` keeps growing and SQLite query latency keeps
 degrading (Slow SQL, apiserver `/readyz` etcd-check failures, load). None of `compactInterval`,
 `compactTimeout`, `compactBatchSize` or `compactMinRetain` (also 1000 — the number of most
-recent revisions kine always retains) are tunable via k3s flags. This script runs the exact same
+recent revisions kine always retains) are tunable via k3s flags. Since k3s v1.32.13 (kine v0.14.12)
+k3s starts kine with `--compact-interval=0s`: kine's own loop is off and the kube-apiserver triggers
+the same compaction every `--etcd-compaction-interval` (default 5 min), with the same 5 second
+per-batch timeout and 1000-revision batches; the SQLite schema and the compaction SQL below are
+unchanged in v0.14.12, so this script applies to both versions. This script runs the exact same
 compaction kine's compactor would run, offline (k3s stopped, no 5 second timeout, larger
 batches), so a stalled backlog can be cleared in one pass.
 

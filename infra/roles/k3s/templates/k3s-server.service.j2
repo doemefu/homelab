@@ -9,12 +9,21 @@ Type=notify
 EnvironmentFile=-/etc/default/k3s
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-Environment=K3S_TOKEN={{ k3s_token }}
 ExecStart=/usr/local/bin/k3s server \
-  --write-kubeconfig-mode=644 \
+  --write-kubeconfig-mode={{ k3s_write_kubeconfig_mode }} \
+  --token-file={{ k3s_token_file }} \
   --tls-san={{ ansible_host }} \
   --node-ip={{ ansible_host }} \
   --flannel-backend=vxlan \
+{% if k3s_audit_log_enabled %}
+  --kube-apiserver-arg=audit-policy-file={{ k3s_audit_policy_file }} \
+  --kube-apiserver-arg=audit-log-path={{ k3s_audit_log_path }} \
+  --kube-apiserver-arg=audit-log-maxsize={{ k3s_audit_log_maxsize }} \
+  --kube-apiserver-arg=audit-log-maxbackup={{ k3s_audit_log_maxbackup }} \
+  --kube-apiserver-arg=audit-log-maxage={{ k3s_audit_log_maxage }} \
+  --kube-apiserver-arg=audit-log-compress=true \
+  --kube-apiserver-arg=audit-log-mode=batch \
+{% endif %}
   --kube-apiserver-arg=etcd-healthcheck-timeout={{ k3s_apiserver_etcd_healthcheck_timeout }} \
   --kube-apiserver-arg=etcd-readycheck-timeout={{ k3s_apiserver_etcd_readycheck_timeout }}
 KillMode=process

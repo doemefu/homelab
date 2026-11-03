@@ -140,35 +140,55 @@ kubectl get ns
 
 #### Version Pin
 
-Set in `infra/roles/k3s/defaults/main.yml`:
+Set in `infra/roles/k3s/defaults/main.yml`, together with the sha256 of both binaries (#158 — the
+download task fails if the file does not match):
 ```yaml
-k3s_version: "v1.32.2+k3s1"
+k3s_version: "v1.32.13+k3s1"
+k3s_binary_sha256:
+  aarch64: "66b5f999..."   # line "k3s-arm64" of the release asset sha256sum-arm64.txt
+  x86_64: "4aaf9825..."    # line "k3s" of the release asset sha256sum-amd64.txt
 ```
+
+On every bump, copy both hashes from the release assets of the new tag (for example
+`curl -sSL https://github.com/k3s-io/k3s/releases/download/v1.32.13%2Bk3s1/sha256sum-arm64.txt`)
+and update them in the same commit as `k3s_version`.
 
 #### Upgrade Procedure
 
-1. Read [k3s Changelog](https://github.com/k3s-io/k3s/releases) for breaking changes
-2. Verify monitoring is green: `kubectl get nodes` — all Ready
-3. Verify Longhorn volumes healthy: `kubectl get -n longhorn-system volumes`
+Patch upgrades within one minor are done in place, without draining: `k3s.service` and
+`k3s-agent.service` use `KillMode=process`, so containers keep running while k3s restarts. Draining
+would move the single-replica RWO workloads (postgresql-0, influxdb2-0, mosquitto, n8n, open-webui,
+Home Assistant) between nodes for no benefit.
 
-**Upgrade one node at a time**:
+1. Read the [k3s release notes](https://github.com/k3s-io/k3s/releases) of every release in between,
+   especially the embedded component table (kine, containerd, Traefik chart, CoreDNS) — e.g. the
+   Traefik chart 39 shipped with v1.32.13 needed the `ports.web.http.redirections` key in
+   `40_platform.yml`.
+2. Verify: all nodes Ready, no unhealthy pods, all Longhorn volumes `healthy`, kine small (see
+   "Read-only diagnostics" below), no Longhorn snapshot (02:00), restic (03:00) or metrics trim (05:00)
+   running in the next hour.
+3. Keep the previous binary on every node before touching it:
+   `ssh ansible@<ip> 'sudo cp -a /usr/local/bin/k3s /usr/local/bin/k3s-<old-version>'`.
+4. raspi5 first, then the agents one at a time (raspi4, mba1, mba2), each with a `--check` run first.
+   Use `--check` without `--diff` for this playbook (see "Join token and admin kubeconfig").
 
 ```bash
-# Control-Plane first (raspi5)
-kubectl drain raspi5 --ignore-daemonsets --delete-emptydir-data
-ansible-playbook infra/playbooks/20_k3s.yml -l raspi5
-kubectl uncordon raspi5
-kubectl get nodes -w  # Wait for Ready
-
-# Then workers (one at a time)
-for NODE in raspi4 mba1 mba2; do
-  kubectl drain $NODE --ignore-daemonsets --delete-emptydir-data
-  ansible-playbook infra/playbooks/20_k3s.yml -l $NODE
-  kubectl uncordon $NODE
-  kubectl get nodes -w  # Wait for Ready before next
-  sleep 30
-done
+ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5 --check
+ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5
+kubectl get nodes -o wide          # raspi5 Ready with the new version within ~2 min
+# then the same two commands with --limit raspi4, mba1, mba2 — one node at a time, wait for Ready
 ```
+
+**Rollback** (per node, the unit flags work with the previous patch release too):
+
+```bash
+ssh ansible@<ip> 'sudo systemd-run --unit=k3s-rollback --collect /bin/sh -c \
+  "install -m 0755 /usr/local/bin/k3s-<old-version> /usr/local/bin/k3s && systemctl restart k3s --no-block"'
+# agents: systemctl restart k3s-agent --no-block
+```
+
+Delete the kept binaries after 24 h of stable operation. A rollback of raspi5 also rolls back the
+bundled Traefik chart; re-apply the matching HelmChartConfig values from the old `40_platform.yml`.
 
 #### Check Current Version
 
@@ -182,13 +202,42 @@ After major k3s upgrades, verify service templates against current k3s documenta
 - `infra/roles/k3s/templates/k3s-server.service.j2` (control-plane)
 - `infra/roles/k3s/templates/k3s-agent.service.j2` (workers)
 
+#### Join token and admin kubeconfig (#156)
+
+- The cluster join token is written to `/etc/rancher/k3s/cluster-token` (root, `0600`) on every node
+  and passed with `--token-file`; the systemd units (mode `0644`) no longer contain it. The token-file
+  task, both unit templates and the kubeconfig fetch in `20_k3s.yml` run with `no_log`/`diff: false`,
+  because the pre-#156 units embedded the token and a `--diff` of that migration would print it.
+  Still prefer `--check` without `--diff` for `20_k3s.yml`.
+- The admin kubeconfig `/etc/rancher/k3s/k3s.yaml` on raspi5 is `0600` (`--write-kubeconfig-mode`);
+  on the node use `sudo k3s kubectl`. The operator's copy `~/.kube/homelab.yaml` is unaffected — the
+  playbook still fetches it (now with `become`).
+
+#### API audit log (#158)
+
+The kube-apiserver on raspi5 writes an audit log to `/var/log/k3s-audit/audit.log`; the policy is
+`/etc/rancher/k3s/audit-policy.yaml` (template `infra/roles/k3s/templates/audit-policy.yaml.j2`).
+
+- **Content:** level `Metadata` at most — who did what to which object, never request or response
+  bodies. Logged: every access to Secrets and service-account tokens; exec/attach/port-forward/proxy and
+  container log reads; all writes. Dropped: leases, events, token/access reviews, status heartbeats,
+  kubelet reads, all other reads, non-resource URLs (health, metrics, discovery).
+- **Retention:** the apiserver rotates the file at 20 MB, keeps 3 gzip-compressed backups for at most
+  7 days (`k3s_audit_log_maxsize`, `_maxbackup`, `_maxage`), so it stays under ~30 MB on the SD card.
+  `--audit-log-mode=batch` keeps the writes out of the request path.
+- **Read:** `ssh ansible@192.168.1.61 "sudo tail -n 20 /var/log/k3s-audit/audit.log | jq -c '{user: .user.username, verb, uri: .requestURI, code: .responseStatus.code}'"`
+- **Disable** (rollback): `ansible-playbook infra/playbooks/20_k3s.yml --limit raspi5 -e k3s_audit_log_enabled=false`
+  (restarts k3s on raspi5).
+
 #### k3s datastore (kine/SQLite) maintenance
 
 k3s's embedded datastore is [kine](https://github.com/k3s-io/kine) on SQLite
 (`/var/lib/rancher/k3s/server/db/state.db`, control-plane node only — raspi5). kine's online
 compactor runs every 5 minutes, with a 5 second per-batch `DELETE` timeout and a 1,000-row batch
 size (`compactInterval`, `compactTimeout`, `compactBatchSize` in
-`pkg/logstructured/sqllog/sql.go`, kine v0.13.9 — none of these are tunable via k3s flags). On a
+`pkg/logstructured/sqllog/sql.go`, kine v0.13.9 — none of these are tunable via k3s flags; since
+k3s v1.32.13 (kine v0.14.12) k3s starts kine with `--compact-interval=0s`, so the kube-apiserver
+drives the same compaction through its own `--etcd-compaction-interval`, default 5 min). On a
 large enough backlog, a batch can exceed the 5 second timeout; Go's `database/sql` rolls that
 transaction back, and the compactor stalls permanently instead of retrying — the datastore keeps
 growing and query latency keeps degrading until someone intervenes by hand. This happened on
@@ -283,7 +332,8 @@ sudo ls -la /var/lib/rancher/k3s/server/db/
 journalctl -u k3s --since '1 hour ago' --no-pager | grep -c 'Slow SQL'
 
 # has the online compactor made progress recently? silence across several 5-min windows
-# means it has stalled
+# means it has stalled — or that there was nothing to compact: confirm with the compact_rev
+# query above (it must move forward between two runs ~10 min apart)
 journalctl -u k3s --since '30 min ago' --no-pager | grep -E 'COMPACT compacted|Compact failed'
 
 # k3s restart count and current state
@@ -3255,8 +3305,8 @@ at a time — mba2 first, mba1 at least 60 minutes later.
 ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks --check --diff
 ansible-playbook infra/playbooks/10_base.yml -l mba2 --tags mac_tweaks
 
-# 20_k3s.yml: --check only, NEVER --diff. k3s-agent.service.j2 embeds K3S_TOKEN, so a
-# diff of that template prints the token to the terminal and into any log.
+# 20_k3s.yml: --check only, no --diff. Before #156 k3s-agent.service.j2 embedded K3S_TOKEN;
+# the token-bearing tasks now run with diff: false, but keep --diff off for this playbook.
 ansible-playbook infra/playbooks/20_k3s.yml -l mba2 --check
 ansible-playbook infra/playbooks/20_k3s.yml -l mba2
 

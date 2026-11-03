@@ -1,17 +1,31 @@
 ---
-- name: K3s Konfigurationsverzeichnis anlegen
-  ansible.builtin.file:
-    path: "{{ k3s_kubeconfig_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-
 - name: Remove the manual etcd health-check drop-in from the homelab#129 incident (now applied via the systemd unit)
   ansible.builtin.file:
     path: "{{ k3s_kubeconfig_dir }}/config.yaml.d/90-incident-129-etcd-healthcheck.yaml"
     state: absent
 
+# homelab#158: kube-apiserver audit policy and log directory (control-plane only).
+- name: Install the kube-apiserver audit policy
+  ansible.builtin.template:
+    src: audit-policy.yaml.j2
+    dest: "{{ k3s_audit_policy_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: k3s_audit_log_enabled
+  notify: Restart k3s
+
+- name: Create the kube-apiserver audit log directory
+  ansible.builtin.file:
+    path: "{{ k3s_audit_log_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: k3s_audit_log_enabled
+
+# diff: false — before homelab#156 this unit embedded the join token, so a --diff of the
+# migration would print it. The unit itself holds no secret any more.
 - name: K3s Server Systemd-Service anlegen
   ansible.builtin.template:
     src: k3s-server.service.j2
@@ -19,6 +33,7 @@
     owner: root
     group: root
     mode: "0644"
+  diff: false
   notify:
     - Reload systemd
     - Restart k3s

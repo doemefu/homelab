@@ -1,11 +1,35 @@
 ---
-k3s_version: "v1.32.2+k3s1"
+k3s_version: "v1.32.13+k3s1"
+# sha256 of the k3s binary for k3s_version, keyed by ansible_facts['architecture'] (homelab#158).
+# Update both values together with k3s_version: copy them from the release assets
+# sha256sum-arm64.txt (line "k3s-arm64") and sha256sum-amd64.txt (line "k3s").
+k3s_binary_sha256:
+  aarch64: "66b5f9991fe6973169b3eb6e2200022474bb7242d702ada825fa467991717d3a"
+  x86_64: "4aaf9825a92dc885856baab578f18e1881e8d381d42578bcbdabd5d7b7285865"
 k3s_role: "agent"  # Überschreiben mit "server" in k3s_server group_vars
 k3s_server_host: "{{ hostvars[groups['k3s_server'][0]]['ansible_host'] }}"
 k3s_binary_name: "{{ 'k3s-arm64' if ansible_facts['architecture'] == 'aarch64' else 'k3s' }}"
 k3s_kubeconfig_dir: /etc/rancher/k3s
 k3s_data_dir: /var/lib/rancher/k3s
 # k3s_token: muss in infra/inventory/group_vars/secrets.yml gesetzt sein
+# The join token is written to this root-only file and passed with --token-file, so it no
+# longer sits in the world-readable systemd units (homelab#156).
+k3s_token_file: "{{ k3s_kubeconfig_dir }}/cluster-token"
+# Mode of the admin kubeconfig /etc/rancher/k3s/k3s.yaml on the server (homelab#156).
+# Read it on the node with `sudo k3s kubectl`; the operator's copy is ~/.kube/homelab.yaml.
+k3s_write_kubeconfig_mode: "0600"
+
+# kube-apiserver audit log on the control-plane node (homelab#158). The policy logs metadata
+# only (never request/response bodies) and drops the high-volume lease/event/heartbeat traffic;
+# the apiserver rotates the file itself, so the SD card holds at most
+# k3s_audit_log_maxsize MB plus k3s_audit_log_maxbackup gzip-compressed files.
+# Set k3s_audit_log_enabled to false to remove the audit flags again (rollback switch).
+k3s_audit_log_enabled: true
+k3s_audit_policy_file: "{{ k3s_kubeconfig_dir }}/audit-policy.yaml"
+k3s_audit_log_path: /var/log/k3s-audit/audit.log
+k3s_audit_log_maxsize: 20  # MB per file before rotation
+k3s_audit_log_maxbackup: 3  # rotated files kept
+k3s_audit_log_maxage: 7  # days
 
 # Kubelet graceful node shutdown (homelab#102) — enabled for the mac group only, so the
 # Raspberry Pis and the server are untouched. The kubelet reads every *.conf in

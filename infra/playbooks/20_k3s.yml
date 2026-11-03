@@ -22,10 +22,15 @@
 - name: Kubeconfig lokal hinterlegen
   hosts: k3s_server
   tasks:
+    # k3s.yaml is root-only since homelab#156 (--write-kubeconfig-mode=0600), hence become.
+    # It holds the cluster-admin client key: no_log on the read, no_log + diff: false on the
+    # local copy so neither ends up in the playbook output.
     - name: Kubeconfig lesen
       ansible.builtin.slurp:
         src: /etc/rancher/k3s/k3s.yaml
       register: k3s_kubeconfig
+      become: true
+      no_log: true
 
     - name: Kubeconfig lokal unter ~/.kube/homelab.yaml speichern
       ansible.builtin.copy:
@@ -33,6 +38,8 @@
         dest: "~/.kube/homelab.yaml"
         mode: "0600"
       delegate_to: localhost
+      no_log: true
+      diff: false
 
 - name: K3s Agent installieren und Cluster joinen
   hosts: k3s_agent
