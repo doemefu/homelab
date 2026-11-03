@@ -1,0 +1,160 @@
+# promtool unit tests for additionalPrometheusRulesMap.homelab-mcp-hub in
+# cluster/values/kube-prometheus-stack.yaml (#178, docs/080-mcp-hub.md §7.4, §9.7).
+# Run: scripts/promtool-test-rules.sh (CI: `Test Prometheus Rules`).
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # --- McpHubAccountAuthExpired ---
+  # One-hot status per account x capability. Only outlook/mail is auth_expired; unreachable, error and
+  # disabled never fire. Fires at 30 min, not at 29; resolves once the status is back to ok.
+  - interval: 1m
+    input_series:
+      - series: mcp_hub_account_status{account="outlook", capability="mail", status="auth_expired"}
+        values: 1x40 0x20
+      - series: mcp_hub_account_status{account="outlook", capability="mail", status="ok"}
+        values: 0x40 1x20
+      - series: mcp_hub_account_status{account="icloud", capability="mail", status="ok"}
+        values: 1x60
+      - series: mcp_hub_account_status{account="icloud", capability="mail", status="auth_expired"}
+        values: 0x60
+      - series: mcp_hub_account_status{account="icloud", capability="calendar", status="unreachable"}
+        values: 1x60
+      - series: mcp_hub_account_status{account="icloud", capability="calendar", status="auth_expired"}
+        values: 0x60
+      - series: mcp_hub_account_status{account="gmail", capability="mail", status="error"}
+        values: 1x60
+      - series: mcp_hub_account_status{account="gmail", capability="calendar", status="disabled"}
+        values: 1x60
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: McpHubAccountAuthExpired
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: McpHubAccountAuthExpired
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              account: outlook
+              capability: mail
+            exp_annotations:
+              summary: "mcp-hub account outlook (mail) needs re-authentication"
+              description: >-
+                mcp-hub has reported auth_expired for account outlook, capability mail, for 30 minutes, so the
+                account is missing from the tools and the briefing. Graph accounts: re-login with
+                `mcp-hub login <account>` (DEPLOYMENT.md "mcp-hub token store and the Outlook account (#171
+                onboarding)"). App-password accounts: replace the app password in SOPS and run playbook 59
+                (DEPLOYMENT.md "mcp-hub (Flux, #170 onboarding)", "mcp-hub: Gmail account (#172)"). Spec:
+                docs/080-mcp-hub.md §7.3.
+      - eval_time: 45m
+        alertname: McpHubAccountAuthExpired
+        exp_alerts: []
+  # A pod restart resets the status to unknown (memory only) and restarts the 30 min (new pod label).
+  - interval: 1m
+    input_series:
+      - series: mcp_hub_account_status{account="outlook", capability="mail", status="auth_expired", pod="mcp-hub-a"}
+        values: 1x20 stale
+      - series: mcp_hub_account_status{account="outlook", capability="mail", status="unknown", pod="mcp-hub-b"}
+        values: _x21 1x4 0x40
+      - series: mcp_hub_account_status{account="outlook", capability="mail", status="auth_expired", pod="mcp-hub-b"}
+        values: _x21 0x4 1x40
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: McpHubAccountAuthExpired
+        exp_alerts: []
+      - eval_time: 57m
+        alertname: McpHubAccountAuthExpired
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              account: outlook
+              capability: mail
+            exp_annotations:
+              summary: "mcp-hub account outlook (mail) needs re-authentication"
+              description: >-
+                mcp-hub has reported auth_expired for account outlook, capability mail, for 30 minutes, so the
+                account is missing from the tools and the briefing. Graph accounts: re-login with
+                `mcp-hub login <account>` (DEPLOYMENT.md "mcp-hub token store and the Outlook account (#171
+                onboarding)"). App-password accounts: replace the app password in SOPS and run playbook 59
+                (DEPLOYMENT.md "mcp-hub (Flux, #170 onboarding)", "mcp-hub: Gmail account (#172)"). Spec:
+                docs/080-mcp-hub.md §7.3.
+
+  # --- McpHubDown ---
+  # Branch 1: the target exists but the scrape fails -> fires at 10 min with the target's labels.
+  - interval: 1m
+    input_series:
+      - series: up{job="mcp-hub", namespace="apps", service="mcp-hub", endpoint="internal", pod="mcp-hub-754b9f7c6d-wr6nh",
+          instance="10.42.0.7:8084", container="mcp-hub"}
+        values: 0x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"}
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: McpHubDown
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: McpHubDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: mcp-hub
+              namespace: apps
+              service: mcp-hub
+              endpoint: internal
+              pod: mcp-hub-754b9f7c6d-wr6nh
+              instance: 10.42.0.7:8084
+              container: mcp-hub
+            exp_annotations: &mcp_hub_down_annotations
+              summary: "mcp-hub is not being scraped"
+              description: >-
+                Prometheus has had no successful scrape of mcp-hub (Service port internal, 8084, /metrics) for
+                10 minutes while the Deployment wants a replica, so McpHubAccountAuthExpired is blind. Check
+                `kubectl -n apps get pods -l app=mcp-hub`, `kubectl -n monitoring get servicemonitor mcp-hub` and
+                any NetworkPolicy in apps that selects the hub; runbook in DEPLOYMENT.md "mcp-hub alerts (#178)".
+  # Branch 2: no target at all while spec.replicas > 0 -> fires with only job="mcp-hub". This label set is
+  # why the Alertmanager inhibit rule in 41_monitoring.yml has no `equal` list.
+  - interval: 1m
+    input_series:
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"}
+        values: 1x20
+      - series: up{job="other"}
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: McpHubDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: mcp-hub
+            exp_annotations: *mcp_hub_down_annotations
+  # Deliberate scale to 0 (kill switch L3) -> silent.
+  - interval: 1m
+    input_series:
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"}
+        values: 0x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: McpHubDown
+        exp_alerts: []
+  # No target and no Deployment series (deleted, or kube-state-metrics down) -> silent here
+  # (WorkloadMissing / TargetDown cover those cases).
+  - interval: 1m
+    input_series:
+      - series: up{job="other"}
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: McpHubDown
+        exp_alerts: []
+  # Healthy scrape -> silent.
+  - interval: 1m
+    input_series:
+      - series: up{job="mcp-hub", namespace="apps", service="mcp-hub", endpoint="internal", pod="mcp-hub-754b9f7c6d-wr6nh",
+          instance="10.42.0.7:8084", container="mcp-hub"}
+        values: 1x20
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"}
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: McpHubDown
+        exp_alerts: []
