@@ -6,3 +6,4 @@ resources:
   - imagerepo.yaml
   - imagepolicy.yaml
   - imageupdate.yaml
+  - networkpolicy.yaml

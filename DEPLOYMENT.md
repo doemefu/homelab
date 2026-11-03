@@ -1706,6 +1706,47 @@ kubectl -n apps get pods -l app=data-service
 
 Backups need no change: `scripts/backup-app-data.sh` reads the database list at runtime, so `data_service` is dumped automatically.
 
+#### data-service NetworkPolicy (#127)
+
+`cluster/apps/data-service/networkpolicy.yaml` admits TCP 8082 only from:
+- the furchert-ch pods (`app: furchert-ch`), which use the netmon read API;
+- the kube-prometheus-stack Prometheus pods, which scrape `/actuator/prometheus`.
+
+It restricts ingress only, so the collectors' egress is not affected. Node-local traffic is always admitted: kubelet probes, `kubectl port-forward`, and host processes or hostNetwork pods on data-service's node. Flux (Kustomization `apps`, prune) applies the file on merge and removes it on revert.
+
+The selectors depend on labels and a port that live in other repos:
+- `app: furchert-ch` in furchert-ch `k8s/deployment.yaml`;
+- `app: data-service` and containerPort 8082 in data-service `k8s/deployment.yaml`.
+
+A label or port change there, or a new caller of data-service, needs this policy updated in the same change.
+
+Do not merge or reconcile it during a k3s upgrade window: the upgrade changes the embedded policy controller. Re-run the matrix after an upgrade.
+
+**Before merge (home network or tunnel context):**
+
+```bash
+kubectl -n apps get pods -l app=furchert-ch --show-labels                      # exactly 1 pod
+kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus,operator.prometheus.io/name=kube-prometheus-stack-prometheus   # exactly 1 pod
+# Positive control for the negative test below: must print {"status":"UP"...}
+kubectl -n apps run np-test --restart=Never --image=busybox:1.37.0 -- wget -T 5 -qO- http://data-service.apps.svc.cluster.local:8082/actuator/health
+kubectl -n apps wait --for=jsonpath='{.status.phase}'=Succeeded pod/np-test --timeout=60s; kubectl -n apps logs np-test; kubectl -n apps delete pod np-test
+```
+
+**After merge (verification matrix):**
+
+| # | Check | Expected |
+|---|---|---|
+| 1 | `flux reconcile kustomization apps --with-source`, then `kubectl -n apps get networkpolicy data-service` | exists |
+| 2 | `kubectl -n apps exec deploy/furchert-ch -- wget -qO- -T 5 http://data-service.apps.svc.cluster.local:8082/actuator/health` | `{"status":"UP"...}` |
+| 3 | furchert.ch `/dashboard/network` (ADMIN) | data loads |
+| 4 | Grafana Explore: `up{job="data-service"}` | 1 |
+| 5 | Same `np-test` pod as above | `wget` fails (timeout or connection refused), pod phase `Failed` |
+| 6 | `kubectl -n apps delete pod -l app=furchert-ch`; wait for Ready; repeat #2 and #3 | still works. kube-router lets connections that were already open continue, so this proves new pod IPs are admitted |
+| 7 | after 15 min: `min_over_time(up{job="data-service"}[15m])` | 1 |
+| 8 | `kubectl -n apps get pods -l app=data-service` | Ready, restart count unchanged |
+
+**Rollback:** revert the PR. Flux prunes the policy within 10 minutes, or immediately with `flux reconcile kustomization apps --with-source`. Emergency: `flux suspend kustomization apps && kubectl -n apps delete networkpolicy data-service`, revert, then `flux resume kustomization apps`. Confirm `flux get kustomizations apps` shows it resumed: the Flux sync alert skips suspended Kustomizations.
+
 ### data-service NM-1: Cloudflare keys, scrape and alerts
 
 NM-1 (#116) adds the Cloudflare GraphQL Analytics credentials to `data-service-secrets`, a ServiceMonitor for data-service and the `homelab-netmon` alert rules. Contract: `docs/060-network-monitoring.md` §4.1, §4.2, §7.1, §9.
@@ -1764,7 +1805,7 @@ curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name
 3. A collector added in data-service without its own class falls into the `15m` class. If its cadence is slower, add a class to the rules in `cluster/values/kube-prometheus-stack.yaml`.
 4. A collector that is disabled (`netmon.collectors.<name>.enabled=false`) must not export the gauge. If one stays NaN forever, that is a data-service bug, not an outage.
 
-**`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system` and `kubectl -n monitoring get servicemonitor data-service`. The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
+**`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system`, `kubectl -n monitoring get servicemonitor data-service` and the NetworkPolicy `kubectl -n apps get networkpolicy data-service`: its Prometheus selector must still match the Prometheus pod labels ("data-service NetworkPolicy (#127)"). The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
 
 ### NM-4: login-event secrets (auth-service → data-service)
 
