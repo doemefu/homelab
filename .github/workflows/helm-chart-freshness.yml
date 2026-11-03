@@ -9,8 +9,9 @@
 # infra/playbooks/*.yml must be bumped by hand — this workflow only opens an
 # issue, it never touches the playbooks itself).
 #
-# actions/checkout is tag-pinned here to match this repo's convention as of
-# 2026-09-04; SHA-pinning of all workflow actions is tracked separately (#37).
+# actions/checkout is pinned to a full commit SHA with a `# vX.Y.Z` comment and
+# sets `persist-credentials: false` (the `gh` steps use GH_TOKEN, not git
+# credentials); see ci.yml's header for the re-pinning procedure (#37, #82).
 name: Helm Chart Freshness
 
 on:
@@ -32,7 +33,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install PyYAML (pinned)
         run: pip install --user pyyaml==6.0.3

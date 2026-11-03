@@ -95,6 +95,8 @@ dependencies:
 
   # Prometheus + Alertmanager + Grafana bundle.
   # Sync target: `infra/playbooks/41_monitoring.yml` → `chart_version:`
+  # If the bump changes the Prometheus version, also bump PROMETHEUS_VERSION +
+  # PROMETHEUS_SHA256 (promtool) in `.github/workflows/ci.yml`.
   - name: kube-prometheus-stack
     version: "69.3.1"
     repository: "https://prometheus-community.github.io/helm-charts"

@@ -34,6 +34,7 @@ Follow this loop for **every change** to this repository:
 | Longhorn recurring snapshot per-volume exclusions (PVC labels) | the playbook owning the PVC — today `infra/playbooks/41_monitoring.yml` (Prometheus PVC) | `41_monitoring.yml` |
 | Default StorageClass | `infra/playbooks/30_longhorn.yml` (sets longhorn as default) | `30_longhorn.yml` |
 | App-data backup script (components, retention, verification) | `scripts/backup-app-data.sh` | none (run the script) |
+| restic repository copy script (copy, verification, retention) | `scripts/copy-restic-repo.sh` | none (run the script; `--dry-run` changes nothing) |
 | cert-manager / TLS | `infra/playbooks/40_platform.yml`, `cluster/values/cert-manager.yaml` | `40_platform.yml` |
 | Cloudflare Tunnel | `infra/playbooks/40_platform.yml`, `cluster/values/cloudflared.yaml` | `40_platform.yml` |
 | Cloudflare Tunnel ingress list | `infra/playbooks/40_platform.yml` (`cf_ingress_body` fact) | `40_platform.yml` |
@@ -255,8 +256,8 @@ unimplemented), so these bumps are manual:
 ### Helm Chart Version Tracking (Automated Freshness Check)
 - Container images: Pinned tags for every image; the 9 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch, data-service) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
-- GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
-- CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction
+- GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql,helm-chart-freshness}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`)
+- CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest, promtool in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction
 
 ### Digest-Pinned Platform Images
 
@@ -291,11 +292,11 @@ line's index digest is the actual source of truth).
 2. Update the `image:` (or `image.tag`) line to `repo:<new-tag>@sha256:<index-digest>`
    and the one-line explanatory comment above it with the new index digest + resolution date.
 3. Validate:
-   - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml`: covered by the existing
-     `kustomize build cluster/apps/<app> | kubeconform ...` and
-     `| conftest test --policy policy/kubernetes/ --all-namespaces -` commands in
-     "Reproducing each check locally" above (open-webui, litellm, and n8n are already
-     in that loop; `deny-latest-image.rego` already accepts any `@sha256:...`-suffixed
+   - `cluster/apps/{open-webui,litellm,n8n}/deployment.yaml`: covered by
+     `scripts/validate-manifests.sh` and the
+     `| conftest test --policy policy/kubernetes/ --all-namespaces -` loop in
+     "Reproducing each check locally" below (open-webui, litellm, and n8n are already
+     in both directory lists; `deny-latest-image.rego` already accepts any `@sha256:...`-suffixed
      reference regardless of tag).
    - `cluster/values/cloudflared.yaml` and `infra/playbooks/50_apps_infra.yml`
      (pgvector, postgres-exporter, mosquitto, mosquitto-exporter): not rendered by
@@ -334,7 +335,10 @@ comment block for the investigation.)
    repository's index).
 4. If the chart ships CRDs (cert-manager, kube-prometheus-stack,
    longhorn), check the chart's upgrade notes for required CRD
-   updates and apply them before the playbook run.
+   updates and apply them before the playbook run. A
+   kube-prometheus-stack bump that changes the Prometheus version also
+   bumps `PROMETHEUS_VERSION` and `PROMETHEUS_SHA256` of the
+   `test-prometheus-rules` job in `.github/workflows/ci.yml`.
 5. Merge, then run the relevant playbook
    (`ansible-playbook infra/playbooks/<file>.yml -l <node>`) to pick
    up the new chart. The tracking issue is closed automatically by the
@@ -637,6 +641,7 @@ detect-changes  (Detect Changed Areas — dorny/paths-filter dispatcher)
       ├─► lint-workflows                  (Lint GitHub Workflows — actionlint)
       ├─► ansible-lint                    (Ansible Lint)
       ├─► validate-kubernetes-manifests   (kustomize build → kubeconform)
+      ├─► test-prometheus-rules           (Test Prometheus Rules — promtool)
       └─► enforce-cluster-policies        (kustomize build → conftest)
                           │
                           ▼
@@ -656,7 +661,8 @@ is `success` or `skipped` and fails on any `failure`/`cancelled`.
 | Lint Shell Scripts | `shellcheck` over `scripts/`. |
 | Lint GitHub Workflows | `actionlint` over `.github/workflows/`. |
 | Ansible Lint | `ansible-lint` (production profile) over `infra/`. |
-| Validate Kubernetes Manifests | `kustomize build` for each per-app overlay piped to `kubeconform` (strict + CRD catalog). |
+| Validate Kubernetes Manifests | `scripts/validate-manifests.sh`: `kustomize build` for each per-app overlay, validated by `kubeconform` (strict + CRD catalog). Blocking for the live Kubernetes version, taken from `k3s_version` in `infra/roles/k3s/defaults/main.yml`; report-only (warnings and a job summary) for the next two minor versions (`X.Y+1.0`, `X.Y+2.0`). A built-in kind whose apiVersion has no schema for a version counts as invalid (removed API). |
+| Test Prometheus Rules | `scripts/promtool-test-rules.sh`: `promtool check rules` and the unit tests in `cluster/values/tests/*.test.yml` for the custom rules in `cluster/values/kube-prometheus-stack.yaml`. Runs when that file, the tests, the script or `ci.yml` change. |
 | Enforce Cluster Policies | Conftest/OPA policies in `policy/kubernetes/` enforcing the CLAUDE.md non-negotiables (no `:latest`, resource limits in `apps`, namespace allowlist, no `cluster-admin` for `apps` subjects). |
 
 ### Reproducing each check locally
@@ -680,16 +686,15 @@ actionlint
 # Ansible
 ansible-lint infra/
 
-# Kubernetes schema validation
-brew install kustomize kubeconform
-for d in cluster/apps/auth-service cluster/apps/device-service cluster/apps/data-service \
-         cluster/apps/mcp-hub cluster/apps/litellm cluster/apps/n8n cluster/apps/open-webui \
-         cluster/apps; do
-  kustomize build "$d" | kubeconform -strict -ignore-missing-schemas \
-    -summary -verbose \
-    -schema-location default \
-    -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-done
+# Kubernetes schema validation (live version blocking, next two minors report-only;
+# override the next versions with KUBERNETES_NEXT_VERSIONS="1.33.13 1.34.12")
+brew install kustomize kubeconform jq
+scripts/validate-manifests.sh
+
+# Prometheus rules — promtool from the Prometheus release that CI pins
+# (PROMETHEUS_VERSION in ci.yml; take the checksum for your platform from the release's sha256sums.txt)
+pip install "pyyaml==6.0.3"
+PROMTOOL=/path/to/promtool scripts/promtool-test-rules.sh
 
 # Cluster policies — CI evaluates each per-app overlay with --all-namespaces
 brew install conftest

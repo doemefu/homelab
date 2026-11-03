@@ -1,7 +1,7 @@
 # promtool unit tests for additionalPrometheusRulesMap.homelab-netmon-egress in
 # cluster/values/kube-prometheus-stack.yaml (docs/060-network-monitoring.md §6.4).
 # Run: scripts/promtool-test-rules.sh — it extracts every rule group from the values file into
-# rules.yaml next to a copy of this file. Not run in CI yet (follow-up issue linked in PR #140).
+# rules.yaml next to a copy of this file. CI runs it in the `Test Prometheus Rules` job (#141).
 rule_files:
   - rules.yaml
 evaluation_interval: 1m
