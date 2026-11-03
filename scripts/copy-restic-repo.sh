@@ -559,8 +559,10 @@ else
     rm -rf "${DEST:?}/${old}.deleting"
   done
 fi
-# Leftovers of an interrupted delete.
+# Leftovers of an interrupted delete — only this script's own <YYYY-MM-DD_HHMMSS>.deleting names.
 find "${DEST}/" -mindepth 1 -maxdepth 1 -type d -name '*.deleting' -print | while IFS= read -r left; do
+  base="${left##*/}"
+  [[ "${base%.deleting}" =~ $RUN_DIR_PATTERN ]] || continue
   log "  removing leftover ${left}"
   rm -rf "${left:?}"
 done
