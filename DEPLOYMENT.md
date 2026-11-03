@@ -4098,7 +4098,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik (`--tags cloudflared`: only the tunnel replicas, PDB and placement patch, #322) | 3-5 min | Yes |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik (`--tags cloudflared`: no ingress PUT, restart task or Traefik values, #322) | 3-5 min | Yes |
 | `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |
 | `51_homeassistant.yml` | Home Assistant | 3-5 min | Yes |
