@@ -1,0 +1,99 @@
+# promtool unit tests for the kine compaction-lag rules in
+# additionalPrometheusRulesMap.homelab-netmon-node (cluster/values/kube-prometheus-stack.yaml, homelab#129).
+# Run: scripts/promtool-test-rules.sh (CI: `Test Prometheus Rules`).
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # --- K3sKineCompactionLagging ---
+  # A stall: 60k behind for 3 h with one skipped script run (stale) after 60 min -> fires after 2 h,
+  # the gap does not reset `for`.
+  - interval: 1m
+    input_series:
+      - series: homelab_k3s_kine_compaction_lag_revisions{node="raspi5", instance="192.168.1.61:9100", job="node-exporter"}
+        values: 60000x60 stale 60000x120
+    alert_rule_test:
+      - eval_time: 110m
+        alertname: K3sKineCompactionLagging
+        exp_alerts: []
+      - eval_time: 125m
+        alertname: K3sKineCompactionLagging
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: raspi5
+              instance: 192.168.1.61:9100
+              job: node-exporter
+            exp_annotations:
+              summary: "kine compaction on raspi5 is 60k revisions behind"
+              description: >-
+                The k3s kine datastore on raspi5 has been more than 50k revisions behind its
+                compaction marker for 2h; the online compactor has probably stalled (homelab#129). Check
+                the compaction lag and the Slow SQL rate with the read-only diagnostics, then plan the
+                offline compaction; runbook in DEPLOYMENT.md "k3s datastore (kine/SQLite) maintenance".
+  # Catch-up after a restart: high for 90 min, then healthy -> never fires.
+  - interval: 1m
+    input_series:
+      - series: homelab_k3s_kine_compaction_lag_revisions{node="raspi5"}
+        values: 60000x90 2000x90
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: K3sKineCompactionLagging
+        exp_alerts: []
+      - eval_time: 170m
+        alertname: K3sKineCompactionLagging
+        exp_alerts: []
+  # Healthy -> quiet.
+  - interval: 1m
+    input_series:
+      - series: homelab_k3s_kine_compaction_lag_revisions{node="raspi5"}
+        values: 1200x180
+    alert_rule_test:
+      - eval_time: 170m
+        alertname: K3sKineCompactionLagging
+        exp_alerts: []
+
+  # --- K3sKineCompactionLagMissing ---
+  # Size gauge present, lag absent -> fires after 1 h with node="raspi5".
+  - interval: 1m
+    input_series:
+      - series: homelab_k3s_state_db_bytes{node="raspi5"}
+        values: 74000000x90
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: K3sKineCompactionLagMissing
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: K3sKineCompactionLagMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: raspi5
+            exp_annotations:
+              summary: "kine compaction lag metric missing on raspi5"
+              description: >-
+                homelab_k3s_kine_compaction_lag_revisions{node="raspi5"} has been absent for 1h while the
+                datastore size is still reported, so K3sKineCompactionLagging cannot fire. See
+                `journalctl -u homelab-netmon -n 20` on raspi5 for "k3s kine lag skipped" (k3s stopped,
+                SQLite error), or re-run 10_base.yml --tags netmon_node if the script predates the gauge.
+                Runbook in DEPLOYMENT.md "k3s datastore (kine/SQLite) maintenance".
+  # Both gauges absent -> silent here (K3sDatastoreSizeMissing covers it).
+  - interval: 1m
+    input_series:
+      - series: up{job="node-exporter"}
+        values: 1x90
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: K3sKineCompactionLagMissing
+        exp_alerts: []
+  # Both present -> silent.
+  - interval: 1m
+    input_series:
+      - series: homelab_k3s_state_db_bytes{node="raspi5"}
+        values: 74000000x90
+      - series: homelab_k3s_kine_compaction_lag_revisions{node="raspi5"}
+        values: 1200x90
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: K3sKineCompactionLagMissing
+        exp_alerts: []
