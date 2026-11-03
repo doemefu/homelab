@@ -191,6 +191,8 @@ kubectl get nodes -o wide          # raspi5 Ready with the new version within ~2
 7. After each apply, confirm the node really runs the new binary (`kubectl get nodes` VERSION equals
    `k3s --version` on the node). A run that dies after a changed task loses its handlers, and a re-run
    no longer sees a change — restart k3s/k3s-agent by hand in that case.
+8. After the last node, re-run the NetworkPolicy checks #2, #4 and #5 of "data-service NetworkPolicy
+   (#127)" (the upgrade replaces the embedded policy controller).
 
 **Rollback** (per node, the unit flags work with the previous patch release too):
 
@@ -1740,12 +1742,12 @@ kubectl -n apps wait --for=jsonpath='{.status.phase}'=Succeeded pod/np-test --ti
 | 2 | `kubectl -n apps exec deploy/furchert-ch -- wget -qO- -T 5 http://data-service.apps.svc.cluster.local:8082/actuator/health` | `{"status":"UP"...}` |
 | 3 | furchert.ch `/dashboard/network` (ADMIN) | data loads |
 | 4 | Grafana Explore: `up{job="data-service"}` | 1 |
-| 5 | Same `np-test` pod as above | `wget` fails (timeout or connection refused), pod phase `Failed` |
-| 6 | `kubectl -n apps delete pod -l app=furchert-ch`; wait for Ready; repeat #2 and #3 | still works. kube-router lets connections that were already open continue, so this proves new pod IPs are admitted |
+| 5 | Same `np-test` pod as above, but wait with `--for=jsonpath='{.status.phase}'=Failed` | wait succeeds: `wget` failed (timeout or connection refused); logs show the error |
+| 6 | `kubectl -n apps delete pod -l app=furchert-ch` (furchert.ch is down for a few seconds, replicas 1); wait for Ready; repeat #2 and #3 | still works. kube-router lets connections that were already open continue, so this proves new pod IPs are admitted |
 | 7 | after 15 min: `min_over_time(up{job="data-service"}[15m])` | 1 |
 | 8 | `kubectl -n apps get pods -l app=data-service` | Ready, restart count unchanged |
 
-**Rollback:** revert the PR. Flux prunes the policy within 10 minutes, or immediately with `flux reconcile kustomization apps --with-source`. Emergency: `flux suspend kustomization apps && kubectl -n apps delete networkpolicy data-service`, revert, then `flux resume kustomization apps`. Confirm `flux get kustomizations apps` shows it resumed: the Flux sync alert skips suspended Kustomizations.
+**Rollback:** revert the PR. Flux prunes the policy within 10 minutes, or immediately with `flux reconcile kustomization apps --with-source`. Emergency: `flux suspend kustomization apps && kubectl -n apps delete networkpolicy data-service`, merge the revert, run `flux reconcile source git flux-system` (so the resume does not re-apply the old revision), then `flux resume kustomization apps`. Confirm `flux get kustomizations apps` shows it resumed: the Flux sync alert skips suspended Kustomizations.
 
 ### data-service NM-1: Cloudflare keys, scrape and alerts
 
