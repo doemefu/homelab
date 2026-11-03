@@ -1242,8 +1242,9 @@ scraped by the ServiceMonitor `monitoring/mcp-hub` (`41_monitoring.yml`; Service
   `kubectl -n apps get networkpolicy -o custom-columns=NAME:.metadata.name,SEL:.spec.podSelector.matchLabels`
   (no policy may select `app=mcp-hub` without admitting `monitoring` → 8084; #127).
 - **One message per outage:** while `WorkloadUnavailable` fires for `apps/mcp-hub`, an inhibit rule
-  in `41_monitoring.yml` mutes `McpHubDown` and the chart's `TargetDown` for job `mcp-hub`. Its
-  `equal` list is empty on purpose: the absent() branch of `McpHubDown` carries only
+  in `41_monitoring.yml` mutes `McpHubDown` and the chart's `TargetDown` for job `mcp-hub`; while
+  only the scrape fails (pod available), a second rule lets `McpHubDown` mute `TargetDown` for the
+  job. The `equal` lists are empty on purpose: the absent() branch of `McpHubDown` carries only
   `job="mcp-hub"`. `KubePodCrashLooping` / `KubePodNotReady` (pod-level) are not muted.
 - **Planned stop with replicas left at 1:** silence `WorkloadUnavailable`, `McpHubDown` and
   `TargetDown` for the hub. A scale to 0 (kill switch L3) needs no silence.
@@ -1251,8 +1252,11 @@ scraped by the ServiceMonitor `monitoring/mcp-hub` (`41_monitoring.yml`; Service
   release (rules) before it applies the ServiceMonitor; if the run aborts in between,
   `McpHubDown` fires after 10 min (a true signal). Verify: `up{job="mcp-hub"} == 1`,
   `count(mcp_hub_account_status)` = 6 × the configured account × capability pairs (24 today),
-  `kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-mcp-hub`,
-  `alertmanager_config_last_reload_successful == 1` (the inhibit rule), no `McpHub*` alert firing.
+  `kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-mcp-hub`, no `McpHub*`
+  alert firing, and the inhibit rules loaded: `alertmanager_config_last_reload_successful == 1`
+  **and** `alertmanager_config_last_reload_success_timestamp_seconds` later than the playbook run
+  (a config the operator rejects leaves the old one running with the gauge still 1). Never print
+  the generated Alertmanager config; it holds the Discord webhook.
 - **Rollback:** `helm -n monitoring rollback kube-prometheus-stack <revision before the change>`,
   `kubectl -n monitoring delete servicemonitor mcp-hub` (Ansible-applied), revert the PR. Do this
   **before** rolling the hub back below hub#90, or the 404 on `/metrics` fires `McpHubDown`.

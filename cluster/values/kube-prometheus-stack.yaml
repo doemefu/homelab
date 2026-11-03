@@ -684,7 +684,8 @@ additionalPrometheusRulesMap:
           # Branch 1: target exists, scrape fails. Branch 2: no target at all (Service or ServiceMonitor
           # broken) while the Deployment wants a replica; a deliberate scale to 0 (kill switch L3) stays
           # silent. While WorkloadUnavailable fires for the hub, 41_monitoring.yml inhibits this alert and
-          # the chart's TargetDown for job mcp-hub (one message per outage).
+          # the chart's TargetDown for job mcp-hub, and this alert in turn mutes TargetDown for the job
+          # when only the scrape fails (one message per outage).
           - alert: McpHubDown
             expr: >-
               up{job="mcp-hub"} == 0 or (absent(up{job="mcp-hub"}) and on()

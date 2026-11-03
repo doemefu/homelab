@@ -191,6 +191,15 @@
                   target_matchers:
                     - 'alertname =~ "McpHubDown|TargetDown"'
                     - 'job = mcp-hub'
+                # #178: pod available but the scrape fails (NetworkPolicy, port name, 404):
+                # McpHubDown names the hub-specific checks, so it mutes the chart's generic
+                # TargetDown for the same job. Empty `equal` for the same reason as above.
+                - source_matchers:
+                    - 'alertname = McpHubDown'
+                    - 'job = mcp-hub'
+                  target_matchers:
+                    - 'alertname = TargetDown'
+                    - 'job = mcp-hub'
         wait: true
         wait_timeout: "20m"
       no_log: true
