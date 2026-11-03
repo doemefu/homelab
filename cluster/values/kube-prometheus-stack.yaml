@@ -83,6 +83,7 @@ defaultRules:
 #   homelab-netmon-egress  NM-2 coroot-node-agent rules (PR #133)
 #   homelab-backups        backup alerts (PR #109)
 #   homelab-platform       Flux, cert-manager and workload availability alerts (#284)
+#   homelab-mcp-hub        mcp-hub account status and scrape alerts (#178, docs/080 §7.4)
 # ⚠️ Each of those PRs adds its own top-level additionalPrometheusRulesMap key. Git can
 # merge two such blocks without any conflict (it did for #109 + #131), leaving a
 # duplicate YAML key that Helm resolves by silently dropping one map. CI's yamllint
@@ -655,6 +656,50 @@ additionalPrometheusRulesMap:
                 Prometheus has no successful scrape of the cert-manager controller for 15 minutes,
                 so the certificate alerts are blind. Check `kubectl -n platform get pods` and the
                 ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
+
+  # --- mcp-hub (#178): expressions are the contract of docs/080-mcp-hub.md §7.4 (rev 4.17), copied
+  # verbatim (line-wrapped only); the scrape is the ServiceMonitor monitoring/mcp-hub in 41_monitoring.yml (job `mcp-hub`).
+  # Tests: cluster/values/tests/mcp-hub.test.yml. Annotations name only account/capability (§9.7: no
+  # addresses or content), and McpHubDown's use no label that only one of its branches carries.
+  homelab-mcp-hub:
+    groups:
+      - name: homelab-mcp-hub
+        rules:
+          # The status is one-hot per account x capability and lives in memory only: a pod restart
+          # resets it to `unknown` and restarts the 30 min.
+          - alert: McpHubAccountAuthExpired
+            expr: max by (account, capability) (mcp_hub_account_status{status="auth_expired"}) == 1
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "mcp-hub account {{ $labels.account }} ({{ $labels.capability }}) needs re-authentication"
+              description: >-
+                mcp-hub has reported auth_expired for account {{ $labels.account }}, capability {{ $labels.capability }},
+                for 30 minutes, so the account is missing from the tools and the briefing. Graph accounts: re-login with
+                `mcp-hub login <account>` (DEPLOYMENT.md "mcp-hub token store and the Outlook account (#171
+                onboarding)"). App-password accounts: replace the app password in SOPS and run playbook 59
+                (DEPLOYMENT.md "mcp-hub (Flux, #170 onboarding)", "mcp-hub: Gmail account (#172)"). Spec:
+                docs/080-mcp-hub.md §7.3.
+          # Branch 1: target exists, scrape fails. Branch 2: no target at all (Service or ServiceMonitor
+          # broken) while the Deployment wants a replica; a deliberate scale to 0 (kill switch L3) stays
+          # silent. While WorkloadUnavailable fires for the hub, 41_monitoring.yml inhibits this alert and
+          # the chart's TargetDown for job mcp-hub, and this alert in turn mutes TargetDown for the job
+          # when only the scrape fails (one message per outage).
+          - alert: McpHubDown
+            expr: >-
+              up{job="mcp-hub"} == 0 or (absent(up{job="mcp-hub"}) and on()
+              (max(kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"}) > 0))
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "mcp-hub is not being scraped"
+              description: >-
+                Prometheus has had no successful scrape of mcp-hub (Service port internal, 8084, /metrics) for
+                10 minutes while the Deployment wants a replica, so McpHubAccountAuthExpired is blind. Check
+                `kubectl -n apps get pods -l app=mcp-hub`, `kubectl -n monitoring get servicemonitor mcp-hub` and
+                any NetworkPolicy in apps that selects the hub; runbook in DEPLOYMENT.md "mcp-hub alerts (#178)".
 
 prometheus:
   prometheusSpec:

@@ -1032,6 +1032,7 @@ Expected UP targets:
 - `serviceMonitor/monitoring/mosquitto` → apps
 - `serviceMonitor/monitoring/data-service` → apps (job `data-service`, `/actuator/prometheus` — see "data-service NM-1: Cloudflare keys, scrape and alerts")
 - `serviceMonitor/monitoring/cert-manager` → platform (job `cert-manager`, port 9402 — see "Platform alerting (#284)")
+- `serviceMonitor/monitoring/mcp-hub` → apps (job `mcp-hub`, Service port `internal` 8084, `/metrics` — see "mcp-hub alerts (#178)")
 - `serviceMonitor/monitoring/coroot-node-agent` → monitoring (one target per gated node; none while the gate is closed)
 
 > **Note:** `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` are intentionally
@@ -1252,6 +1253,45 @@ stop. Today `Watchdog` goes to Discord every 12 h with everything else.
 kube-prometheus-stack <revision before the change>`, then
 `kubectl -n monitoring delete servicemonitor cert-manager` (Ansible-applied, not part of the
 release), and revert the PR so the next playbook run does not re-apply it.
+
+**mcp-hub alerts (#178):** the hub's own metrics (`docs/080-mcp-hub.md` §9.7, live since hub#90) are
+scraped by the ServiceMonitor `monitoring/mcp-hub` (`41_monitoring.yml`; Service port `internal`,
+8084, `/metrics`, 30 s, job `mcp-hub`). Rules in `additionalPrometheusRulesMap.homelab-mcp-hub`
+(tests `cluster/values/tests/mcp-hub.test.yml`), expressions verbatim from spec 080 §7.4:
+
+| Alert | Fires when | `for` |
+|-------|-----------|-------|
+| `McpHubAccountAuthExpired` | an account × capability reports `auth_expired` (one-hot `mcp_hub_account_status`) | 30m |
+| `McpHubDown` | the hub target scrapes with `up == 0`, or there is no target while `spec.replicas > 0` | 10m |
+
+- **Action for `McpHubAccountAuthExpired`:** Graph accounts re-login with `mcp-hub login <account>`
+  ("mcp-hub token store and the Outlook account (#171 onboarding)"); app-password accounts get a
+  new app password in the encrypted group vars plus playbook 59 ("mcp-hub (Flux, #170 onboarding)",
+  "mcp-hub: Gmail account (#172)"). A pod restart resets the status to `unknown` and restarts the
+  30 min.
+- **Checks for `McpHubDown`:** `kubectl -n apps get pods -l app=mcp-hub`,
+  `kubectl -n monitoring get servicemonitor mcp-hub`, the Service port name `internal`, and
+  `kubectl -n apps get networkpolicy -o custom-columns=NAME:.metadata.name,SEL:.spec.podSelector.matchLabels`
+  (no policy may select `app=mcp-hub` without admitting `monitoring` → 8084; #127).
+- **One message per outage:** while `WorkloadUnavailable` fires for `apps/mcp-hub`, an inhibit rule
+  in `41_monitoring.yml` mutes `McpHubDown` and the chart's `TargetDown` for job `mcp-hub`; while
+  only the scrape fails (pod available), a second rule lets `McpHubDown` mute `TargetDown` for the
+  job. The `equal` lists are empty on purpose: the absent() branch of `McpHubDown` carries only
+  `job="mcp-hub"`. `KubePodCrashLooping` / `KubePodNotReady` (pod-level) are not muted.
+- **Planned stop with replicas left at 1:** silence `WorkloadUnavailable`, `McpHubDown` and
+  `TargetDown` for the hub. A scale to 0 (kill switch L3) needs no silence.
+- **Rollout (owner):** playbook 41 after merge, from an up-to-date main checkout. It upgrades the
+  release (rules) before it applies the ServiceMonitor; if the run aborts in between,
+  `McpHubDown` fires after 10 min (a true signal). Verify: `up{job="mcp-hub"} == 1`,
+  `count(mcp_hub_account_status)` = 6 × the configured account × capability pairs (24 today),
+  `kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-mcp-hub`, no `McpHub*`
+  alert firing, and the inhibit rules loaded: `alertmanager_config_last_reload_successful == 1`
+  **and** `alertmanager_config_last_reload_success_timestamp_seconds` later than the playbook run
+  (a config the operator rejects leaves the old one running with the gauge still 1). Never print
+  the generated Alertmanager config; it holds the Discord webhook.
+- **Rollback:** `helm -n monitoring rollback kube-prometheus-stack <revision before the change>`,
+  `kubectl -n monitoring delete servicemonitor mcp-hub` (Ansible-applied), revert the PR. Do this
+  **before** rolling the hub back below hub#90, or the 404 on `/metrics` fires `McpHubDown`.
 
 ### coroot-node-agent (NM-2)
 
