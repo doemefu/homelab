@@ -104,7 +104,7 @@ Internet
 - Scheduled MQTT commands (light, nightlight, rain automation)
 - WebSocket broadcast (STOMP, live device state to frontend)
 - Device control REST endpoint (manual toggle -> MQTT publish)
-- Schedules REST CRUD (planned: device-service#41)
+- Schedules REST CRUD (device-service#41)
 
 **Does NOT:**
 - Handle user authentication or user CRUD
@@ -114,7 +114,7 @@ Internet
 **InfluxDB:** Write-only (sensor measurements)
 **MQTT:** Full client (subscribe + publish)
 
-**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reconciles from its own `schedules` table on a periodic fixed delay (`app.scheduler.poll-interval`, shipped at 60s); once the CRUD API lands (device-service#41), CRUD writes will re-register the affected task directly in-process — no cross-service polling or HTTP notification needed now that device-service owns both the table and the REST API. The periodic reconciliation stays in place as a fallback safety net for out-of-band DB edits, not as the primary change-propagation path.
+**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reconciles from its own `schedules` table on a periodic fixed delay (`app.scheduler.poll-interval`, shipped at 60s); since the CRUD API landed (device-service#41), CRUD writes re-register the affected task directly in-process — no cross-service polling or HTTP notification needed now that device-service owns both the table and the REST API. The periodic reconciliation stays in place as a fallback safety net for out-of-band DB edits, not as the primary change-propagation path.
 
 ### data-service
 
@@ -329,12 +329,16 @@ CREATE TABLE devices (
 |--------|------|------|-------------|
 | GET | `/devices` | JWT | List all devices with current state |
 | GET | `/devices/{id}` | JWT | Single device state |
-| POST | `/devices/{id}/control` | JWT | Send control command (-> MQTT publish) |
+| POST | `/devices/{id}/control` | ADMIN | Send control command (-> MQTT publish); every non-GET request under `/devices/**` needs role ADMIN (device-service#81 interim, #115) |
+| POST | `/devices` | ADMIN | Register a device and provision its auth-service `client_credentials` client (device-service#62) |
+| DELETE | `/devices/{name}` | ADMIN | Delete a device and revoke its client (device-service#62) |
 | WS | `/ws` | JWT on STOMP `CONNECT` | STOMP WebSocket: the upgrade is open, the `CONNECT` frame must carry `Authorization: Bearer <access token>`; browser origins limited to `https://furchert.ch`; clients may only subscribe to destinations under `/topic/terrarium/` (broadcasts go to `/topic/terrarium/{deviceName}`) and may `SEND` only to `/app/**` (no handlers exist today); with auth on, `SUBSCRIBE` and `SEND` also require a session that passed `CONNECT`; the token is checked only at `CONNECT` (device-service#84, live since 2026-10-28 via device-service#105) |
-| GET | `/schedules` | JWT | List all schedules (planned: device-service#41) |
-| POST | `/schedules` | ADMIN | Create schedule (planned: device-service#41) |
-| PUT | `/schedules/{id}` | ADMIN | Update schedule (planned: device-service#41) |
-| DELETE | `/schedules/{id}` | ADMIN | Delete schedule (planned: device-service#41) |
+| GET | `/schedules[?device=]`, `/schedules/{id}` | JWT | List / read schedules (device-service#41) |
+| POST | `/schedules` | ADMIN | Create schedule (device-service#41) |
+| PUT | `/schedules/{id}` | ADMIN | Replace schedule (device-service#41) |
+| DELETE | `/schedules/{id}` | ADMIN | Delete schedule (device-service#41) |
+
+device-service validates `iss` and rejects ID tokens (`azp`) since device-service#115; `aud`/`typ` follow auth-service#101. Request and response bodies of `/devices` and `/schedules`: device-service `README.md` ("API Reference"); ADMIN means the `role` claim of a signed-in user's access token, so a proxy forwards the user's token.
 
 ### data-service (:8082)
 
