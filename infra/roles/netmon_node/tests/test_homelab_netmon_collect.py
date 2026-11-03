@@ -11,6 +11,7 @@ import importlib.util
 import io
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -213,8 +214,12 @@ class K3sStateDbTest(unittest.TestCase):
         self.db = os.path.join(self.tmp.name, "state.db")
         with open(self.db, "wb") as handle:
             handle.write(b"\0" * 4096)
+        # The fake database also makes the lag gauge warn ("k3s kine lag skipped").
+        self._stderr = mock.patch.object(collect_mod.sys, "stderr", io.StringIO())
+        self._stderr.start()
 
     def tearDown(self):
+        self._stderr.stop()
         self.tmp.cleanup()
 
     def collect(self, path):
@@ -257,19 +262,48 @@ LAG_HEADER = (
 )
 
 
+KINE_SCHEMA = (
+    "CREATE TABLE kine (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, created INTEGER, "
+    "deleted INTEGER, create_revision INTEGER, prev_revision INTEGER, lease INTEGER, "
+    "value BLOB, old_value BLOB)",
+    "CREATE INDEX kine_name_index ON kine (name)",
+)
+
+# Stands in for k3s: a SEPARATE process that keeps the WAL database open (its -shm mapping
+# read-write), like kine on raspi5. A writer in the test process would share SQLite's
+# per-process shm handle with the reader, which then never takes the read-only -shm path.
+WRITER = r"""
+import sqlite3, sys, time
+db, mode, seconds, schema = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4:]
+c = sqlite3.connect(db)
+c.execute("PRAGMA journal_mode=WAL")
+c.execute("PRAGMA wal_autocheckpoint=0")
+for statement in schema:
+    c.execute(statement)
+c.execute("INSERT INTO kine (name, prev_revision) VALUES ('compact_rev_key', 0)")
+c.executemany("INSERT INTO kine (name, prev_revision) VALUES (?, 0)", [("/registry/leases/x",)] * 5000)
+c.execute("UPDATE kine SET prev_revision = 3800 WHERE name = 'compact_rev_key'")
+c.commit()
+print("ready", flush=True)
+if mode == "busy":
+    end = time.time() + seconds
+    while time.time() < end:
+        c.execute("INSERT INTO kine (name, prev_revision) VALUES ('/registry/leases/x', 0)")
+        c.commit()
+    print("done", flush=True)
+sys.stdin.read()
+"""
+
+
 def _kine_writer(path, rows=5000, compact_rev=3800):
-    """A kine-like WAL database with an open writer whose frames are not checkpointed."""
+    """A kine-like WAL database written from the test process (setup only, then closed)."""
     import sqlite3
 
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA wal_autocheckpoint=0")
-    conn.execute(
-        "CREATE TABLE kine (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, created INTEGER, "
-        "deleted INTEGER, create_revision INTEGER, prev_revision INTEGER, lease INTEGER, "
-        "value BLOB, old_value BLOB)"
-    )
-    conn.execute("CREATE INDEX kine_name_index ON kine (name)")
+    for statement in KINE_SCHEMA:
+        conn.execute(statement)
     if compact_rev is not None:
         conn.execute("INSERT INTO kine (name, prev_revision) VALUES ('compact_rev_key', 0)")
     conn.executemany(
@@ -309,6 +343,11 @@ class K3sKineLagTest(unittest.TestCase):
         os.chmod(self.dir, 0o755)
         for name in os.listdir(self.dir):
             os.chmod(os.path.join(self.dir, name), 0o644)
+        proc = getattr(self, "proc", None)
+        if proc is not None:  # stop the writer after its files are writable again
+            proc.stdin.close()
+            proc.wait(timeout=30)
+            proc.stdout.close()
         self.tmp.cleanup()
 
     def collect(self):
@@ -331,17 +370,34 @@ class K3sKineLagTest(unittest.TestCase):
         self.assertNotIn("homelab_k3s_kine_compaction_lag_revisions", out)
         self.assertIn("k3s kine lag skipped", self.stderr.getvalue())
 
+    def start_writer(self, mode, seconds=0.0):
+        self.proc = subprocess.Popen(
+            [sys.executable, "-c", WRITER, self.db, mode, str(seconds)] + list(KINE_SCHEMA),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True,
+        )
+        self.assertEqual(self.proc.stdout.readline().strip(), "ready")
+
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
-    def test_live_wal_read_only_and_unchanged(self):
-        writer = _kine_writer(self.db)  # 5001 rows, compact_rev 3800 -> lag 1201
-        self.addCleanup(writer.close)  # cleanups run after tearDown restored the file modes
-        self.assertGreater(os.path.getsize(self.db + "-wal"), 0)  # the rows live in WAL frames
+    def test_live_wal_idle_writer_read_only_and_unchanged(self):
+        self.start_writer("idle")  # 5001 rows, compact_rev 3800 -> lag 1201, all in WAL frames
+        self.assertGreater(os.path.getsize(self.db + "-wal"), 0)
         self.read_only()
         before = _snapshot(self.dir)
+        for _ in range(20):
+            self.assertEqual(collect_mod.k3s_kine_compaction_lag(self.db), 1201)
         out = self.collect()
         self.assertEqual(before, _snapshot(self.dir))
         self.assert_lag(out, 1201)
         self.assertIn('homelab_k3s_state_db_bytes{node="raspi5"}', out)
+        self.assertEqual(self.stderr.getvalue(), "")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
+    def test_live_wal_busy_writer_never_fails(self):
+        self.start_writer("busy", seconds=2.0)  # commits as fast as it can for 2 s
+        self.read_only()
+        lags = [collect_mod.k3s_kine_compaction_lag(self.db) for _ in range(200)]
+        self.assertTrue(all(lag >= 1201 for lag in lags))
+        self.assertEqual(self.proc.stdout.readline().strip(), "done")
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
     def test_wal_left_behind_without_writer(self):
@@ -359,17 +415,21 @@ class K3sKineLagTest(unittest.TestCase):
         self.assert_lag(out, 6)  # 11 rows, compact_rev 5
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
-    def test_no_wal_and_read_only_dir_never_fails_or_writes(self):
-        # k3s stopped cleanly: WAL-mode database without -wal/-shm in a read-only directory.
-        _kine_writer(self.db, rows=10, compact_rev=5).close()
+    def test_no_wal_and_read_only_dir_skips_without_writing(self):
+        # k3s stopped cleanly: Linux SQLite checkpoints and deletes -wal/-shm on the last close
+        # (Apple's keeps them, so do it by hand). The read-only directory cannot get new ones.
+        writer = _kine_writer(self.db, rows=10, compact_rev=5)
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        writer.close()
+        for suffix in ("-wal", "-shm"):
+            if os.path.exists(self.db + suffix):
+                os.remove(self.db + suffix)
         self.read_only()
         before = _snapshot(self.dir)
         out = self.collect()
         self.assertEqual(before, _snapshot(self.dir))
-        if "homelab_k3s_kine_compaction_lag_revisions" in out:
-            self.assert_lag(out, 6)
-        else:
-            self.assert_lag_skipped(out)
+        self.assert_lag_skipped(out)
+        self.assertIn('homelab_k3s_state_db_bytes{node="raspi5"}', out)
 
     def test_missing_db_is_not_created(self):
         out = self.collect()

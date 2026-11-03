@@ -292,10 +292,12 @@ def k3s_kine_compaction_lag(path: str) -> int:
     """Compaction lag of the live kine datastore: newest revision minus compact_rev_key (#129).
 
     Strictly read-only: `mode=ro` never creates or writes the database (the unit sees the
-    directory read-only anyway, ProtectSystem=strict; SQLite then uses its read-only -shm path),
-    `query_only` refuses any write, and the 1 s busy timeout bounds the wait. A WAL reader takes
-    only a read mark for the duration of this one statement and does not block kine's writes.
-    Raises sqlite3.Error or ValueError when the value cannot be read; collect() skips the gauge.
+    directory read-only anyway, ProtectSystem=strict; SQLite then uses its read-only -shm path
+    and takes only shared locks), and `query_only` refuses any write. The statement is two index
+    lookups (~0.1 ms) and never makes kine's writes wait. The 1 s busy timeout bounds lock waits;
+    SQLite's internal WAL retry loop is bounded separately, and the unit's TimeoutStartSec caps
+    the whole run. Raises sqlite3.Error or ValueError when the value cannot be read; collect()
+    then skips only this gauge.
     """
     uri = "file:{}?mode=ro".format(urllib.parse.quote(path))
     conn = sqlite3.connect(uri, uri=True, timeout=1.0)
@@ -306,6 +308,8 @@ def k3s_kine_compaction_lag(path: str) -> int:
         conn.close()
     if max_id is None or compact_rev is None:
         raise ValueError("no kine rows or no compact_rev_key row")
+    if not isinstance(max_id, int) or not isinstance(compact_rev, int):
+        raise ValueError("non-integer revision values")
     if compact_rev > max_id:
         raise ValueError("compact_rev_key {} is ahead of MAX(id) {}".format(compact_rev, max_id))
     return int(max_id - compact_rev)

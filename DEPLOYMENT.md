@@ -329,8 +329,9 @@ the offline compaction (which ends with `VACUUM`) clears it; silencing it is not
 values of the read-only diagnostics below, read with one SQLite statement over a read-only
 connection (`mode=ro`, `query_only`, 1 s busy timeout; the unit sees the directory read-only through
 `ProtectSystem=strict`). Healthy: about 1-3k (kine keeps 1000 revisions plus 5-10 min of churn
-between compactions). `K3sKineCompactionLagging` fires when the lag stays above 50k for 2 h, which
-is about 4-6 h into a stall and well before the file reaches 500 MB.
+between compactions). The lag passes 50k about 4-6 h into a stall (later once the Flux lease churn
+is reduced), and `K3sKineCompactionLagging` fires after it stayed above 50k for 2 h, so about
+6-8 h into a stall and well before the file reaches 500 MB.
 `K3sKineCompactionLagMissing` fires when the size gauge is reported but the lag is not for 1 h:
 `journalctl -u homelab-netmon -n 20` shows `k3s kine lag skipped: <error>`. Expected skips: k3s
 stopped cleanly (no `-wal`/`-shm` to open read-only) and a damaged or locked database; the LAN
@@ -361,7 +362,7 @@ Verify:
 ```bash
 ssh raspi5 "grep -E 'homelab_k3s_(state_db_bytes|kine_compaction_lag_revisions)' /var/lib/node_exporter/textfile_collector/homelab_netmon.prom"
 ssh raspi5 "sudo ls -la /var/lib/rancher/k3s/server/db/"     # state.db + state.db-wal ≈ the gauge
-kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'K3sDatastore(Large|SizeMissing)|K3sKineCompactionLag(ging|Missing)'  # expect 4
+kubectl -n monitoring get prometheusrule -o yaml | grep -cE 'alert: (K3sDatastore(Large|SizeMissing)|K3sKineCompactionLag(ging|Missing))$'  # expect 4
 ```
 
 Rollback: `git revert` the #150 (or #129 lag) commits, then re-run
@@ -451,13 +452,17 @@ compact offline with k3s stopped, using `scripts/kine-offline-compact.sh` and
 ```bash
 scp scripts/kine-offline-compact.py scripts/kine-offline-compact.sh raspi5:/tmp/
 ssh raspi5
-sudo systemctl stop homelab-netmon.timer      # no lag read while the WAL is checkpointed (#129);
-                                               # start it again after the run
 sudo /tmp/kine-offline-compact.sh --dry-run   # read-only preview first — k3s stays up
 sudo /tmp/kine-offline-compact.sh             # full run: stop / backup / compact / start,
                                                # confirms before each stage
-sudo systemctl start homelab-netmon.timer
 ```
+
+`homelab-netmon` keeps running during the offline compaction: its once-a-minute lag read is a
+read-only statement of about 0.1 ms, and while k3s is stopped it either reads the current value or
+logs `k3s kine lag skipped` (#129). If the script's WAL checkpoint ever reports busy, re-run the
+script.
+Do not stop `homelab-netmon.timer` for it: that would also stop raspi5's LAN metrics and fire
+`NetmonNodeScriptStale`.
 
 `kine-offline-compact.sh` stops k3s, checkpoints the WAL, takes a `cp -a` backup of `state.db`,
 runs `kine-offline-compact.py` — the same `DELETE`/`UPDATE` kine's own compactor runs
