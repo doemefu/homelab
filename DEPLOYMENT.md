@@ -1058,9 +1058,9 @@ affected.
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://grafana.furchert.ch/
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://n8n.furchert.ch/
 curl -s -o /dev/null -w '%{http_code}\n' https://n8n.furchert.ch/rest/settings     # not 200 from n8n
-# The Telegram path must answer from n8n itself, not redirect to cloudflareaccess.com.
-# With the IP-range bypass, a request from the Mac is not in range and gets the Access redirect;
-# with the Everyone bypass, n8n answers 403 (missing Telegram secret-token header).
+# Telegram path: with the IP-range bypass, a request from the Mac is outside the ranges and gets an
+# Access response (redirect or block page), not n8n; Telegram itself is tested below.
+# With the Everyone bypass, n8n answers 403 (missing Telegram secret-token header).
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -X POST "https://n8n.furchert.ch/webhook/<webhookId>/webhook"
 ```
 
