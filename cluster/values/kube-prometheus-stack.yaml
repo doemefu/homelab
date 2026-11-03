@@ -82,6 +82,7 @@ defaultRules:
 #   homelab-netmon-node    NM-3 node-script rules (PR #132)
 #   homelab-netmon-egress  NM-2 coroot-node-agent rules (PR #133)
 #   homelab-backups        backup alerts (PR #109)
+#   homelab-platform       Flux, cert-manager and workload availability alerts (#284)
 # ⚠️ Each of those PRs adds its own top-level additionalPrometheusRulesMap key. Git can
 # merge two such blocks without any conflict (it did for #109 + #131), leaving a
 # duplicate YAML key that Helm resolves by silently dropping one map. CI's yamllint
@@ -489,6 +490,160 @@ additionalPrometheusRulesMap:
                 absent() branch also fires while kube-state-metrics itself is down. Runbook:
                 DEPLOYMENT.md "coroot-node-agent (NM-2)".
 
+  # --- Platform alerts: Flux, cert-manager, workload availability (#284) ---
+  # Tests: cluster/values/tests/platform.test.yml. Design notes and runbook: DEPLOYMENT.md
+  # "Platform alerting (#284)". All warning, routed to Discord like everything else.
+  homelab-platform:
+    groups:
+      - name: homelab-platform
+        rules:
+          # gotk_resource_info comes from kube-state-metrics' custom-resource-state config
+          # (kube-state-metrics.customResourceState below), one series per Flux object.
+          # ready!="True" (not ="False"): KSM replaces the series when the condition changes, and a
+          # retry briefly reports Unknown; the max by drops `ready`, so `for` is not reset by that.
+          # Suspended objects are skipped. Blind spot: a controller that is alive but has stopped
+          # reconciling leaves Ready=True (WorkloadUnavailable covers a dead controller).
+          - alert: FluxReconciliationFailed
+            expr: >-
+              max by (namespace, customresource_kind, name)
+                (gotk_resource_info{ready!="True", suspended!="true"}) > 0
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Flux {{ $labels.customresource_kind }} {{ $labels.namespace }}/{{ $labels.name }} is not Ready"
+              description: >-
+                The Flux {{ $labels.customresource_kind }} {{ $labels.namespace }}/{{ $labels.name }} has not been
+                Ready for 15 minutes, so changes in git or new images are not being applied. Inspect it with
+                `flux get all -A` or `kubectl -n {{ $labels.namespace }} describe {{ $labels.customresource_kind | toLower }}
+                {{ $labels.name }}`; runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          # Guards the alert above: if the custom-resource-state config or its RBAC breaks (e.g. a
+          # Flux upgrade drops an API version), the series vanish and FluxReconciliationFailed goes
+          # silent. One absent() per kind in use; parenthesised so the KSM-up guard applies to all.
+          - alert: FluxResourceMetricsMissing
+            expr: >-
+              (absent(gotk_resource_info{customresource_kind="Kustomization"})
+              or absent(gotk_resource_info{customresource_kind="GitRepository"})
+              or absent(gotk_resource_info{customresource_kind="ImageRepository"})
+              or absent(gotk_resource_info{customresource_kind="ImagePolicy"})
+              or absent(gotk_resource_info{customresource_kind="ImageUpdateAutomation"}))
+              and on() (count(up{job="kube-state-metrics"} == 1) > 0)
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "kube-state-metrics exports no Flux {{ $labels.customresource_kind }} objects"
+              description: >-
+                gotk_resource_info{customresource_kind="{{ $labels.customresource_kind }}"} has been absent for 30 minutes
+                while kube-state-metrics is up, so FluxReconciliationFailed is blind for that kind.
+                Check the kube-state-metrics logs for custom-resource-state errors (RBAC
+                extraRules, a Flux API version that changed in a Flux upgrade); runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+          # A whole workload down (0 available/ready while it should run). Earlier and more specific
+          # than the chart's KubeDeploymentReplicasMismatch / KubeStatefulSetReplicasMismatch
+          # (15 min + 10 min of unchanged rollout), which 41_monitoring.yml inhibits while this
+          # fires. apps = first-party and club workloads, platform = cloudflared (the only public
+          # ingress) and cert-manager, flux-system = the Flux controllers (a dead controller freezes
+          # every Ready condition). spec > 0 keeps a deliberate scale-to-0 quiet.
+          - alert: WorkloadUnavailable
+            expr: >-
+              (
+                (max by (namespace, deployment) (kube_deployment_status_replicas_available{namespace=~"apps|platform|flux-system"}) == 0)
+                and on (namespace, deployment)
+                (max by (namespace, deployment) (kube_deployment_spec_replicas{namespace=~"apps|platform|flux-system"}) > 0)
+              )
+              or
+              (
+                (max by (namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~"apps|platform|flux-system"}) == 0)
+                and on (namespace, statefulset)
+                (max by (namespace, statefulset) (kube_statefulset_replicas{namespace=~"apps|platform|flux-system"}) > 0)
+              )
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.namespace }}/{{ or $labels.deployment $labels.statefulset }} has no available replica"
+              description: >-
+                {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has had 0 available{{ else }}StatefulSet
+                {{ $labels.namespace }}/{{ $labels.statefulset }} has had 0 ready{{ end }} replicas for 5 minutes although it
+                should run at least one. Check `kubectl -n {{ $labels.namespace }} get pods` and
+                `kubectl -n {{ $labels.namespace }} describe {{ if $labels.deployment }}deployment {{ $labels.deployment }}{{ else }}statefulset
+                {{ $labels.statefulset }}{{ end }}`. A Recreate-strategy upgrade with a slow image pull (open-webui, n8n) can trigger
+                this briefly; runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          # The workload object itself is gone (deleted, renamed in its repo, pruned by Flux), so the
+          # rule above has no series. Explicit list: the names are a contract with the app repos and
+          # the playbooks (INTERFACES.md §9). Parenthesised or-chain: `and` binds tighter than `or`,
+          # and the KSM-up guard must cover every branch (the rollout of KSM itself included).
+          - alert: WorkloadMissing
+            expr: >-
+              (absent(kube_deployment_spec_replicas{namespace="apps", deployment="auth-service"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="device-service"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="furchert-ch"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="data-service"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="mcp-hub"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="litellm"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="n8n"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="open-webui"})
+              or absent(kube_deployment_spec_replicas{namespace="apps", deployment="mosquitto"})
+              or absent(kube_deployment_spec_replicas{namespace="platform", deployment="cloudflared-cloudflare-tunnel-remote"})
+              or absent(kube_statefulset_replicas{namespace="apps", statefulset="postgresql"})
+              or absent(kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}))
+              and on() (count(up{job="kube-state-metrics"} == 1) > 0)
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Workload {{ $labels.namespace }}/{{ or $labels.deployment $labels.statefulset }} no longer exists"
+              description: >-
+                kube-state-metrics reports no {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }}{{ else }}StatefulSet
+                {{ $labels.namespace }}/{{ $labels.statefulset }}{{ end }} for 15 minutes. Check
+                the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
+                re-run the owning playbook) and whether the name changed in its repo; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+          # cert-manager metrics come from the ServiceMonitor monitoring/cert-manager (41_monitoring.yml,
+          # honorLabels so `namespace` is the Certificate's). No Certificate exists today (public TLS
+          # ends at Cloudflare), so these stay dormant until one does. `> 0` drops a never-issued
+          # Certificate (expiry 0), which CertManagerCertificateNotReady reports instead. $value = days.
+          - alert: CertManagerCertificateExpiringSoon
+            expr: >-
+              (max by (namespace, name) (certmanager_certificate_expiration_timestamp_seconds > 0) - time())
+                / 86400 < 14
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in less than 14 days"
+              description: >-
+                cert-manager has not renewed Certificate {{ $labels.namespace }}/{{ $labels.name }}, which expires in
+                about {{ printf "%.0f" $value }} days. Check `kubectl -n {{ $labels.namespace }} describe certificate
+                {{ $labels.name }}` and the cert-manager logs in namespace platform; runbook in DEPLOYMENT.md
+                "Platform alerting (#284)".
+          - alert: CertManagerCertificateNotReady
+            expr: >-
+              max by (namespace, name) (certmanager_certificate_ready_status{condition=~"False|Unknown"}) == 1
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} is not Ready"
+              description: >-
+                Certificate {{ $labels.namespace }}/{{ $labels.name }} has not been Ready for 15 minutes. Check
+                `kubectl -n {{ $labels.namespace }} describe certificate {{ $labels.name }}` (and its CertificateRequest/Order);
+                runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          # The useful branch is absent(): no target at all (ServiceMonitor or Service selector
+          # broken). up == 0 overlaps the chart's TargetDown, as NetmonDataServiceDown does.
+          - alert: CertManagerDown
+            expr: up{job="cert-manager"} == 0 or absent(up{job="cert-manager"})
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "cert-manager is not being scraped"
+              description: >-
+                Prometheus has no successful scrape of the cert-manager controller for 15 minutes,
+                so the certificate alerts are blind. Check `kubectl -n platform get pods` and the
+                ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
+
 prometheus:
   prometheusSpec:
     # arm64-only is intentional, not a resource-sizing constraint:
@@ -507,13 +662,16 @@ prometheus:
           resources:
             requests:
               storage: 20Gi
+    # Memory limit 1536Mi (was 1Gi, #284): before #284 the process RSS peaked at 1009 Mi in 7 days
+    # (140k head series), one compaction away from an OOM kill. Rolling kube-state-metrics and
+    # node-exporter re-creates ~14k series for a few hours. raspi4 (4 GB) had ~1.8 GB free.
     resources:
       requests:
         cpu: 200m
         memory: 400Mi
       limits:
         cpu: 1000m
-        memory: 1Gi
+        memory: 1536Mi
 
 grafana:
   enabled: true
@@ -543,15 +701,6 @@ alertmanager:
         cpu: 100m
         memory: 128Mi
 
-nodeExporter:
-  resources:
-    requests:
-      cpu: 10m
-      memory: 32Mi
-    limits:
-      cpu: 100m
-      memory: 64Mi
-
 # node-exporter subchart values (alias `prometheus-node-exporter`, version 4.43.*).
 # Textfile collector for the restic backup metrics (#92): homelab-backup.sh on raspi5
 # writes homelab-backup.prom into the host directory below, node-exporter reads it
@@ -568,7 +717,19 @@ nodeExporter:
 # just on raspi5 — node-exporter sets node_textfile_scrape_error=1 (alert
 # NodeTextFileCollectorScrapeError) when the configured directory cannot be read.
 # The storage role creates the same directory via Ansible as well.
+#
+# resources (#125): these used to sit under the top-level `nodeExporter:` key, which in chart
+# 69.3.1 only takes `enabled` and OS flags, so the DaemonSet ran without requests/limits.
+# Measured 7-day max before enforcing (2026-11-03): 26 Mi, < 10m CPU, scrape ≤ 0.65 s. CPU limit
+# 250m, not 100m: scrapes are bursty and #68 found a 100m exporter throttled (DEPLOYMENT.md).
 prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 64Mi
   extraArgs:
     # yamllint disable-line rule:line-length
     - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
@@ -582,14 +743,87 @@ prometheus-node-exporter:
       mountPath: /var/lib/node_exporter/textfile_collector
       readOnly: true
 
-kubeStateMetrics:
+# kube-state-metrics subchart values (chart 5.29.0, KSM v2.14.0).
+# resources (#125): moved from the top-level `kubeStateMetrics:` key, which in chart 69.3.1 only
+# takes `enabled`, so KSM ran without requests/limits. Measured 7-day max before enforcing
+# (2026-11-03): 85 Mi, < 5m CPU. Memory limit 256Mi, not 128Mi: custom-resource-state makes KSM
+# cache every CustomResourceDefinition in the cluster (large kube-prometheus-stack, Longhorn,
+# cert-manager and Flux CRDs). CPU limit 250m for scrape bursts (see prometheus-node-exporter).
+#
+# customResourceState (#284): Flux object state as gotk_resource_info{namespace, name,
+# customresource_kind, ready, suspended}, the upstream replacement for Flux's removed
+# gotk_reconcile_condition metric; used by FluxReconciliationFailed. Chosen over a PodMonitor for
+# the six Flux controllers because it adds one series per Flux object (~28) instead of thousands,
+# on a Prometheus near its memory limit. The ServiceMonitor uses honorLabels, so the `namespace`
+# label is the Flux object's. All kinds share ONE metric list via the &flux_object_metrics anchor:
+# KSM only collapses duplicate HELP/TYPE lines when they are identical, so every kind must use the
+# same name and help text. Adding a Flux kind = one more groupVersionKind entry plus its plural in
+# rbac.extraRules (and in FluxResourceMetricsMissing if it is in use).
+kube-state-metrics:
   resources:
     requests:
       cpu: 10m
       memory: 64Mi
     limits:
-      cpu: 100m
-      memory: 128Mi
+      cpu: 250m
+      memory: 256Mi
+  rbac:
+    extraRules:
+      - apiGroups:
+          - source.toolkit.fluxcd.io
+          - kustomize.toolkit.fluxcd.io
+          - helm.toolkit.fluxcd.io
+          - image.toolkit.fluxcd.io
+        resources:
+          - gitrepositories
+          - ocirepositories
+          - helmrepositories
+          - kustomizations
+          - helmreleases
+          - imagerepositories
+          - imagepolicies
+          - imageupdateautomations
+        verbs: ["list", "watch"]
+  customResourceState:
+    enabled: true
+    config:
+      spec:
+        resources:
+          - groupVersionKind: {group: kustomize.toolkit.fluxcd.io, version: v1, kind: Kustomization}
+            metricNamePrefix: gotk
+            metrics: &flux_object_metrics
+              - name: resource_info
+                help: The current state of a Flux object.
+                each:
+                  type: Info
+                  info:
+                    labelsFromPath:
+                      name: [metadata, name]
+                labelsFromPath:
+                  namespace: [metadata, namespace]
+                  ready: [status, conditions, "[type=Ready]", status]
+                  suspended: [spec, suspend]
+          - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: GitRepository}
+            metricNamePrefix: gotk
+            metrics: *flux_object_metrics
+          - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: OCIRepository}
+            metricNamePrefix: gotk
+            metrics: *flux_object_metrics
+          - groupVersionKind: {group: source.toolkit.fluxcd.io, version: v1, kind: HelmRepository}
+            metricNamePrefix: gotk
+            metrics: *flux_object_metrics
+          - groupVersionKind: {group: helm.toolkit.fluxcd.io, version: v2, kind: HelmRelease}
+            metricNamePrefix: gotk
+            metrics: *flux_object_metrics
+          - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImageRepository}
+            metricNamePrefix: gotk
+            metrics: *flux_object_metrics
+          - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImagePolicy}
+            metricNamePrefix: gotk
+            metrics: *flux_object_metrics
+          - groupVersionKind: {group: image.toolkit.fluxcd.io, version: v1, kind: ImageUpdateAutomation}
+            metricNamePrefix: gotk
+            metrics: *flux_object_metrics
 
 prometheusOperator:
   resources:
