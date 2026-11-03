@@ -42,8 +42,15 @@
 image:
   tag: "2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39"  # pinned — never latest
 
-replicaCount: 1
+# Two replicas of the same tunnel (same token; Cloudflare allows up to 25 per tunnel, #322): cloudflared also carries
+# ssh.furchert.ch, the only off-LAN way in, so one node's k3s restart must never leave the tunnel without a running,
+# supervised replica. Chart 0.1.2's Deployment template renders only replicaCount, image, podAnnotations, podLabels
+# and the token — it ignores resources, affinity, nodeSelector, tolerations and the security contexts below/in its
+# values. The pod anti-affinity (one replica per node), readinessProbe, minReadySeconds and the PodDisruptionBudget
+# are therefore set by 40_platform.yml (tag cloudflared); drop that patch task once a chart version renders them.
+replicaCount: 2
 
+# NOTE: not rendered by chart 0.1.2 (see above) — the pods currently run without requests/limits (#323).
 resources:
   requests:
     cpu: 10m
