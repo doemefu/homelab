@@ -157,6 +157,16 @@
                 service: "ssh://192.168.1.61:22"
               - hostname: "grafana.furchert.ch"
                 service: "http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80"
+              # auth-service admin API (/api/v1/*), Swagger UI and OpenAPI documents are internal-only (#306): their
+              # callers (furchert-ch /dashboard/auth, data-service login-event pull) use the in-cluster Service URL,
+              # so the public tunnel answers 404. First match wins, hence this rule stays BEFORE the auth entry.
+              # Prefix match, case-insensitive, repeated slashes. The OIDC/OAuth paths (/oauth2/*, /.well-known/*,
+              # /userinfo, /connect/*, /login, /error, /actuator/health) are not matched. Defence in depth only:
+              # auth-service's own authorization remains the control. A future external API consumer
+              # (auth-service Epic #34) needs this rule revisited.
+              - hostname: "auth.furchert.ch"
+                path: "(?i)^/+(api/+v1|swagger-ui|(v3/+)?api-docs)([^a-z0-9_-]|$)"
+                service: "http_status:404"
               - hostname: "auth.furchert.ch"
                 service: "http://auth-service.apps.svc.cluster.local:8080"
               - hostname: "device.furchert.ch"
