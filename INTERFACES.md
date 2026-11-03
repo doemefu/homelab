@@ -33,6 +33,8 @@ This document defines all **integration interfaces** this infrastructure platfor
 | `homeassistant` | Ansible/Helm | Home Assistant only | Any non-HA workloads |
 | `flux-system` | Flux CD | Flux controllers only | Any application workloads |
 
+Pod Security Admission (#160): `platform`, `monitoring`, `apps` and `homeassistant` carry `warn` + `audit` labels for the `baseline` profile (nothing enforced yet); new workloads in `apps` and `platform` must stay baseline-clean (DEPLOYMENT.md "Pod Security Admission").
+
 > **Do not create namespaces outside this list** without explicit approval (CLAUDE.md non-negotiable).
 
 ---
