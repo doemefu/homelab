@@ -1432,10 +1432,11 @@ the club scripts call the LLM routes with virtual keys, which every role may use
 auth-service `ADMIN` — before the first apply, check that `/dashboard/auth` on furchert.ch lists only
 the owner as `ADMIN`.
 
-- **Stale rows:** a user's row changes only at their next SSO login. After the first apply, open
-  `https://ai.furchert.ch/ui` → Internal Users and set any other `proxy_admin` row to
-  `internal_user_viewer`.
-- **Break-glass:** the LiteLLM login form accepts username `admin` with the master key as password
+- **Stale rows:** a user's row changes only at their next SSO login, and users who only own virtual
+  keys may never sign in again. After the first apply, open `https://ai.furchert.ch/ui` → Internal
+  Users and set every row except the owner's to `internal_user_viewer`.
+- **Break-glass:** the LiteLLM login form (always reachable at `https://ai.furchert.ch/fallback/login`)
+  accepts username `admin` with the master key as password
   (`UI_USERNAME`/`UI_PASSWORD` unset) and grants `proxy_admin`; the master key also works on the API.
   Check that this login works before the first apply.
 - **Rollback:** the playbook's apply never removes env entries, so deleting them from the manifest is
@@ -1444,7 +1445,9 @@ the owner as `ADMIN`.
   and then set roles by hand in Internal Users.
 - **Upgrades:** the three env names exist only in LiteLLM's code (`litellm/proxy/management_endpoints/ui_sso.py`,
   `_setup_role_mappings`), not in its docs. Check that they still exist in the new tag before bumping.
-  A malformed `GENERIC_ROLE_MAPPINGS_ROLES` value makes every SSO login fail (use break-glass).
+  Add or remove the three together: a malformed `GENERIC_ROLE_MAPPINGS_ROLES`, an invalid
+  `GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE` or `ROLES` without `GROUP_CLAIM` makes every SSO login fail
+  (use break-glass).
 
 #### Verify
 
@@ -1465,8 +1468,8 @@ LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
 4. Confirm: `kubectl rollout status deployment/litellm -n apps`
 
 > **Rollout wait:** the playbook's rollout-wait task ("LiteLLM Rollout warten") uses the
-> `kubectl rollout status` conditions (#58): new spec observed, every replica updated, no old pod
-> left, every updated pod available. It waits up to 900 s (image pull plus the 10-min startupProbe
+> `kubectl rollout status` conditions (#58) except its progress-deadline check: new spec observed,
+> every replica updated, no old pod left, every updated pod available. It waits up to 900 s (image pull plus the 10-min startupProbe
 > budget) and fails after that while the rollout itself continues; step 4 stays as the final check.
 
 ---

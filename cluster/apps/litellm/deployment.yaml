@@ -117,10 +117,11 @@ spec:
             # auth-service ADMIN -> proxy_admin, everyone else -> internal_user_viewer (can sign in and see
             # own keys/spend, cannot manage keys; LLM calls with existing virtual keys work for every role).
             # These env names are code-only (not in the LiteLLM docs): re-check them on every LiteLLM bump.
-            # ROLES is parsed with ast.literal_eval and a malformed value breaks every SSO login.
+            # Add or remove the three together: a malformed ROLES, an invalid DEFAULT_ROLE or ROLES without
+            # GROUP_CLAIM breaks every SSO login (LiteLLM only catches TypeError there).
             # Break-glass: UI login "admin" + master key (UI_USERNAME/UI_PASSWORD unset) is proxy_admin.
             # Rollback: the playbook's apply never removes env entries — use `kubectl -n apps set env
-            # deploy/litellm <NAME>-` for the three names below (DEPLOYMENT.md "LiteLLM SSO roles").
+            # deploy/litellm <NAME>-` for the three names below (DEPLOYMENT.md "LiteLLM" -> "SSO roles").
             - name: GENERIC_ROLE_MAPPINGS_GROUP_CLAIM
               value: "role"
             - name: GENERIC_ROLE_MAPPINGS_ROLES

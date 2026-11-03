@@ -86,8 +86,8 @@ data:
       # D40 standing remediation (club_assist worklog 20260711-114552): the
       # OCR backfill (468 PDFs, $0.91) proved out mistral-ocr; this route is
       # for the future recurring OCR drain, which calls LiteLLM's native
-      # /v1/ocr endpoint (BerriAI/litellm PR #15571, present since
-      # v1.98.0) with a scoped virtual key — never the
+      # /v1/ocr endpoint (BerriAI/litellm PR #15571, present in
+      # v1.98.0 and later) with a scoped virtual key — never the
       # provider master key. Dated snapshot per G2 (no -latest).
       - model_name: club-ocr
         litellm_params:

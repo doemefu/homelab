@@ -114,10 +114,11 @@
                     {{ lookup('file', playbook_dir + '/../../cluster/apps/litellm/configmap.yaml') | hash('sha256') }}
       delegate_to: localhost
 
-    # Same conditions as `kubectl rollout status` (#58): the controller has seen the new spec, every
-    # replica runs the new template, no old pod is left and every new pod is available. Checking only
-    # availableReplicas passed on the OLD pod under RollingUpdate. Status fields that are zero are
-    # omitted by Kubernetes, hence default(0); replicas 0 passes at once. 90 x 10 s covers the image
+    # Same conditions as `kubectl rollout status` (#58), without its progress-deadline check: the
+    # controller has seen the new spec, every replica runs the new template, no old pod is left and
+    # every new pod is available. Checking only availableReplicas passed on the OLD pod under
+    # RollingUpdate. Status fields that are zero are omitted by Kubernetes, hence default(0);
+    # replicas 0 passes at once. 90 x 10 s covers the image
     # pull plus the 10-min startupProbe budget (Prisma migrations); after that the task fails while the
     # rollout itself continues (check with kubectl -n apps rollout status deploy/litellm).
     - name: LiteLLM Rollout warten (bis zu 900s — erste Ausführung startet Datenbankmigrationen)
