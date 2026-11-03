@@ -125,7 +125,7 @@ kubectl get ns
 | Namespace | Expected Pods | Status |
 |-----------|---------------|--------|
 | `kube-system` | traefik, coredns, metrics-server, svclb-* | Running |
-| `platform` | cert-manager (3x), cloudflared | Running |
+| `platform` | cert-manager (3x), cloudflared (2x, on different nodes) | Running |
 | `longhorn-system` | longhorn-manager (2x), longhorn-ui (2x), csi-*, engine-image, instance-manager | Running |
 | `monitoring` | prometheus-*, grafana-*, alertmanager-*, kube-state-metrics-*, node-exporter-*, coroot-node-agent-* (only on gated nodes — see "coroot-node-agent (NM-2)") | Running |
 | `apps` | postgresql-0, influxdb2-0, mosquitto-*, auth-service-*, device-service-*, furchert-ch-*, data-service-*, mcp-hub-*, n8n-*, litellm-*, open-webui-* | Running |
@@ -813,7 +813,7 @@ supervised replica:
   **third schedulable node** for the surge pod. With two nodes down the rollout waits (old pods keep
   serving) and the Helm task's 3 min wait fails the playbook run.
 
-Apply only the cloudflared part: the namespace, the Helm release, the PDB and the patch. No tunnel
+Apply only the cloudflared part: the namespace, the two Helm repo tasks, the Helm release, the PDB and the patch. No tunnel
 ingress PUT, no restart task, no Traefik values, so it is safe before a k3s upgrade. Off-LAN, add the
 SSH jump config and the tunnel kubeconfig (`~/.kube/tunnel.yaml`, see "Off-LAN kubectl / Ansible
 Access"). Prerequisite for the diff checks below: the helm-diff plugin (`helm plugin list` shows `diff`
@@ -4098,7 +4098,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
-| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik | 3-5 min | Yes |
+| `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik (`--tags cloudflared`: no ingress PUT, restart task or Traefik values, #322) | 3-5 min | Yes |
 | `41_monitoring.yml` | kube-prometheus-stack (long Helm wait) | 10-15 min | Yes |
 | `50_apps_infra.yml` | PostgreSQL 17, InfluxDB 2, Mosquitto 2 | 5-8 min | Yes |
 | `51_homeassistant.yml` | Home Assistant | 3-5 min | Yes |
