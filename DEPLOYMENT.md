@@ -2407,7 +2407,7 @@ unset HUB_ALLOW AUTH_ALLOW
 git switch main && git pull --ff-only
 grep -n 'mcp.furchert.ch' infra/playbooks/40_platform.yml
 ansible-playbook infra/playbooks/40_platform.yml
-kubectl -n platform logs -l app=cloudflared --tail=20 --request-timeout=10s
+kubectl -n platform logs -l pod=cloudflared --prefix --tail=20 --request-timeout=10s
 ```
 
 DNS record (Cloudflare dashboard → `furchert.ch` → DNS → Records → Add record): Type `CNAME`, Name `mcp`, Target: the same `….cfargotunnel.com` value as the existing `auth` record, Proxy status **Proxied**, TTL Auto. Do not add the hostname under Zero Trust → Tunnels → Public hostnames: playbook 40 replaces the whole tunnel configuration.
@@ -4126,10 +4126,10 @@ kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80
 
 ```bash
 # Check cloudflared logs
-kubectl -n platform logs -l app=cloudflared --tail=100
+kubectl -n platform logs -l pod=cloudflared --prefix --tail=100
 
 # Verify ingress config
-kubectl -n platform get cm cloudflared-config -o yaml
+# no ConfigMap: the tunnel is remotely managed — routes = cf_ingress_body in infra/playbooks/40_platform.yml
 
 # Restart tunnel pod
 kubectl -n platform rollout restart deployment/cloudflared-cloudflare-tunnel-remote

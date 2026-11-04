@@ -85,7 +85,7 @@ To expose a new service publicly via Cloudflare Tunnel:
 
 4. **Verify** the pod restarts and shows the new hostname in logs:
    ```bash
-   kubectl -n platform logs -l app=cloudflared-cloudflare-tunnel-remote | tail -20
+   kubectl -n platform logs -l pod=cloudflared --prefix | tail -20
    kubectl -n platform get pods -w
    ```
 

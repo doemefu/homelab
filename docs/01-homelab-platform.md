@@ -157,8 +157,7 @@ LAN
  │
  ├─ pi4 (arm64, 4GB) — k3s Worker
  │   ├─ Longhorn Replica Storage
- │   ├─ Workloads
- │   └─ Workloads incl. Home Assistant (k3s, ns/homeassistant, any node)
+ │   └─ Workloads (incl. Home Assistant: k3s, ns/homeassistant, any node)
  │
  ├─ mba1 (amd64, 8GB) — k3s Worker
  │   ├─ Longhorn Replica Storage
@@ -191,12 +190,12 @@ homelab/                         ← GitHub Repo Root
 │   │       ├─ k3s_server.yml    ← Control-Plane spezifisch
 │   │       ├─ k3s_agent.yml     ← Worker spezifisch
 │   │       ├─ mac.yml           ← MBA-spezifische Overrides
-│   │       └─ docker_hosts.yml  ← HA-Node
+│   │       └─ docker_hosts.yml  ← HA-Node (never used: Home Assistant runs in k3s)
 │   ├─ roles/
 │   │   ├─ base/                 ← OS, User, SSH, NTP, unattended-upgrades
 │   │   ├─ hardening/            ← UFW, fail2ban, SSH hardening
 │   │   ├─ storage/              ← Mount-Points, Restic-Setup
-│   │   ├─ docker/               ← Docker CE (nur HA-Node)
+│   │   ├─ docker/               ← never built (Home Assistant runs in k3s)
 │   │   ├─ k3s/                  ← k3s install (server + agent, idempotent)
 │   │   ├─ longhorn_prereqs/     ← open-iscsi, nfs-common, Kernel-Module
 │   │   ├─ observability_agent/  ← Node Exporter

@@ -562,11 +562,11 @@ curl -s http://localhost:8080
 1. Verify DNS CNAME is set and correct
 2. Check cloudflared pod logs show your hostname:
    ```bash
-   kubectl -n platform logs -l app=cloudflared-cloudflare-tunnel-remote | tail -20
+   kubectl -n platform logs -l pod=cloudflared --prefix | tail -20
    ```
 3. Verify the hostname is in the ingress list:
    ```bash
-   kubectl -n platform get cm cloudflared-config -o yaml
+   # no ConfigMap: the tunnel is remotely managed — routes = cf_ingress_body in infra/playbooks/40_platform.yml
    ```
 
 ---
@@ -649,7 +649,7 @@ docker buildx imagetools inspect <image>:<tag> | grep Platform
 2. Re-run: `ansible-playbook infra/playbooks/40_platform.yml`
 3. Check cloudflared pod restarted and shows the hostname in logs:
    ```bash
-   kubectl -n platform logs -l app=cloudflared-cloudflare-tunnel-remote | grep myapp
+   kubectl -n platform logs -l pod=cloudflared --prefix | grep myapp
    ```
 4. Verify DNS CNAME: `<hostname> -> <tunnel-id>.cfargotunnel.com` (Proxy: enabled) in Cloudflare Dashboard
 
