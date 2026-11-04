@@ -38,7 +38,7 @@ Dieses Repository ist die **vollständige Infrastructure-as-Code Grundlage** fü
 
 > ⚠️ **Vor M1 (MBAs):** T2-Chip Ubuntu-Kompatibilität auf beiden MBAs testen (`apple-bce` Modul, USB-C Ethernet empfohlen). Pi-Nodes sind bereits provisioniert.
 
-> **`ha_host` gesetzt:** `mba1` — MacBook Air 2020 (8 GB, Quad-Core). Home Assistant läuft bewusst ausserhalb von k3s (Docker). Entscheidung getroffen in M1, abweichend von ursprünglicher Empfehlung (pi4), da mba1 mehr Ressourcen bietet.
+> **Home Assistant:** planned in M1 as Docker on `mba1` (`ha_host`); it now runs **in k3s** (namespace `homeassistant`, `infra/playbooks/51_homeassistant.yml`, pajikos Helm chart, config on a Longhorn volume).
 
 **Netzwerk-Voraussetzungen:**
 - Statische IPs oder DHCP-Reservierungen für alle Nodes (k3s erfordert stabile IPs)
@@ -69,7 +69,7 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 ## Scope
 
 ### In Scope
-- Ansible: Base OS, Hardening, Storage Mounts, Docker (für HA), k3s, MBA-spezifische Tweaks
+- Ansible: Base OS, Hardening, Storage Mounts, k3s, MBA-spezifische Tweaks (Home Assistant runs in k3s, no Docker)
 - k3s: 1 Control-Plane (Pi5) + 3 Worker, beliebig erweiterbar
 - Storage: Longhorn als Default StorageClass (Replication Factor 2)
 - Ingress/TLS: Traefik + cert-manager
@@ -96,7 +96,7 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 | Storage        | Longhorn (Replication Factor 2)              |
 | Backup-Ziel    | ~~Externer USB/SSD am Pi5, Restic~~ → manual app-data dumps to the operator's Mac + restic on raspi5 (#64, 2026-09-08) |
 | Host-Detection | Ansible Facts (Arch, RAM) + Rolle via Gruppe |
-| Home Assistant | Docker (nicht in k3s), `ha_host=mba1`        |
+| Home Assistant | in k3s (namespace `homeassistant`, `51_homeassistant.yml`) |
 | DNS            | `furchert.ch` via Cloudflare DNS             |
 
 ---
@@ -128,7 +128,7 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 
 ### External Access
 - **Cloudflare Tunnel** (cloudflared als Deployment im Cluster)
-- Tunnel → Traefik Ingress → nur explizit konfigurierte Services
+- Tunnel → cluster Service directly (routes in `cf_ingress_body`, `40_platform.yml`) → nur explizit konfigurierte Services; Traefik serves in-cluster/LAN ingress only
 - Alles andere bleibt intern unerreichbar
 
 ### Gepinnte Versionen (bei Projektstart zu befüllen)
@@ -157,8 +157,7 @@ LAN
  │
  ├─ pi4 (arm64, 4GB) — k3s Worker
  │   ├─ Longhorn Replica Storage
- │   ├─ Workloads
- │   └─ Docker: Home Assistant (TBD)
+ │   └─ Workloads (incl. Home Assistant: k3s, ns/homeassistant, any node)
  │
  ├─ mba1 (amd64, 8GB) — k3s Worker
  │   ├─ Longhorn Replica Storage
@@ -168,7 +167,7 @@ LAN
      ├─ Longhorn Replica Storage
      └─ Workloads
 
-Internet → Cloudflare Tunnel → cloudflared (Cluster) → Traefik → explizite Services
+Internet → Cloudflare Tunnel → cloudflared (Cluster) → cluster Service (explicit routes only; Traefik = LAN ingress)
 ```
 
 ---
@@ -191,12 +190,12 @@ homelab/                         ← GitHub Repo Root
 │   │       ├─ k3s_server.yml    ← Control-Plane spezifisch
 │   │       ├─ k3s_agent.yml     ← Worker spezifisch
 │   │       ├─ mac.yml           ← MBA-spezifische Overrides
-│   │       └─ docker_hosts.yml  ← HA-Node
+│   │       └─ docker_hosts.yml  ← HA-Node (never used: Home Assistant runs in k3s)
 │   ├─ roles/
 │   │   ├─ base/                 ← OS, User, SSH, NTP, unattended-upgrades
 │   │   ├─ hardening/            ← UFW, fail2ban, SSH hardening
 │   │   ├─ storage/              ← Mount-Points, Restic-Setup
-│   │   ├─ docker/               ← Docker CE (nur HA-Node)
+│   │   ├─ docker/               ← never built (Home Assistant runs in k3s)
 │   │   ├─ k3s/                  ← k3s install (server + agent, idempotent)
 │   │   ├─ longhorn_prereqs/     ← open-iscsi, nfs-common, Kernel-Module
 │   │   ├─ observability_agent/  ← Node Exporter

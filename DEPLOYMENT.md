@@ -79,6 +79,7 @@ ansible-playbook infra/playbooks/51_homeassistant.yml
 ansible-playbook infra/playbooks/52_n8n.yml
 ansible-playbook infra/playbooks/53_litellm.yml
 ansible-playbook infra/playbooks/54_club_assistant.yml
+ansible-playbook infra/playbooks/55_club_mcp.yml
 
 # 9) Re-apply platform playbook to ensure Cloudflare Tunnel has all routes
 ansible-playbook infra/playbooks/40_platform.yml
@@ -2406,7 +2407,7 @@ unset HUB_ALLOW AUTH_ALLOW
 git switch main && git pull --ff-only
 grep -n 'mcp.furchert.ch' infra/playbooks/40_platform.yml
 ansible-playbook infra/playbooks/40_platform.yml
-kubectl -n platform logs -l app=cloudflared --tail=20 --request-timeout=10s
+kubectl -n platform logs -l pod=cloudflared --prefix --tail=20 --request-timeout=10s
 ```
 
 DNS record (Cloudflare dashboard → `furchert.ch` → DNS → Records → Add record): Type `CNAME`, Name `mcp`, Target: the same `….cfargotunnel.com` value as the existing `auth` record, Proxy status **Proxied**, TTL Auto. Do not add the hostname under Zero Trust → Tunnels → Public hostnames: playbook 40 replaces the whole tunnel configuration.
@@ -3859,7 +3860,8 @@ ssh raspi5 "sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/ranc
 # then: ansible-playbook infra/playbooks/20_k3s.yml -l raspi5   (same k3s_token as before)
 ```
 
-**Node that still runs k3s** (only when k3s is stopped and the node is freshly provisioned):
+**Same card, k3s installed** (e.g. a damaged datastore; never a new card on which `20_k3s.yml`
+already ran):
 
 ```bash
 # Stop k3s
@@ -4124,10 +4126,10 @@ kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80
 
 ```bash
 # Check cloudflared logs
-kubectl -n platform logs -l app=cloudflared --tail=100
+kubectl -n platform logs -l pod=cloudflared --prefix --tail=100
 
 # Verify ingress config
-kubectl -n platform get cm cloudflared-config -o yaml
+# no ConfigMap: the tunnel is remotely managed — routes = cf_ingress_body in infra/playbooks/40_platform.yml
 
 # Restart tunnel pod
 kubectl -n platform rollout restart deployment/cloudflared-cloudflare-tunnel-remote

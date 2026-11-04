@@ -35,8 +35,8 @@ component use the newest run whose `MANIFEST.txt` row reads `OK`, after
 | S2 | raspi5's SD card dies, workers intact | control plane, datastore, restic repo, raspi5's Longhorn replicas (the join token survives: it comes from the encrypted variable `k3s_token`) | §3.2 | 2–4 h | cluster state back to the last Mac restic copy (or the last 03:00 run if the card is still readable) |
 | S3 | Whole cluster lost, Mac intact (e.g. all disks wiped) | everything in the cluster | §3.3 | about 1 day | app data back to the newest `OK` dump per component; Home Assistant config lost |
 | S4a | A Longhorn volume is damaged, at least one replica intact | that volume's current data | revert to a Longhorn snapshot of that volume (Longhorn UI → Volume → Snapshots) | < 1 h | back to the snapshot (≤ 24 h) |
-| S4b | A Longhorn volume loses both replicas (and with them its snapshots) | that volume | the app's dump restore in `DEPLOYMENT.md` "Restore paths" where one exists (InfluxDB, Open WebUI, n8n, LiteLLM); PostgreSQL, mosquitto, Grafana and Home Assistant have no live-volume runbook (§4) | 1 h per app, longer without a runbook | back to the newest `OK` dump; Home Assistant lost |
-| S5 | The Mac is lost | app-data dumps, restic copies, local clones incl. the untracked `infra/inventory/hosts.yml`, kubeconfigs, SSH keys, **the age key** | cluster keeps running; new Mac per `CONTRIBUTING.md`; age key from escrow (§5); new SSH keys need console access on each node (password SSH is off) | hours with escrow; without it the running cluster still holds most values, but every encrypted variable must be re-created by hand (days) | dumps and copies until the next run |
+| S4b | A Longhorn volume loses both replicas (and with them its snapshots) | that volume | the app's dump restore in `DEPLOYMENT.md` "Restore paths" where one exists (InfluxDB, Open WebUI, n8n); PostgreSQL (and with it LiteLLM, whose data is the `litellm` database), mosquitto, Grafana and Home Assistant have no live-volume runbook (§4) | 1 h per app, longer without a runbook | back to the newest `OK` dump; Home Assistant lost |
+| S5 | The Mac is lost | app-data dumps, restic copies, local clones incl. the untracked `infra/inventory/hosts.yml` and `infra/inventory/local.yml`, kubeconfigs, SSH keys, **the age key** | cluster keeps running; new Mac per `CONTRIBUTING.md`; age key from escrow (§5); new SSH keys need console access on each node (password SSH is off) | hours with escrow; without it the running cluster still holds most values, but every encrypted variable must be re-created by hand (days) | dumps and copies until the next run |
 | S6 | GitHub or GHCR unavailable | pushes, Flux sync, image pulls on new nodes | running workloads continue (cached images); rebuilds wait, or use the local clones | outage-bound | none |
 | S7 | Cloudflare account locked out | public hostnames, SSH via Access, DNS-01 certificates | LAN access keeps working; account recovery with Cloudflare | outage-bound | none |
 | S8 | Fire, flood or theft (cluster **and** Mac) | everything except GitHub (and an off-site age-key copy, if one exists) | **not recoverable today** — code only, no data (§4) | — | all data |
@@ -79,7 +79,8 @@ its fingerprint on the node's console.
    the workers' membership come back without reinstalling the workers. A changed `k3s_token` makes
    every older datastore snapshot unusable.
 5. Check: `kubectl get nodes`, `kubectl get pods -A`. Re-run only the **playbooks** whose objects
-   may have changed since the snapshot — `40_platform.yml`, `41_monitoring.yml`,
+   may have changed since the snapshot — `30_longhorn.yml` (recurring jobs live in the datastore),
+   `40_platform.yml`, `41_monitoring.yml`,
    `50_apps_infra.yml`, `59_app_services.yml`, `51_homeassistant.yml` … `55_club_mcp.yml` — **no
    data restores** (the volumes on the workers are newer than any dump). Flux restores its own apps.
 6. Longhorn: the restored datastore can describe replicas that the workers have rebuilt since the
