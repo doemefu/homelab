@@ -9,6 +9,8 @@
     name: fail2ban
     state: restarted
   ignore_errors: "{{ ansible_check_mode }}"
+  # Never restart into a configuration that failed `fail2ban-client --test` (tasks/main.yml).
+  when: (hardening_fail2ban_test.rc | default(0)) == 0
 
 - name: Reload ufw
   community.general.ufw:

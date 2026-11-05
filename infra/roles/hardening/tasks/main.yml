@@ -91,17 +91,30 @@
 # fail2ban.service is Type=simple: `systemctl start` returns before the server has read its
 # configuration, so a server that exits right after (configuration error, missing Python module)
 # looked like a successful start and was "changed" on every run (#98). These checks run last, so
-# a broken fail2ban cannot hold back the sshd drop-in above (the play sets force_handlers, so a
-# failed check still runs the pending sshd reload). They fail the host; the diagnosis in
-# DEPLOYMENT.md "fail2ban (#98)" names the cause.
+# a broken fail2ban cannot hold back the sshd drop-in above. The configuration test records its
+# result instead of failing, so the flush below always runs the pending sshd reload, while the
+# "Restart fail2ban" handler skips a configuration that failed the test. The asserts then fail
+# the host; the diagnosis in DEPLOYMENT.md "fail2ban (#98)" names the cause.
 - name: Test the fail2ban configuration
   ansible.builtin.command:
     cmd: fail2ban-client --test
+  register: hardening_fail2ban_test
   changed_when: false
+  failed_when: false
   when: not ansible_check_mode
 
 - name: Apply pending fail2ban and sshd restarts before the check
   ansible.builtin.meta: flush_handlers
+
+- name: Assert that the fail2ban configuration is valid
+  ansible.builtin.assert:
+    that:
+      - hardening_fail2ban_test.rc == 0
+    fail_msg: >-
+      fail2ban-client --test failed, so fail2ban was not restarted:
+      {{ hardening_fail2ban_test.stdout | default('') }} {{ hardening_fail2ban_test.stderr | default('') }}
+    quiet: true
+  when: not ansible_check_mode
 
 - name: Verify that fail2ban runs the sshd jail
   ansible.builtin.command:

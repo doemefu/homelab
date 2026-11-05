@@ -14,7 +14,7 @@
   hosts: all
   become: true
   tags: [hardening]
-  # A failed fail2ban check at the end of the role must not drop a pending sshd reload (#98).
+  # A task that fails in this play must not drop a pending sshd reload (#98).
   force_handlers: true
   roles:
     - role: hardening
