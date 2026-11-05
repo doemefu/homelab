@@ -1053,6 +1053,11 @@ ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o Con
 - Keep the file private: `chmod 600 ~/.ssh/homelab-offlan.conf`.
 - Verified on all four nodes on 2026-09-24 (with `accept-new` and existing known_hosts entries).
 
+raspi5 alone also works without the jump config: `infra/inventory/remote.yml` keeps the LAN IPs as
+`ansible_host` and routes raspi5 through `cloudflared access ssh --hostname ssh.furchert.ch`
+(`ansible-playbook infra/playbooks/10_base.yml -i infra/inventory/remote.yml -l raspi5 …`). The other nodes
+have no tunnel hostname and need the jump config.
+
 #### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
 
 For a single read or a single-manifest apply, run kubectl on the control-plane node through the
@@ -1083,6 +1088,46 @@ anything beyond a read or a single-file hotfix, run the owning playbook through 
 `Host raspi5` entry from the SSH-access section above already carries `User ansible`,
 the `ProxyCommand` and `IdentityFile`, so `ssh raspi5 'sudo k3s kubectl -n apps get pods'` is the
 short form of the commands above.
+
+---
+
+### fail2ban (#98)
+
+fail2ban throttles repeated SSH authentication failures from devices on the LAN; sshd is key-only, and UFW
+opens port 22 to the LAN and the pod CIDR only. It never bans the cluster's own paths: loopback, the k3s pod
+CIDR and every inventory node are in `ignoreip` (`hardening_fail2ban_ignoreip`), because tunnelled SSH
+arrives from a cloudflared replica and a ban there would only cut the operator's off-LAN access.
+
+`fail2ban.service` is `Type=simple`, so a server that exits right after `systemctl start` used to look like a
+successful start. The `hardening` role therefore tests the configuration, applies a pending restart and fails
+the host if `fail2ban-client status sshd` does not answer within a minute.
+
+```bash
+# On the node
+sudo fail2ban-client status sshd                 # jail up, currently/total banned
+sudo fail2ban-client set sshd unbanip <ip>       # lift a ban
+
+# Read-only diagnosis when the client reports "Is fail2ban running?"
+systemctl status fail2ban --no-pager -l
+systemctl show fail2ban -p UnitFileState,ActiveState,SubState,Result,ExecMainStatus,NRestarts
+sudo journalctl -u fail2ban -b --no-pager -n 100   # -b -1: previous boot
+sudo tail -n 100 /var/log/fail2ban.log
+dpkg-query -W fail2ban python3-systemd python3-pyasyncore nftables
+apt-cache policy fail2ban
+sudo fail2ban-client --test                       # configuration test, starts nothing
+ls -l /etc/fail2ban/jail.local /etc/fail2ban/jail.d/
+command -v nft                                    # Ubuntu's default ban action uses nft
+
+# Re-apply the role on one node (off-LAN: ANSIBLE_SSH_ARGS prefix from "Off-LAN kubectl / Ansible Access")
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags hardening --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags hardening   # a second run reports changed=0
+```
+
+Known causes: Ubuntu 24.04's release package `1.0.2-3` crashes on Python 3.12 (`No module named 'asynchat'`,
+LP #2055114). The fixed `1.0.2-3ubuntu0.1` is in noble-updates only, which unattended-upgrades does not install,
+and the role's `state: present` never upgrades: `sudo apt-get install --only-upgrade fail2ban`. A configuration
+error exits with status 255, which systemd does not restart. Without `nft`, fail2ban runs but its bans fail
+(errors in `/var/log/fail2ban.log`).
 
 ---
 
@@ -4158,8 +4203,11 @@ ssh ansible@<node> "sudo systemctl status ssh"
 # Check UFW firewall
 ssh ansible@<node> "sudo ufw status"
 
+# Check for a fail2ban ban (see "fail2ban (#98)")
+ssh ansible@<node> "sudo fail2ban-client status sshd"
+
 # Check SSH hardening
-ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
+ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/99-hardening.conf"
 ```
 
 ---
@@ -4214,7 +4262,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 |----------|---------|---------|------------|
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, MacBook scheduled reboot (#102) | 3-5 min | Yes |
-| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
+| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`); UFW, fail2ban and sshd alone: `--tags hardening` | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik (`--tags cloudflared`: no ingress PUT, restart task or Traefik values, #322) | 3-5 min | Yes |
