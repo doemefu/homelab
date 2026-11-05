@@ -18,6 +18,11 @@
     platform_namespace: platform
     # helm_binary kommt aus group_vars/all.yml (zentralisiert, arch-kommentiert)
 
+  pre_tasks:
+    - name: Check that helm_binary is Helm 3 (#36)
+      ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
+      tags: [always]
+
   tasks:
     # --- Namespace ---
     - name: Platform Namespace anlegen

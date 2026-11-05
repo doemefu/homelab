@@ -1,7 +1,7 @@
 ---
 - name: Restic installieren
   ansible.builtin.apt:
-    name: restic
+    name: "restic={{ storage_restic_version }}"
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -279,4 +279,29 @@
     job: "/usr/local/bin/homelab-backup.sh >> /var/log/homelab-backup.log 2>&1"
     user: root
     state: present
+  when: storage_run_restic_backup
+
+# The cron line appends every run's full restic output; rotate it weekly (#94). The cron opens the
+# file per run (>>), so a plain rename is safe (no copytruncate). The `su` line matters because
+# Ubuntu's /var/log is root:syslog 0775: the global `su` in /etc/logrotate.conf covers the daily
+# run, but the `logrotate -d` validation below reads this snippet alone and refuses the directory
+# without it.
+- name: Rotate the backup log (/etc/logrotate.d/homelab-backup)
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/homelab-backup
+    owner: root
+    group: root
+    mode: "0644"
+    validate: logrotate -d %s
+    content: |
+      /var/log/homelab-backup.log {
+          su root adm
+          weekly
+          rotate 8
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0644 root root
+      }
   when: storage_run_restic_backup

@@ -36,7 +36,7 @@ storage_backup_dir: "/var/lib/backup"
 storage_backup_mount: "/mnt/backup"
 
 
-# Helm 3 Binary — kubernetes.core.helm unterstützt nur Helm <4.0.0
-# brew install helm@3
+# Helm 3 binary (brew install helm@3). The playbooks are tested with Helm 3 only;
+# infra/playbooks/tasks/helm-v3-preflight.yml stops every Helm playbook on another major (#36).
 # Auto-detected from controller PATH so the same value works on Intel- and Apple-Silicon Macs.
 helm_binary: "{{ lookup('ansible.builtin.pipe', 'command -v helm') }}"

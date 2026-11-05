@@ -1,25 +1,36 @@
 ---
-# Remote-Inventory für Zugriff von ausserhalb des LANs via Cloudflare Tunnel
-# Verwendung: ansible-playbook infra/playbooks/<playbook>.yml -i infra/inventory/remote.yml
+# Off-LAN inventory: reaches raspi5 through the Cloudflare Access SSH host ssh.furchert.ch.
+# Usage (raspi5 only): ansible-playbook infra/playbooks/<playbook>.yml -i infra/inventory/remote.yml -l raspi5
 #
-# Voraussetzung: cloudflared lokal installiert (brew install cloudflared)
-# Voraussetzung: ssh.furchert.ch DNS-Record existiert (CNAME → <tunnel-id>.cfargotunnel.com)
+# Prerequisites: cloudflared on the Mac (brew install cloudflared), a valid
+# `cloudflared access login https://ssh.furchert.ch`, the nodes' LAN IPs in ~/.ssh/known_hosts
+# (recorded by on-LAN runs; the host key is looked up under the LAN IP), and the key from
+# ansible_ssh_private_key_file (group_vars/all.yml) at that path: IdentitiesOnly=yes offers only that
+# key. If yours lives elsewhere, add -e ansible_ssh_private_key_file=<path>.
+#
+# raspi4, mba1 and mba2 have no tunnel hostname (cf_ingress_body in 40_platform.yml routes only
+# ssh.furchert.ch). Off-LAN they need the SSH jump config from DEPLOYMENT.md "Off-LAN kubectl /
+# Ansible Access" (ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf ..."), with this inventory or hosts.yml.
+#
+# ansible_host must stay each node's LAN IP: the k3s role uses it as --node-ip / --tls-san and as the
+# join address. The tunnel hostname belongs in the ProxyCommand only.
 all:
   children:
     k3s_server:
       hosts:
         raspi5:
-          ansible_host: raspi5
-          ansible_ssh_common_args: '-o ProxyCommand="cloudflared access ssh --hostname %h"'
+          ansible_host: 192.168.1.61
+          ansible_ssh_common_args: >-
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+            -o ProxyCommand="cloudflared access ssh --hostname ssh.furchert.ch"
     k3s_agent:
       hosts:
         raspi4:
-          ansible_host: ssh-raspi4.furchert.ch
-          ansible_ssh_common_args: '-o ProxyCommand="cloudflared access ssh --hostname %h"'
+          ansible_host: 192.168.1.163
         mba1:
-          ansible_host: 192.168.1.12
+          ansible_host: 192.168.1.66
         mba2:
-          ansible_host: 192.168.1.13
+          ansible_host: 192.168.1.16
     mac:
       hosts:
         mba1:

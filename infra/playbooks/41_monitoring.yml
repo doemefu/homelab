@@ -34,6 +34,11 @@
     coroot_node_agent_label: homelab.furchert.ch/coroot-node-agent
     coroot_node_agent_dir: "{{ playbook_dir }}/../../cluster/monitoring/coroot-node-agent"
 
+  pre_tasks:
+    - name: Check that helm_binary is Helm 3 (#36)
+      ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
+      tags: [always]
+
   tasks:
     - name: Prüfen dass alertmanager_discord_webhook_url gesetzt ist
       ansible.builtin.assert:

@@ -1,0 +1,28 @@
+---
+# Helm v3 pre-flight (#36), imported as pre_tasks by every playbook that drives Helm
+# (30_longhorn, 40_platform, 41_monitoring, 50_apps_infra, 51_homeassistant).
+# helm_binary is whatever `helm` is first on the controller's PATH (group_vars/all.yml). The
+# playbooks are written and tested against Helm 3: kubernetes.core 6.5.0 can drive Helm 4, but its
+# helm module documents different defaults for Helm v4 (e.g. server-side apply), and 40/41 also call
+# the helm CLI directly. Moving to Helm 4 is a change of its own, which also updates this guard.
+- name: Read the Helm client version
+  ansible.builtin.command:
+    argv:
+      - "{{ helm_binary }}"
+      - version
+      - --short
+  register: helm_preflight_version
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+
+- name: Assert that helm_binary is Helm 3
+  ansible.builtin.assert:
+    that:
+      - helm_preflight_version.stdout.startswith('v3.')
+    fail_msg: >-
+      helm_binary ({{ helm_binary }}) reports {{ helm_preflight_version.stdout }}, but these playbooks
+      need Helm 3. Put Helm 3 first on PATH (brew install helm@3) or pass
+      -e helm_binary=$(brew --prefix helm@3)/bin/helm.
+    success_msg: "Helm {{ helm_preflight_version.stdout }} at {{ helm_binary }}"
+    quiet: true
