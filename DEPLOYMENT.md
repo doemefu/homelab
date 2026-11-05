@@ -1053,6 +1053,13 @@ ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o Con
 - Keep the file private: `chmod 600 ~/.ssh/homelab-offlan.conf`.
 - Verified on all four nodes on 2026-09-24 (with `accept-new` and existing known_hosts entries).
 
+raspi5 alone also works without the jump config: `infra/inventory/remote.yml` keeps the LAN IPs as
+`ansible_host` and routes raspi5 through `cloudflared access ssh --hostname ssh.furchert.ch`
+(`ansible-playbook infra/playbooks/10_base.yml -i infra/inventory/remote.yml -l raspi5 …`). It passes
+`IdentitiesOnly=yes`, so the key from `ansible_ssh_private_key_file` (`group_vars/all.yml`) must exist at that
+path; otherwise add `-e ansible_ssh_private_key_file=<path>`. The other nodes have no tunnel hostname and need
+the jump config.
+
 #### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
 
 For a single read or a single-manifest apply, run kubectl on the control-plane node through the
@@ -1083,6 +1090,48 @@ anything beyond a read or a single-file hotfix, run the owning playbook through 
 `Host raspi5` entry from the SSH-access section above already carries `User ansible`,
 the `ProxyCommand` and `IdentityFile`, so `ssh raspi5 'sudo k3s kubectl -n apps get pods'` is the
 short form of the commands above.
+
+---
+
+### fail2ban (#98)
+
+fail2ban throttles repeated SSH authentication failures from devices on the LAN; sshd is key-only, and UFW
+opens port 22 to the LAN and the k3s pod/service CIDRs only. It never bans the cluster's own paths: loopback, the k3s pod
+CIDR and every inventory node are in `ignoreip` (`hardening_fail2ban_ignoreip`), because tunnelled SSH
+arrives from a cloudflared replica and a ban there would only cut the operator's off-LAN access.
+
+`fail2ban.service` is `Type=simple`, so a server that exits right after `systemctl start` used to look like a
+successful start. The `hardening` role therefore tests the configuration, restarts fail2ban for a changed jail
+only if the test passes, and fails the host on a failed test or if `fail2ban-client status sshd` does not answer
+within a minute. After a failed test, fix the configuration, run `sudo systemctl restart fail2ban` once (the
+skipped restart is not repeated, because the jail file no longer changes) and re-run the role.
+
+```bash
+# On the node
+sudo fail2ban-client status sshd                 # jail up, currently/total banned
+sudo fail2ban-client set sshd unbanip <ip>       # lift a ban
+
+# Read-only diagnosis when the client reports "Is fail2ban running?"
+systemctl status fail2ban --no-pager -l
+systemctl show fail2ban -p UnitFileState,ActiveState,SubState,Result,ExecMainStatus,NRestarts
+sudo journalctl -u fail2ban -b --no-pager -n 100   # -b -1: previous boot
+sudo tail -n 100 /var/log/fail2ban.log
+dpkg-query -W fail2ban python3-systemd python3-pyasyncore nftables
+apt-cache policy fail2ban
+sudo fail2ban-client --test                       # configuration test, starts nothing
+ls -l /etc/fail2ban/jail.local /etc/fail2ban/jail.d/
+command -v nft                                    # Ubuntu's default ban action uses nft
+
+# Re-apply the role on one node (off-LAN: ANSIBLE_SSH_ARGS prefix from "Off-LAN kubectl / Ansible Access")
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags hardening --check --diff
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags hardening   # a second run reports changed=0
+```
+
+Known causes: Ubuntu 24.04's release package `1.0.2-3` crashes on Python 3.12 (`No module named 'asynchat'`,
+LP #2055114). The fixed `1.0.2-3ubuntu0.1` is in noble-updates only, which unattended-upgrades does not install,
+and the role's `state: present` never upgrades: `sudo apt-get install --only-upgrade fail2ban`. A configuration
+error exits with status 255, which systemd does not restart. Without `nft`, fail2ban runs but its bans fail
+(errors in `/var/log/fail2ban.log`).
 
 ---
 
@@ -3604,13 +3653,63 @@ after the fact:
 #### Status
 
 ```bash
-flux check
+flux check   # Flux CLI >= 2.10 wants Kubernetes >= 1.35: until then it prints ✗ for the Kubernetes version and exits 1
+             # even with healthy controllers; check them with `kubectl -n flux-system get deploy -o wide` + `flux get all -A`
 flux get sources git -n flux-system
 flux get kustomizations -n flux-system
 flux get image repositories -n flux-system
 flux get image policy -n flux-system
 flux get image update -n flux-system
 ```
+
+#### Stored API versions (before a Flux minor upgrade)
+
+Flux minor upgrades drop old API versions from the CRDs (2.9 drops `image.toolkit.fluxcd.io/v1beta2` and
+`notification.toolkit.fluxcd.io/v1beta2`; [upgrade procedure](https://github.com/fluxcd/flux2/discussions/5572)). The
+CRD apply fails if a Flux CRD's `status.storedVersions` lists a version the new CRDs no longer serve, and a Kustomization
+fails if one of its manifests uses a dropped version. Run both checks after an API migration of the manifests (#288)
+and before every Flux minor upgrade (#292, #296).
+
+1. Git, on the Mac, from the repo root (`flux migrate -f` resolves the path against the working directory), no cluster
+   access. Use `-f cluster`, never `-f .`: the tool reads every YAML file under the path, and the repo root holds
+   encrypted secret files (`cluster/` holds none). The dry run exits 0 either way, so read its output; the `rg` line is
+   the scriptable check (it exits 1 when clean, so negate it in a script: `! rg …`).
+
+   ```bash
+   KUBECONFIG=/dev/null flux migrate -v 2.9 -f cluster --dry-run   # -v <target minor>; expect "no custom resources found that require migration"
+   rg -n --glob '!*.sops.*' 'toolkit\.fluxcd\.io/v[0-9]+(alpha|beta)[0-9]*' cluster/   # expect no output (an Alert/Provider on v1beta3 is still fine on 2.9)
+   ```
+
+2. Cluster, on the Mac with `kubectl`, `jq` and Flux CLI >= 2.9.0 (cluster-mode `flux migrate` reads each CRD's storage
+   version from the cluster, so a newer CLI is fine). LAN: default `KUBECONFIG`; off-LAN: the `tunnel` context, see
+   "Off-LAN kubectl / Ansible Access". Only when the cluster is healthy and the Kustomization `apps` is Ready at the
+   commit that carries the manifest change.
+
+   ```bash
+   # Stored versions vs storage version of every Flux CRD
+   kubectl get crd -o json | jq -r '.items[] | select(.spec.group | endswith(".fluxcd.io"))
+     | [.metadata.name, (.status.storedVersions | join(",")), ([.spec.versions[] | select(.storage) | .name] | join(","))]
+     | @tsv' | column -t
+
+   flux migrate   # rewrites every Flux object in its storage version, then trims storedVersions; idempotent, needs cluster-admin
+
+   # Pass/fail: errors on an empty list and names every CRD left to migrate; -e also fails on no input (failed kubectl)
+   kubectl get crd -o json | jq -e -r '[.items[] | select(.spec.group | endswith(".fluxcd.io"))] as $crds
+     | [$crds[] | select(.status.storedVersions != [.spec.versions[] | select(.storage) | .name]) | .metadata.name] as $bad
+     | if ($crds | length) == 0 then error("no Flux CRDs found")
+       elif ($bad | length) > 0 then error("storedVersions not migrated: \($bad | join(", "))")
+       else "OK: \($crds | length) Flux CRDs store only their storage version" end'
+
+   # The image objects' managedFields name only the v1 API (flux migrate rewrites them too)
+   kubectl get imagerepositories,imagepolicies,imageupdateautomations -A --show-managed-fields -o json \
+     | jq -e '[.items[].metadata.managedFields[]?.apiVersion] | unique == ["image.toolkit.fluxcd.io/v1"]'
+   ```
+
+   Expected on Flux 2.8.5: `OK: 14 Flux CRDs`, with source (6 CRDs) `v1`, `kustomizations` `v1`, `helmreleases` `v2`,
+   `alerts` and `providers` `v1beta3`, `receivers` `v1`, `imagepolicies`, `imagerepositories` and
+   `imageupdateautomations` `v1`. Each is the only version its CRD serves in Flux 2.9.6. If the managedFields check
+   prints `false`: confirm `apps` is Ready at the commit with the v1 manifests, run `flux migrate` again (it rewrites
+   managedFields), then repeat the check.
 
 #### Force Reconciliation
 
@@ -4179,8 +4278,13 @@ ssh ansible@<node> "sudo systemctl status ssh"
 # Check UFW firewall
 ssh ansible@<node> "sudo ufw status"
 
+# Check for a fail2ban ban (see "fail2ban (#98)"). A banned client cannot run this from its own
+# address: go through the tunnel (ssh raspi5) or another node (both are in ignoreip), then
+# sudo fail2ban-client set sshd unbanip <ip>
+ssh ansible@<node> "sudo fail2ban-client status sshd"
+
 # Check SSH hardening
-ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
+ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/99-hardening.conf"
 ```
 
 ---
@@ -4235,7 +4339,7 @@ ssh ansible@<node> "sudo cat /etc/ssh/sshd_config.d/hardening.conf"
 |----------|---------|---------|------------|
 | `00_bootstrap.yml` | Initial node setup (Python, ansible user, SSH key) | 2-5 min | Yes (after first run) |
 | `10_base.yml` | Base packages, hardening, UFW, fail2ban, MacBook scheduled reboot (#102) | 3-5 min | Yes |
-| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`) | 3-5 min | Yes |
+| `10_base.yml` | Base packages, hardening, UFW, fail2ban, watchdog, netmon node metrics (`--tags netmon_node`); UFW, fail2ban and sshd alone: `--tags hardening` | 3-5 min | Yes |
 | `20_k3s.yml` | k3s installation and configuration | 5-10 min | Yes |
 | `30_longhorn.yml` | Longhorn storage system, default StorageClass, and daily recurring snapshot job | 3-5 min | Yes |
 | `40_platform.yml` | cert-manager, Cloudflare Tunnel, Traefik (`--tags cloudflared`: no ingress PUT, restart task or Traefik values, #322) | 3-5 min | Yes |
