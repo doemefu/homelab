@@ -3617,12 +3617,14 @@ flux get image update -n flux-system
 
 Flux minor upgrades drop old API versions from the CRDs (2.9 drops `image.toolkit.fluxcd.io/v1beta2` and
 `notification.toolkit.fluxcd.io/v1beta2`; [upgrade procedure](https://github.com/fluxcd/flux2/discussions/5572)). The
-new CRDs only apply if no manifest uses a dropped version and every Flux CRD's `status.storedVersions` lists only
-versions the new CRDs still serve. Run both checks after an API migration of the manifests (#288) and before every Flux
-minor upgrade (#292, #296).
+CRD apply fails if a Flux CRD's `status.storedVersions` lists a version the new CRDs no longer serve, and a Kustomization
+fails if one of its manifests uses a dropped version. Run both checks after an API migration of the manifests (#288)
+and before every Flux minor upgrade (#292, #296).
 
-1. Git, on the Mac, no cluster access. Use `-f cluster`, never `-f .`: the tool reads every YAML file under the path, and
-   the repo root holds encrypted secret files (`cluster/` holds none).
+1. Git, on the Mac, from the repo root (`flux migrate -f` resolves the path against the working directory), no cluster
+   access. Use `-f cluster`, never `-f .`: the tool reads every YAML file under the path, and the repo root holds
+   encrypted secret files (`cluster/` holds none). The dry run exits 0 either way, so read its output; the `rg` line is
+   the scriptable check.
 
    ```bash
    KUBECONFIG=/dev/null flux migrate -v 2.9 -f cluster --dry-run   # -v <target minor>; expect "no custom resources found that require migration"
@@ -3656,7 +3658,9 @@ minor upgrade (#292, #296).
 
    Expected on Flux 2.8.5: `OK: 14 Flux CRDs`, with source (6 CRDs) `v1`, `kustomizations` `v1`, `helmreleases` `v2`,
    `alerts` and `providers` `v1beta3`, `receivers` `v1`, `imagepolicies`, `imagerepositories` and
-   `imageupdateautomations` `v1`. Each is the only version its CRD serves in Flux 2.9.6.
+   `imageupdateautomations` `v1`. Each is the only version its CRD serves in Flux 2.9.6. If the managedFields check
+   prints `false`: confirm `apps` is Ready at the commit with the v1 manifests, run `flux migrate` again (it rewrites
+   managedFields), then repeat the check.
 
 #### Force Reconciliation
 
