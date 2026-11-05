@@ -85,7 +85,7 @@ To expose a new service publicly via Cloudflare Tunnel:
 
 4. **Verify** the pod restarts and shows the new hostname in logs:
    ```bash
-   kubectl -n platform logs -l app=cloudflared-cloudflare-tunnel-remote | tail -20
+   kubectl -n platform logs -l pod=cloudflared --prefix | tail -20
    kubectl -n platform get pods -w
    ```
 
@@ -107,7 +107,7 @@ All services are discoverable via Kubernetes internal DNS.
 
 | Service | FQDN | Port | Metrics Port | Authentication | Notes |
 |---------|------|------|---------------|----------------|-------|
-| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171; excluded from the app-data dumps by design) |
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171; excluded from the app-data dumps by design). `59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service` and `mcp_hub` (#163): only the owning role (and superusers) can connect; a new app database must be added to that task |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |
@@ -136,7 +136,7 @@ All services are discoverable via Kubernetes internal DNS.
 |---------|------|------|----------|
 | Traefik metrics | `traefik.kube-system.svc.cluster.local` | 9101 | `kube-system` |
 | cert-manager | `cert-manager.platform.svc.cluster.local` | 9402 | `platform` |
-| cloudflared | `cloudflared-cloudflare-tunnel-remote.platform.svc.cluster.local` | - | `platform` |
+| cloudflared | no Service — Deployment `cloudflared-cloudflare-tunnel-remote` (chart `cloudflare-tunnel-remote` 0.1.2 renders only a Deployment, a Secret and a ServiceAccount; the connector only dials out) | - | `platform` |
 
 ---
 
@@ -518,7 +518,8 @@ as a normal node-exporter series.
 
 | Producer | File | Metrics |
 |----------|------|---------|
-| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds`, `homelab_backup_integrity_check_failed` (1 = a nightly `restic check` failed and was not cleared, #301) |
+| `homelab-backup-mark` on raspi5 (`infra/roles/storage`), called over SSH by `scripts/backup-app-data.sh` and `scripts/copy-restic-repo.sh` | `homelab-backup-offnode.prom` | `homelab_backup_offnode_last_success_timestamp_seconds{kind="app-data"\|"restic-copy"}` (node clock, 0 = never, #301) |
 | `homelab-netmon-collect` on every node (`infra/roles/netmon_node`) | `homelab_netmon.prom` | see "Node textfile metrics (NM-3)" below |
 
 Write the file atomically (temp file in the same directory, then `mv`); a partially written file

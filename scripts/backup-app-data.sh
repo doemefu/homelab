@@ -14,6 +14,7 @@
 # Usage:
 #   ./scripts/backup-app-data.sh [--kubeconfig PATH] [--context NAME] [--dest DIR]
 #                                [--retain N] [--only COMPONENT]... [--quiesce] [--dry-run]
+#                                [--mark-host USER@HOST] [--ssh-config FILE] [--no-mark]
 #
 # See DEPLOYMENT.md "App-data backups to the operator's Mac (#64)".
 
@@ -60,6 +61,10 @@ RETAIN=5
 QUIESCE=false
 DRY_RUN=false
 ONLY=""
+# Freshness marker on the restic node (#301): homelab-backup-mark app-data after a complete run.
+MARK_HOST="ansible@192.168.1.61"
+SSH_CONFIG=""
+NO_MARK=false
 
 usage() {
   cat <<'USAGE'
@@ -86,6 +91,13 @@ Options:
   --dry-run           resolve pods/nodes read-only and print what would happen. Creates no
                       run directory, no helper pods, changes no replica counts, deletes
                       nothing.
+  --mark-host U@H     node that records the freshness marker after a complete, successful run
+                      (default: ansible@192.168.1.61; runs "sudo -n homelab-backup-mark
+                      app-data" over SSH, best effort — a failed mark never fails the backup).
+                      A run limited with --only is not complete and is never marked.
+  --ssh-config FILE   ssh config for the marker call, e.g. ~/.ssh/homelab-offlan.conf off-LAN
+                      (no whitespace in the path).
+  --no-mark           do not record the freshness marker.
   --help              show this help.
 
 What lands in <dest>/<YYYY-MM-DD_HHMMSS>/:
@@ -163,6 +175,13 @@ while [[ $# -gt 0 ]]; do
     --only)
       [[ $# -ge 2 ]] || die "--only needs a value"
       ONLY="${ONLY} $2"; shift 2 ;;
+    --mark-host)
+      [[ $# -ge 2 ]] || die "--mark-host needs a value"
+      MARK_HOST="$2"; shift 2 ;;
+    --ssh-config)
+      [[ $# -ge 2 ]] || die "--ssh-config needs a value"
+      SSH_CONFIG="$2"; shift 2 ;;
+    --no-mark)  NO_MARK=true; shift ;;
     --quiesce)  QUIESCE=true; shift ;;
     --dry-run)  DRY_RUN=true; shift ;;
     --help|-h)  usage; exit 0 ;;
@@ -206,6 +225,17 @@ else
 fi
 
 COMPONENTS="${COMPONENTS# }"
+
+# The marker host and ssh config end up in an SSH command line, so accept plain values only.
+[[ "$MARK_HOST" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+$ ]] || die "--mark-host must look like user@host, got: $MARK_HOST"
+if [[ -n "$SSH_CONFIG" ]]; then
+  [[ "$SSH_CONFIG" != *[[:space:]]* ]] || die "--ssh-config must not contain whitespace"
+  [[ -r "$SSH_CONFIG" ]] || die "--ssh-config not readable: $SSH_CONFIG"
+fi
+MARK_SSH=(ssh -n -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+if [[ -n "$SSH_CONFIG" ]]; then
+  MARK_SSH+=(-F "$SSH_CONFIG")
+fi
 
 KUBECTL=(kubectl --kubeconfig "$KUBECONFIG_PATH")
 if [[ -n "$CONTEXT" ]]; then
@@ -809,8 +839,25 @@ if [[ "$FAILED" -ne 0 ]]; then
   err "at least one component failed — see above"
   exit 1
 fi
+# mark_freshness — best effort: a failed mark never fails the backup (#301).
+mark_freshness() {
+  if [[ "$NO_MARK" == true ]]; then
+    log "Freshness marker skipped (--no-mark)"
+  elif [[ "$COMPONENTS" != "$ALL_COMPONENTS" ]]; then
+    log "Freshness marker not recorded: partial run (--only)"
+  elif [[ "$DRY_RUN" == true ]]; then
+    plan "${MARK_SSH[*]} ${MARK_HOST} sudo -n /usr/local/bin/homelab-backup-mark app-data"
+  elif "${MARK_SSH[@]}" "$MARK_HOST" sudo -n /usr/local/bin/homelab-backup-mark app-data; then
+    log "Freshness marker recorded on ${MARK_HOST} (app-data)"
+  else
+    warn "could not record the freshness marker on ${MARK_HOST} (off-LAN without --ssh-config, or the storage role is not rolled out yet) — later: ${MARK_SSH[*]} ${MARK_HOST} sudo -n /usr/local/bin/homelab-backup-mark app-data"
+  fi
+}
+
 if [[ "$DRY_RUN" == true ]]; then
+  mark_freshness
   log "Dry run complete — nothing was written."
 else
   log "Backup complete: ${RUN_DIR}"
+  mark_freshness
 fi

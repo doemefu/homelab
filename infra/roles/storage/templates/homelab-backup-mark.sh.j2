@@ -1,0 +1,64 @@
+#!/bin/bash
+# homelab-backup-mark — record a successful off-node backup run reported from the operator's Mac (#301)
+# Managed by Ansible (storage role) — do not edit by hand.
+#
+# Usage (as root):
+#   homelab-backup-mark app-data      after scripts/backup-app-data.sh finished a complete run
+#   homelab-backup-mark restic-copy   after scripts/copy-restic-repo.sh finished a verified copy
+#   homelab-backup-mark --render      rewrite the metrics file with the current values
+#
+# Writes homelab_backup_offnode_last_success_timestamp_seconds{kind="..."} (this node's clock,
+# 0 = never) into the node-exporter textfile collector directory. The current file is the only
+# state: the other kind's value is carried forward from it.
+METRICS_FILE="{{ storage_textfile_collector_dir }}/homelab-backup-offnode.prom"
+{% raw %}
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+KINDS="app-data restic-copy"
+METRIC="homelab_backup_offnode_last_success_timestamp_seconds"
+# Own lock: never the backup lock (/var/lock/homelab-backup.lock), which would make the 03:00
+# restic run skip itself.
+LOCK="/run/lock/homelab-backup-mark.lock"
+
+usage() { echo "usage: homelab-backup-mark app-data|restic-copy|--render" >&2; exit 2; }
+
+[ "$#" -eq 1 ] || usage
+case "$1" in
+  app-data|restic-copy) mark="$1" ;;
+  --render) mark="" ;;
+  *) usage ;;
+esac
+
+exec 9>"$LOCK"
+flock -w 10 9 || { logger -p user.err -t homelab-backup-mark "lock busy, nothing recorded"; exit 1; }
+
+now="$(date +%s)"
+tmp="$(mktemp "${METRICS_FILE}.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+{
+  echo "# HELP ${METRIC} Unix time (node clock) of the last successful off-node backup run reported from the operator's Mac (0 = never)."
+  echo "# TYPE ${METRIC} gauge"
+  for kind in $KINDS; do
+    if [ "$kind" = "$mark" ]; then
+      value="$now"
+    else
+      # Carry the previous value forward; anything that is not a plain number reads as never.
+      value="$(awk -v k="${METRIC}{kind=\"${kind}\"}" '$1 == k { print $2 }' "$METRICS_FILE" 2>/dev/null | tail -n 1 || true)"
+      case "$value" in
+        ''|*[!0-9]*) value=0 ;;
+      esac
+    fi
+    echo "${METRIC}{kind=\"${kind}\"} ${value}"
+  done
+} > "$tmp"
+# node-exporter reads the directory as UID 65534; the temp name does not end in .prom, so it is
+# never scraped half-written.
+chmod 0644 "$tmp"
+mv "$tmp" "$METRICS_FILE"
+
+if [ -n "$mark" ]; then
+  logger -t homelab-backup-mark "off-node backup recorded: ${mark}"
+fi
+{% endraw %}

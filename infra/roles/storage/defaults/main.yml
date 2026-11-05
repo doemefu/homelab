@@ -38,3 +38,12 @@ storage_textfile_collector_dir: /var/lib/node_exporter/textfile_collector
 # etcd snapshots under server/db/snapshots/ to back up directly (see homelab-backup.sh).
 storage_k3s_state_db: /var/lib/rancher/k3s/server/db/state.db
 storage_k3s_state_copy: "{{ storage_backup_dir }}/k3s-state.db"
+
+# Recurring restic integrity check (#301): homelab-backup.sh reads back one of N slices of the
+# pack files each night (restic check --read-data-subset=<slice>/N), so every pack is verified
+# once every N days. 0 switches the check off.
+storage_restic_check_subset_days: 7
+
+# Off-node freshness marker (#301): installs /usr/local/bin/homelab-backup-mark, which the Mac
+# backup scripts call over SSH. Lives where the restic backup runs.
+storage_offnode_marker_enabled: "{{ storage_run_restic_backup }}"
