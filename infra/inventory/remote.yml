@@ -3,8 +3,10 @@
 # Usage (raspi5 only): ansible-playbook infra/playbooks/<playbook>.yml -i infra/inventory/remote.yml -l raspi5
 #
 # Prerequisites: cloudflared on the Mac (brew install cloudflared), a valid
-# `cloudflared access login https://ssh.furchert.ch`, and the nodes' LAN IPs in ~/.ssh/known_hosts
-# (recorded by on-LAN runs; the host key is looked up under the LAN IP).
+# `cloudflared access login https://ssh.furchert.ch`, the nodes' LAN IPs in ~/.ssh/known_hosts
+# (recorded by on-LAN runs; the host key is looked up under the LAN IP), and the key from
+# ansible_ssh_private_key_file (group_vars/all.yml) at that path: IdentitiesOnly=yes offers only that
+# key. If yours lives elsewhere, add -e ansible_ssh_private_key_file=<path>.
 #
 # raspi4, mba1 and mba2 have no tunnel hostname (cf_ingress_body in 40_platform.yml routes only
 # ssh.furchert.ch). Off-LAN they need the SSH jump config from DEPLOYMENT.md "Off-LAN kubectl /

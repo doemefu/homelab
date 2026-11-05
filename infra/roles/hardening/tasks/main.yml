@@ -91,7 +91,9 @@
 # fail2ban.service is Type=simple: `systemctl start` returns before the server has read its
 # configuration, so a server that exits right after (configuration error, missing Python module)
 # looked like a successful start and was "changed" on every run (#98). These checks run last, so
-# a broken fail2ban cannot hold back the sshd drop-in above; they fail the host with the reason.
+# a broken fail2ban cannot hold back the sshd drop-in above (the play sets force_handlers, so a
+# failed check still runs the pending sshd reload). They fail the host; the diagnosis in
+# DEPLOYMENT.md "fail2ban (#98)" names the cause.
 - name: Test the fail2ban configuration
   ansible.builtin.command:
     cmd: fail2ban-client --test

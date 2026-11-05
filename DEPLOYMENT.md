@@ -1055,8 +1055,10 @@ ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o Con
 
 raspi5 alone also works without the jump config: `infra/inventory/remote.yml` keeps the LAN IPs as
 `ansible_host` and routes raspi5 through `cloudflared access ssh --hostname ssh.furchert.ch`
-(`ansible-playbook infra/playbooks/10_base.yml -i infra/inventory/remote.yml -l raspi5 …`). The other nodes
-have no tunnel hostname and need the jump config.
+(`ansible-playbook infra/playbooks/10_base.yml -i infra/inventory/remote.yml -l raspi5 …`). It passes
+`IdentitiesOnly=yes`, so the key from `ansible_ssh_private_key_file` (`group_vars/all.yml`) must exist at that
+path; otherwise add `-e ansible_ssh_private_key_file=<path>`. The other nodes have no tunnel hostname and need
+the jump config.
 
 #### One-shot kubectl over SSH (no port-forward, no `tunnel` context)
 
@@ -1094,7 +1096,7 @@ short form of the commands above.
 ### fail2ban (#98)
 
 fail2ban throttles repeated SSH authentication failures from devices on the LAN; sshd is key-only, and UFW
-opens port 22 to the LAN and the pod CIDR only. It never bans the cluster's own paths: loopback, the k3s pod
+opens port 22 to the LAN and the k3s pod/service CIDRs only. It never bans the cluster's own paths: loopback, the k3s pod
 CIDR and every inventory node are in `ignoreip` (`hardening_fail2ban_ignoreip`), because tunnelled SSH
 arrives from a cloudflared replica and a ban there would only cut the operator's off-LAN access.
 
@@ -4203,7 +4205,9 @@ ssh ansible@<node> "sudo systemctl status ssh"
 # Check UFW firewall
 ssh ansible@<node> "sudo ufw status"
 
-# Check for a fail2ban ban (see "fail2ban (#98)")
+# Check for a fail2ban ban (see "fail2ban (#98)"). A banned client cannot run this from its own
+# address: go through the tunnel (ssh raspi5) or another node (both are in ignoreip), then
+# sudo fail2ban-client set sshd unbanip <ip>
 ssh ansible@<node> "sudo fail2ban-client status sshd"
 
 # Check SSH hardening
