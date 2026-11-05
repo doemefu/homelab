@@ -1101,8 +1101,10 @@ CIDR and every inventory node are in `ignoreip` (`hardening_fail2ban_ignoreip`),
 arrives from a cloudflared replica and a ban there would only cut the operator's off-LAN access.
 
 `fail2ban.service` is `Type=simple`, so a server that exits right after `systemctl start` used to look like a
-successful start. The `hardening` role therefore tests the configuration, applies a pending restart and fails
-the host if `fail2ban-client status sshd` does not answer within a minute.
+successful start. The `hardening` role therefore tests the configuration, restarts fail2ban for a changed jail
+only if the test passes, and fails the host on a failed test or if `fail2ban-client status sshd` does not answer
+within a minute. After a failed test, fix the configuration, run `sudo systemctl restart fail2ban` once (the
+skipped restart is not repeated, because the jail file no longer changes) and re-run the role.
 
 ```bash
 # On the node

@@ -111,7 +111,8 @@
     that:
       - hardening_fail2ban_test.rc == 0
     fail_msg: >-
-      fail2ban-client --test failed, so fail2ban was not restarted:
+      fail2ban-client --test failed, so fail2ban was not restarted. Fix the configuration, run
+      `sudo systemctl restart fail2ban` once (the skipped restart is not repeated) and re-run:
       {{ hardening_fail2ban_test.stdout | default('') }} {{ hardening_fail2ban_test.stderr | default('') }}
     quiet: true
   when: not ansible_check_mode
