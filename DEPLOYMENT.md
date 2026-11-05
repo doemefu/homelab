@@ -3685,6 +3685,26 @@ ssh raspi5 "sudo /usr/local/bin/homelab-backup.sh"
 A manual run exits with "another backup run is active" while the 03:00 cron or a
 `scripts/copy-restic-repo.sh` copy holds `/var/lock/homelab-backup.lock` — wait and run it again.
 
+#### Backup log and restic version (#94)
+
+The cron appends each run's output to `/var/log/homelab-backup.log` on raspi5;
+`/etc/logrotate.d/homelab-backup` rotates it weekly and keeps 8 compressed weeks.
+
+restic comes from the Ubuntu 24.04 archive and is pinned exactly: `storage_restic_version` in
+`infra/roles/storage/defaults/main.yml`, installed on every node. Ubuntu keeps one version per pocket, so
+once a newer restic is published, unattended-upgrades installs it, the pinned version leaves the archive
+index, and `10_base.yml` fails at "Restic installieren" on every node until the pin is bumped:
+
+```bash
+ssh raspi5 "apt-cache policy restic"          # Installed / Candidate
+# set storage_restic_version to the candidate, then (off-LAN: ANSIBLE_SSH_ARGS prefix, see "Off-LAN kubectl / Ansible Access")
+ansible-playbook infra/playbooks/10_base.yml --tags storage --check --diff
+ansible-playbook infra/playbooks/10_base.yml --tags storage
+ssh raspi5 "sudo logrotate -d /etc/logrotate.d/homelab-backup"   # dry run of the rotation config
+```
+
+Bump the pin before rebuilding a node, too (`docs/090-disaster-recovery.md` §3).
+
 #### Restore Test (Non-Destructive)
 
 Restic now covers `/etc/rancher/k3s` (kubeconfig + certs), `/var/lib/rancher/k3s/server/token`,
