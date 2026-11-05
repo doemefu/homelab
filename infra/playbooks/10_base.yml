@@ -9,9 +9,13 @@
   roles:
     - role: base
 
+# Tag hardening rolls the UFW / fail2ban / sshd role out alone: --tags hardening (#98).
 - name: Hardening — UFW, fail2ban, SSH
   hosts: all
   become: true
+  tags: [hardening]
+  # A task that fails in this play must not drop a pending sshd reload (#98).
+  force_handlers: true
   roles:
     - role: hardening
 
