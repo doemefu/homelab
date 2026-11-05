@@ -70,7 +70,7 @@ pip install ansible ansible-lint --break-system-packages
 ansible-galaxy collection install -r infra/requirements.yml -p ~/.ansible/collections
 
 # Kubernetes tooling (for M2+)
-# Note: kubernetes.core.helm requires Helm <4.0.0
+# Helm 3 only: see the "Helm 4 Warning" below (pre-flight check, #36)
 brew install helm@3 kubectl
 
 # helm-diff plugin, pinned. Without it kubernetes.core.helm warns and falls back to a values comparison,
