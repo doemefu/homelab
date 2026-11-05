@@ -1,0 +1,43 @@
+# data-service ingress (#127, step 1): TCP 8082 only from furchert-ch (netmon read API, server-side) and from the
+# kube-prometheus-stack Prometheus (ServiceMonitor "data-service", /actuator/prometheus). Ingress only: the collectors'
+# egress (Cloudflare, blocklists, AbuseIPDB, auth-service, PostgreSQL) is not restricted. No default-deny in `apps`.
+# Applied by Flux (Kustomization `apps`, prune): merging this file applies it; reverting removes it.
+# metadata.namespace is required here: neither this kustomization nor the `apps` Flux Kustomization sets a namespace.
+# LIMIT: Kubernetes always admits traffic from the pod's own node (kubelet probes rely on it), so host processes and
+# hostNetwork pods on data-service's node still reach :8082; `kubectl port-forward` is unaffected.
+# Coupling: the selectors depend on the pod labels `app: furchert-ch` (furchert-ch repo k8s/deployment.yaml) and
+# `app: data-service` + containerPort 8082 (data-service repo k8s/deployment.yaml). A new caller of data-service, or a
+# label/port change there, needs this policy updated in the same change (DEPLOYMENT.md "data-service NetworkPolicy").
+# Prometheus pod labels as in cluster/apps/club-mcp/networkpolicy.yaml (verified live 2026-09-23 / 2026-10-27).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-service
+  namespace: apps
+  labels:
+    app: data-service
+spec:
+  podSelector:
+    matchLabels:
+      app: data-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: furchert-ch
+      ports:
+        - protocol: TCP
+          port: 8082
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              operator.prometheus.io/name: kube-prometheus-stack-prometheus
+      ports:
+        - protocol: TCP
+          port: 8082
