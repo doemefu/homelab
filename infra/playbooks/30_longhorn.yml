@@ -20,6 +20,11 @@
   vars:
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
 
+  pre_tasks:
+    - name: Check that helm_binary is Helm 3 (#36)
+      ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
+      tags: [always]
+
   tasks:
     # --- Longhorn Helm Repo ---
     - name: Longhorn Helm Repo hinzufügen
