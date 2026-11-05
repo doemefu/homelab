@@ -87,9 +87,9 @@ brew install sops age fluxcd/tap/flux
 brew install jq
 ```
 
-> **Helm 4 Warning**: `brew install helm` installs Helm 4.x, which is NOT supported by `kubernetes.core.helm` (constraint `<4.0.0`). You **MUST** use helm@3. Set the path in `infra/inventory/group_vars/all.yml`:
-> - Intel-Mac: `/usr/local/opt/helm@3/bin/helm`
-> - Apple Silicon: `/opt/homebrew/opt/helm@3/bin/helm`
+> **Helm 4 Warning**: `brew install helm` installs Helm 4.x. The playbooks are written and tested for Helm 3 only: kubernetes.core 6.5.0 can drive Helm 4, but its `helm` module documents different defaults for Helm v4 (e.g. server-side apply), and some tasks call the helm CLI directly. Use helm@3. `helm_binary` in `infra/inventory/group_vars/all.yml` is the first `helm` on PATH, and every Helm playbook stops at a pre-flight check (`infra/playbooks/tasks/helm-v3-preflight.yml`, #36) if it is not Helm 3. Put Helm 3 first on PATH, or pass it per run:
+> - Intel-Mac: `-e helm_binary=/usr/local/opt/helm@3/bin/helm`
+> - Apple Silicon: `-e helm_binary=/opt/homebrew/opt/helm@3/bin/helm`
 
 ### age Key Setup (Once, Stored Outside Repo)
 
