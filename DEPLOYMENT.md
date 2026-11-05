@@ -3653,13 +3653,63 @@ after the fact:
 #### Status
 
 ```bash
-flux check
+flux check   # Flux CLI >= 2.10 wants Kubernetes >= 1.35: until then it prints ✗ for the Kubernetes version and exits 1
+             # even with healthy controllers; check them with `kubectl -n flux-system get deploy -o wide` + `flux get all -A`
 flux get sources git -n flux-system
 flux get kustomizations -n flux-system
 flux get image repositories -n flux-system
 flux get image policy -n flux-system
 flux get image update -n flux-system
 ```
+
+#### Stored API versions (before a Flux minor upgrade)
+
+Flux minor upgrades drop old API versions from the CRDs (2.9 drops `image.toolkit.fluxcd.io/v1beta2` and
+`notification.toolkit.fluxcd.io/v1beta2`; [upgrade procedure](https://github.com/fluxcd/flux2/discussions/5572)). The
+CRD apply fails if a Flux CRD's `status.storedVersions` lists a version the new CRDs no longer serve, and a Kustomization
+fails if one of its manifests uses a dropped version. Run both checks after an API migration of the manifests (#288)
+and before every Flux minor upgrade (#292, #296).
+
+1. Git, on the Mac, from the repo root (`flux migrate -f` resolves the path against the working directory), no cluster
+   access. Use `-f cluster`, never `-f .`: the tool reads every YAML file under the path, and the repo root holds
+   encrypted secret files (`cluster/` holds none). The dry run exits 0 either way, so read its output; the `rg` line is
+   the scriptable check (it exits 1 when clean, so negate it in a script: `! rg …`).
+
+   ```bash
+   KUBECONFIG=/dev/null flux migrate -v 2.9 -f cluster --dry-run   # -v <target minor>; expect "no custom resources found that require migration"
+   rg -n --glob '!*.sops.*' 'toolkit\.fluxcd\.io/v[0-9]+(alpha|beta)[0-9]*' cluster/   # expect no output (an Alert/Provider on v1beta3 is still fine on 2.9)
+   ```
+
+2. Cluster, on the Mac with `kubectl`, `jq` and Flux CLI >= 2.9.0 (cluster-mode `flux migrate` reads each CRD's storage
+   version from the cluster, so a newer CLI is fine). LAN: default `KUBECONFIG`; off-LAN: the `tunnel` context, see
+   "Off-LAN kubectl / Ansible Access". Only when the cluster is healthy and the Kustomization `apps` is Ready at the
+   commit that carries the manifest change.
+
+   ```bash
+   # Stored versions vs storage version of every Flux CRD
+   kubectl get crd -o json | jq -r '.items[] | select(.spec.group | endswith(".fluxcd.io"))
+     | [.metadata.name, (.status.storedVersions | join(",")), ([.spec.versions[] | select(.storage) | .name] | join(","))]
+     | @tsv' | column -t
+
+   flux migrate   # rewrites every Flux object in its storage version, then trims storedVersions; idempotent, needs cluster-admin
+
+   # Pass/fail: errors on an empty list and names every CRD left to migrate; -e also fails on no input (failed kubectl)
+   kubectl get crd -o json | jq -e -r '[.items[] | select(.spec.group | endswith(".fluxcd.io"))] as $crds
+     | [$crds[] | select(.status.storedVersions != [.spec.versions[] | select(.storage) | .name]) | .metadata.name] as $bad
+     | if ($crds | length) == 0 then error("no Flux CRDs found")
+       elif ($bad | length) > 0 then error("storedVersions not migrated: \($bad | join(", "))")
+       else "OK: \($crds | length) Flux CRDs store only their storage version" end'
+
+   # The image objects' managedFields name only the v1 API (flux migrate rewrites them too)
+   kubectl get imagerepositories,imagepolicies,imageupdateautomations -A --show-managed-fields -o json \
+     | jq -e '[.items[].metadata.managedFields[]?.apiVersion] | unique == ["image.toolkit.fluxcd.io/v1"]'
+   ```
+
+   Expected on Flux 2.8.5: `OK: 14 Flux CRDs`, with source (6 CRDs) `v1`, `kustomizations` `v1`, `helmreleases` `v2`,
+   `alerts` and `providers` `v1beta3`, `receivers` `v1`, `imagepolicies`, `imagerepositories` and
+   `imageupdateautomations` `v1`. Each is the only version its CRD serves in Flux 2.9.6. If the managedFields check
+   prints `false`: confirm `apps` is Ready at the commit with the v1 manifests, run `flux migrate` again (it rewrites
+   managedFields), then repeat the check.
 
 #### Force Reconciliation
 
