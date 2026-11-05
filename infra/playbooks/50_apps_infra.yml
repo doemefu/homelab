@@ -15,6 +15,11 @@
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
     apps_namespace: apps
 
+  pre_tasks:
+    - name: Check that helm_binary is Helm 3 (#36)
+      ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
+      tags: [always]
+
   tasks:
     # --- Namespace ---
     - name: Apps Namespace anlegen
