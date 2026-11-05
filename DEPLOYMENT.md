@@ -3624,7 +3624,7 @@ and before every Flux minor upgrade (#292, #296).
 1. Git, on the Mac, from the repo root (`flux migrate -f` resolves the path against the working directory), no cluster
    access. Use `-f cluster`, never `-f .`: the tool reads every YAML file under the path, and the repo root holds
    encrypted secret files (`cluster/` holds none). The dry run exits 0 either way, so read its output; the `rg` line is
-   the scriptable check.
+   the scriptable check (it exits 1 when clean, so negate it in a script: `! rg …`).
 
    ```bash
    KUBECONFIG=/dev/null flux migrate -v 2.9 -f cluster --dry-run   # -v <target minor>; expect "no custom resources found that require migration"
