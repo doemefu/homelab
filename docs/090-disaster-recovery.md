@@ -57,8 +57,8 @@ its fingerprint on the node's console.
 
 `10_base.yml` installs restic at the exact version `storage_restic_version`
 (`infra/roles/storage/defaults/main.yml`, #94). If Ubuntu has published a newer restic since, the pinned
-version is no longer in the archive and the install fails: check `apt-cache policy restic` on the fresh
-node and bump the pin first.
+version is no longer in the archive and the install fails: run `sudo apt-get update && apt-cache policy restic`
+on the fresh node and bump the pin first.
 
 ### 3.1 S1 — a worker
 

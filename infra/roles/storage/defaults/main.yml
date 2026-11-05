@@ -16,7 +16,7 @@ storage_backup_fstype: "ext4"
 storage_run_restic_backup: false
 
 # restic is installed on every node from the Ubuntu 24.04 archive and pinned exactly (#94). Ubuntu
-# keeps one version per pocket: once a newer restic is published, unattended-upgrades installs it and
+# keeps one version per pocket: once a newer restic reaches noble-security, unattended-upgrades installs it and
 # this version leaves the archive index, so the install task then fails on every node until the pin
 # is bumped. Bump: `apt-cache policy restic` on a node, set the new version here, run
 # `10_base.yml --tags storage`. Bump it before rebuilding a node (docs/090), too.
