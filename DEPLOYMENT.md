@@ -3642,8 +3642,8 @@ minor upgrade (#292, #296).
 
    flux migrate   # rewrites every Flux object in its storage version, then trims storedVersions; idempotent, needs cluster-admin
 
-   # Pass/fail: errors on an empty list and names every CRD that still lists another version
-   kubectl get crd -o json | jq -r '[.items[] | select(.spec.group | endswith(".fluxcd.io"))] as $crds
+   # Pass/fail: errors on an empty list and names every CRD left to migrate; -e also fails on no input (failed kubectl)
+   kubectl get crd -o json | jq -e -r '[.items[] | select(.spec.group | endswith(".fluxcd.io"))] as $crds
      | [$crds[] | select(.status.storedVersions != [.spec.versions[] | select(.storage) | .name]) | .metadata.name] as $bad
      | if ($crds | length) == 0 then error("no Flux CRDs found")
        elif ($bad | length) > 0 then error("storedVersions not migrated: \($bad | join(", "))")
