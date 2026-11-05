@@ -19,6 +19,16 @@ hardening_ufw_lan_ports:
 hardening_k3s_pod_cidr: "10.42.0.0/16"
 hardening_k3s_service_cidr: "10.43.0.0/16"
 
+# fail2ban never bans the cluster's own SSH paths. Tunnelled SSH reaches sshd from a cloudflared
+# replica: with its pod IP when the replica runs on the same node, masqueraded to the LAN IP of
+# its node otherwise, and the off-LAN jump config hops on from raspi5 to the other nodes. The real
+# client stays hidden behind the tunnel (docs/060), so a ban on one of these addresses would only
+# cut the operator's own off-LAN path. Hence: loopback, the pod CIDR and every inventory node.
+hardening_fail2ban_ignoreip: >-
+  {{ ['127.0.0.1/8', '::1', hardening_k3s_pod_cidr]
+     + (groups['all'] | map('extract', hostvars) | selectattr('ansible_host', 'defined')
+        | map(attribute='ansible_host') | list) }}
+
 # SSH Hardening
 hardening_ssh_max_auth_tries: 3
 hardening_ssh_permit_root_login: "no"
