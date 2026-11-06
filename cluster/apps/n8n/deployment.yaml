@@ -53,7 +53,9 @@ spec:
             # Behind the Cloudflare Tunnel + Traefik, n8n is reached on the
             # standard HTTPS port. Set these explicitly so the OAuth callback
             # URL is built from the public host, not from N8N_PORT (avoids :5678).
-            - name: WEBHOOK_URL
+            # N8N_WEBHOOK_URL replaces the deprecated WEBHOOK_URL and sets the base URL of both
+            # production and test webhooks (UrlService.getWebhookBaseUrl/getTestWebhookBaseUrl, #342).
+            - name: N8N_WEBHOOK_URL
               value: "https://n8n.furchert.ch/"
             - name: N8N_EDITOR_BASE_URL
               value: "https://n8n.furchert.ch/"
@@ -72,6 +74,21 @@ spec:
                   key: n8n-client-secret
             - name: N8N_SSO_OIDC_DISCOVERY_ENDPOINT
               value: "https://auth.furchert.ch/.well-known/openid-configuration"
+            # Telemetry off (default true).
+            - name: N8N_DIAGNOSTICS_ENABLED
+              value: "false"
+            # Pinned to the 2.46.4 defaults, which the startup log flags as changing in a future
+            # version (owner decision 2026-11-07, #342; see DEPLOYMENT.md "n8n → Pinned defaults").
+            - name: N8N_UNVERIFIED_PACKAGES_ENABLED
+              value: "true"
+            - name: N8N_RUNNERS_MODE
+              value: "internal"
+            - name: N8N_RUNNERS_TASK_TIMEOUT # seconds
+              value: "300"
+            - name: N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES # 2 GiB
+              value: "2147483648"
+            - name: N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES
+              value: "5000"
           livenessProbe:
             httpGet:
               path: /healthz

@@ -88,6 +88,28 @@ spec:
                 secretKeyRef:
                   name: club-assistant-secrets
                   key: LITELLM_CLUB_KEY
+            # Pinned defaults (owner decision 2026-11-07, #342; see DEPLOYMENT.md "Open WebUI → Pinned
+            # defaults"). Limits sit above the pre-v0.13.0 values (256; sub-agents 20/20/30/30000)
+            # instead of v0.13.0's 1024 and unlimited.
+            - name: CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS
+              value: "512"
+            - name: SUBAGENTS_MAX_CONCURRENT
+              value: "30"
+            - name: SUBAGENTS_MAX_ASYNC
+              value: "30"
+            - name: SUBAGENTS_MAX_ITERATIONS
+              value: "50"
+            - name: SUBAGENTS_MAX_OUTPUT # characters
+              value: "50000"
+            - name: ENABLE_NOTIFICATIONS
+              value: "false"
+            - name: ENABLE_COMMENTS
+              value: "false"
+            # Default "*". Also sets the socket.io allowed origins: a browser page on any other origin
+            # gets no CORS headers and its socket.io connection is refused (400). Requests without an
+            # Origin header (server-side callers) are not checked.
+            - name: CORS_ALLOW_ORIGIN
+              value: "https://club.furchert.ch"
           # The v0.11.0/v0.11.1 regressions noted here earlier (Admin > Models toggle deleting a model,
           # open-webui#29036; Workspace > Knowledge page hang, #29104) were fixed in v0.11.2 (2026-08-31).
           # Source: https://github.com/open-webui/open-webui/releases/tag/v0.11.2
