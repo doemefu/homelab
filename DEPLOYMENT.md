@@ -4209,7 +4209,7 @@ mandatory gate above) — that means the reboot does not reset the T2 countdown,
 pointless reboot per cycle without preventing the reset:
 
 ```bash
-ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e mac_tweaks_reboot_enabled=false
+ansible-playbook infra/playbooks/10_base.yml -l <node> --tags mac_tweaks -e '{"mac_tweaks_reboot_enabled": false}'
 ansible-playbook infra/playbooks/20_k3s.yml  -l <node> -e '{"k3s_graceful_shutdown_enabled": false}'
 ```
 

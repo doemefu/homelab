@@ -135,7 +135,7 @@ Die **Rolle** (Control-Plane vs. Worker) wird einmalig in `hosts.yml` via Gruppe
 
 | Komponente            | Version |
 |-----------------------|---------|
-| k3s                   | v1.32.2+k3s1 |
+| k3s                   | v1.32.13+k3s1 |
 | Longhorn              | 1.7.2        |
 | cert-manager          | v1.17.1      |
 | kube-prometheus-stack | 69.3.1       |
