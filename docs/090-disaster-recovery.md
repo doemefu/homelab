@@ -55,10 +55,10 @@ its fingerprint on the node's console.
 `00_bootstrap.yml` needs the initial user of the fresh install:
 `ansible-playbook infra/playbooks/00_bootstrap.yml -e ansible_user=<initial-node-user> -l <node> --become`.
 
-`10_base.yml` installs restic at the exact version `storage_restic_version`
-(`infra/roles/storage/defaults/main.yml`, #94). If Ubuntu has published a newer restic since, the pinned
-version is no longer in the archive and the install fails: run `sudo apt-get update && apt-cache policy restic`
-on the fresh node and bump the pin first.
+`10_base.yml` installs restic matching `storage_restic_version`
+(`infra/roles/storage/defaults/main.yml`, #94), currently the range `0.16.4-*`, so Ubuntu security rebuilds
+of 0.16.4 install without a change. If Ubuntu has moved to a new upstream minor since, the range matches nothing
+and the install fails: run `sudo apt-get update && apt-cache policy restic` on the fresh node and bump the range first.
 
 ### 3.1 S1 — a worker
 

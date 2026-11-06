@@ -3832,14 +3832,15 @@ A manual run exits with "another backup run is active" while the 03:00 cron or a
 The cron appends each run's output to `/var/log/homelab-backup.log` on raspi5;
 `/etc/logrotate.d/homelab-backup` rotates it weekly and keeps 8 rotated weeks, compressed from the second one on.
 
-restic comes from the Ubuntu 24.04 archive and is pinned exactly: `storage_restic_version` in
-`infra/roles/storage/defaults/main.yml`, installed on every node. Ubuntu keeps one version per pocket, so
-once a newer restic is published to noble-security, unattended-upgrades installs it, the pinned version leaves the archive
-index, and `10_base.yml` fails at "Restic installieren" on every node until the pin is bumped:
+restic comes from the Ubuntu 24.04 archive and is pinned to the 0.16.4 line: `storage_restic_version` (`0.16.4-*`,
+an fnmatch pattern; owner exception to the exact-pin rule, 2026-11-07) in
+`infra/roles/storage/defaults/main.yml`, installed on every node. Ubuntu security rebuilds of 0.16.4 match the
+pattern and need no bump. Only a new upstream minor (0.17+) leaves the range, and then `10_base.yml` fails at
+"Restic installieren" on every node until the pattern is bumped deliberately:
 
 ```bash
 ssh raspi5 "apt-cache policy restic"          # Installed / Candidate
-# set storage_restic_version to the candidate, then (off-LAN: ANSIBLE_SSH_ARGS prefix, see "Off-LAN kubectl / Ansible Access")
+# set storage_restic_version to the new range (e.g. "0.17.*"), then (off-LAN: ANSIBLE_SSH_ARGS prefix, see "Off-LAN kubectl / Ansible Access")
 ansible-playbook infra/playbooks/10_base.yml --tags storage --check --diff
 ansible-playbook infra/playbooks/10_base.yml --tags storage
 ssh raspi5 "sudo logrotate -d /etc/logrotate.d/homelab-backup"   # dry run of the snippet
