@@ -207,12 +207,12 @@ Services available for in-cluster consumption via Kubernetes DNS.
 
 | Item | Description | Status |
 |------|-------------|--------|
-| raspi4 SSH tunnel | No tunnel hostname for raspi4, mba1 or mba2 by design (`cf_ingress_body` routes only `ssh.furchert.ch`); off-LAN they use the SSH jump config | ✅ Not planned (see below) |
+| raspi4 SSH tunnel | No Cloudflare Tunnel hostname for raspi4 (or mba1/mba2); off-LAN they are reached through raspi5 as SSH jump host | ⚠️ Open (see below) |
 | Off-cluster app-data backups + restore tests | Manual app-data dumps to the operator's Mac + restic datastore fix implemented via #64 — see [DEPLOYMENT.md](DEPLOYMENT.md) "App-data backups to the operator's Mac (#64)" | ✅ Resolved (#64) — first run 2026-09-08, restore tests (a) PostgreSQL + (b) PVC archive PASS (DEPLOYMENT.md restore test log) |
 | `KubeControllerManagerDown` / `KubeSchedulerDown` / `KubeProxyDown` | Fired as permanent critical false positives since install (2026-05-16) — k3s embeds these 3 components with zero exposed scrape targets | ✅ Resolved (#68) — scrape configs + alert rule groups disabled, see [DEPLOYMENT.md § Alerting Decisions](DEPLOYMENT.md#alerting-decisions) |
 | k3s kine/SQLite compaction stall | Datastore grew to 5 GB on raspi5 (2026-09-23) after kine's online compactor stalled for ~5 days, degrading the API server | ⚠️ Mitigated, follow-ups open (#129) — offline compaction runbook + script added, see [DEPLOYMENT.md § k3s datastore (kine/SQLite) maintenance](DEPLOYMENT.md#k3s-datastore-kinesqlite-maintenance) |
 
-> **Note on raspi4 SSH**: raspi4, mba1 and mba2 have no Cloudflare Tunnel hostname; `cf_ingress_body` in `infra/playbooks/40_platform.yml` routes only `ssh.furchert.ch` (raspi5). Off-LAN access to the other nodes goes through raspi5 as SSH jump, see [DEPLOYMENT.md](DEPLOYMENT.md) "Off-LAN kubectl / Ansible Access".
+> **Note on raspi4 SSH**: raspi4, mba1 and mba2 have no Cloudflare Tunnel hostname; the only SSH route in `cf_ingress_body` (`infra/playbooks/40_platform.yml`) is `ssh.furchert.ch` → raspi5. Off-LAN, the other nodes are reached through raspi5 as SSH jump host, see [DEPLOYMENT.md](DEPLOYMENT.md) "Off-LAN kubectl / Ansible Access".
 
 ---
 

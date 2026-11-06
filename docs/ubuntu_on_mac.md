@@ -683,7 +683,7 @@ ansible-playbook infra/playbooks/20_k3s.yml -l mba1,mba2
 ```
 
 Das Playbook:
-- Installiert k3s `v1.32.2+k3s1` als Agent
+- Installiert k3s `v1.32.13+k3s1` als Agent
 - Übergibt das Token sicher als Umgebungsvariable im systemd-Service (nicht als CLI-Argument)
 - Joined sequenziell (`serial: 1`) gegen den Control-Plane auf `raspi5:6443`
 - Setzt den Node-Namen auf `mba1` bzw. `mba2` (aus dem Inventory)
@@ -696,10 +696,10 @@ kubectl get nodes -o wide
 
 # Erwartete Ausgabe (alle 4 Nodes):
 # NAME     STATUS   ROLES                  AGE   VERSION
-# raspi5   Ready    control-plane,master   ...   v1.32.2+k3s1
-# raspi4   Ready    <none>                 ...   v1.32.2+k3s1
-# mba1     Ready    <none>                 ...   v1.32.2+k3s1
-# mba2     Ready    <none>                 ...   v1.32.2+k3s1
+# raspi5   Ready    control-plane,master   ...   v1.32.13+k3s1
+# raspi4   Ready    <none>                 ...   v1.32.13+k3s1
+# mba1     Ready    <none>                 ...   v1.32.13+k3s1
+# mba2     Ready    <none>                 ...   v1.32.13+k3s1
 
 # Longhorn nach dem Join prüfen:
 kubectl get nodes -n longhorn-system
