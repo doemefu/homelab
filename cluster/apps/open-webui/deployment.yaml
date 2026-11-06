@@ -23,13 +23,13 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: open-webui
-          # Pinned version: v0.12.5 (Dependabot PR #261, merged 2026-11-02). OCI index digest
-          # sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded verified
-          # 2026-11-02 via the GHCR anonymous-token API (linux/amd64 + linux/arm64 entries) (#165).
-          # Version history and advisory notes: Dependabot PRs #144 (v0.11.4), #207 (v0.12.2), #261.
-          # The image moves from Python 3.11 (v0.12.2: 3.11.17) to 3.12.16 (image config, 2026-11-02):
-          # re-verify the club pipe function when playbook 54 rolls this tag out. User is 0:0 (Dockerfile
-          # ARG UID=0) — the SECURITY DEVIATION block below remains valid.
+          # Pinned version: v0.13.0 (Dependabot PR #331, merged 2026-11-06). OCI index digest
+          # sha256:2272b0fb7c8783a016bcc179abb467cfa34590c99c5e6560fe0e9155b4820a09 verified
+          # 2026-11-06 (linux/amd64 + linux/arm64). Version history: Dependabot PRs #144 (v0.11.4),
+          # #207 (v0.12.2), #261 (v0.12.5), #331. v0.13.0 adds three alembic migrations (rollback =
+          # restore the pre-upgrade backup) and renames open_webui.utils.misc helpers (the club pipe
+          # does not import them). Python 3.12.16, user 0:0 (Dockerfile ARG UID=0) — the SECURITY
+          # DEVIATION block below remains valid.
           #
           # ┌─────────────────────────────────────────────────────────────────────────┐
           # │  SECURITY DEVIATION — CONTAINER RUNS AS ROOT (UID 0)                   │
