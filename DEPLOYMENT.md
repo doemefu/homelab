@@ -1852,6 +1852,76 @@ already migrated.
 > working SSO login. The owner signs in with a local n8n account; hardening of that login is tracked
 > in #121 and #280. Post-upgrade smoke tests use the local account, not OIDC.
 
+#### Pinned defaults (#342)
+
+`cluster/apps/n8n/deployment.yaml` sets these values explicitly (owner decision 2026-11-07), so a later
+n8n release cannot change them silently. The n8n 2.46.4 startup log flags each of the last six as a
+default or name that changes in a future version.
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `N8N_DIAGNOSTICS_ENABLED` | `false` | Telemetry off (default `true`). |
+| `N8N_UNVERIFIED_PACKAGES_ENABLED` | `true` | Today's default; becomes `false`. |
+| `N8N_RUNNERS_MODE` | `internal` | Today's default. Internal mode itself is deprecated, so its startup warning stays until the task runner moves to an external launcher. |
+| `N8N_RUNNERS_TASK_TIMEOUT` | `300` (seconds) | Today's default; drops to 60. |
+| `N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES` | `2147483648` (2 GiB) | Today's default; drops to 256 MiB. |
+| `N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES` | `5000` | Today's default; drops to 1000. |
+| `N8N_WEBHOOK_URL` | `https://n8n.furchert.ch/` | Replaces the deprecated `WEBHOOK_URL`; base URL of production and test webhooks. |
+
+Playbook 52 patches the live Deployment (strategic merge), which adds env entries but never removes
+one. After the first 52 run with this manifest the live pod still carries the old `WEBHOOK_URL` next to
+`N8N_WEBHOOK_URL` (same value, harmless, n8n prefers the new one). Keeping both works.
+
+Optional cleanup (removes the deprecation warning, costs one more n8n restart of about 4 min). First
+confirm that `N8N_WEBHOOK_URL` is live; the command must print `https://n8n.furchert.ch/`:
+
+```bash
+kubectl -n apps get deploy n8n -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="N8N_WEBHOOK_URL")].value}'
+kubectl -n apps set env deployment/n8n WEBHOOK_URL-   # only after the check above printed the URL
+```
+
+Never drop `WEBHOOK_URL` before 52 has added `N8N_WEBHOOK_URL`: with neither set, n8n builds webhook
+URLs as `https://n8n.furchert.ch:5678/` and re-registers external webhooks (Telegram) with that URL.
+
+---
+
+### Open WebUI
+
+Deployed by `54_club_assistant.yml`; image updates and backups: see
+[Backup & rollback](#backup--rollback-for-image-updates-open-webui-litellm-n8n-postgresql-cloudflared).
+
+#### Pinned defaults (#342)
+
+Open WebUI runs with `ENABLE_PERSISTENT_CONFIG=false`: the Deployment env is the source of truth, and an
+Admin-panel change to one of these settings lasts only until the next pod restart.
+`cluster/apps/open-webui/deployment.yaml` sets (owner decision 2026-11-07):
+
+| Variable | Value | v0.13.0 default (before v0.13.0) | Meaning |
+|----------|-------|----------------------------------|---------|
+| `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS` | `512` | 1024 (256) | Tool-call rounds per chat response; `-1` = unlimited. |
+| `SUBAGENTS_MAX_CONCURRENT` | `30` | unlimited (20) | Foreground sub-agents running at once. |
+| `SUBAGENTS_MAX_ASYNC` | `30` | unlimited (20) | Background sub-agents running at once. |
+| `SUBAGENTS_MAX_ITERATIONS` | `50` | unlimited (30) | Tool-call rounds per sub-agent. |
+| `SUBAGENTS_MAX_OUTPUT` | `50000` | unlimited (30000) | Characters of a sub-agent result passed back; longer results are truncated. |
+| `ENABLE_NOTIFICATIONS` | `false` | `true` | Notification inbox off. |
+| `ENABLE_COMMENTS` | `false` | `false` | Comments off (pinned at the default). |
+| `CORS_ALLOW_ORIGIN` | `https://club.furchert.ch` | `*` | Browser CORS and socket.io allowed origins. |
+
+Sub-agents are off by default (`ENABLE_SUBAGENTS=false`); the `SUBAGENTS_MAX_*` limits apply once an
+admin enables them. With the CORS pin, a browser session through `kubectl port-forward`
+(origin `http://localhost:…`) loses its socket.io connection (streaming, event dialogs); use
+`https://club.furchert.ch`. Server-side callers (n8n, the club pipe) send no `Origin` header and are not
+affected.
+
+Accepted defaults (owner decision 2026-11-07):
+
+- **Tool Creation stays on.** v0.13.0 enables the builtin "Tool Creation" per model by default: in a chat
+  with native function calling, the model can save a workspace Python tool, and saving runs the module on
+  the server (the container runs as UID 0, see the SECURITY DEVIATION block in the manifest).
+- **The workspace-tools user permission stays off** (`USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS`, default
+  `false`), so only admins (and members of a group granted Workspace → Tools access) can create tools
+  this way.
+
 ---
 
 ### LiteLLM
