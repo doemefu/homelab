@@ -3832,22 +3832,24 @@ A manual run exits with "another backup run is active" while the 03:00 cron or a
 The cron appends each run's output to `/var/log/homelab-backup.log` on raspi5;
 `/etc/logrotate.d/homelab-backup` rotates it weekly and keeps 8 rotated weeks, compressed from the second one on.
 
-restic comes from the Ubuntu 24.04 archive and is pinned to the 0.16.4 line: `storage_restic_version` (`0.16.4-*`,
-an fnmatch pattern; owner exception to the exact-pin rule, 2026-11-07) in
-`infra/roles/storage/defaults/main.yml`, installed on every node. Ubuntu security rebuilds of 0.16.4 match the
-pattern and need no bump. Only a new upstream minor (0.17+) leaves the range, and then `10_base.yml` fails at
-"Restic installieren" on every node until the pattern is bumped deliberately:
+restic comes from the Ubuntu 24.04 archive: `storage_restic_version` (`0.16.4-2ubuntu0.24.04.*`, an fnmatch
+pattern) in `infra/roles/storage/defaults/main.yml`, installed on every node. Every Ubuntu security rebuild of
+0.16.4 matches and needs no bump; the release-pocket build `0.16.4-2` does not. The pattern is stricter than the
+range the owner approved (`0.16.4-*`, 2026-11-07, an exception to the exact-pin rule). If Ubuntu moves restic to a
+new upstream version (0.16.5, 0.17, ...), unattended-upgrades installs it and `10_base.yml` then fails at
+"Restic installieren" on every node: the installed version no longer matches and apt refuses the downgrade. A fresh
+node fails the same way once no matching build is left in the index. Fix: a deliberate bump:
 
 ```bash
 ssh raspi5 "apt-cache policy restic"          # Installed / Candidate
-# set storage_restic_version to the new range (e.g. "0.17.*"), then (off-LAN: ANSIBLE_SSH_ARGS prefix, see "Off-LAN kubectl / Ansible Access")
+# set storage_restic_version to the new pattern (e.g. "0.17.0-1ubuntu0.24.04.*"), then (off-LAN: ANSIBLE_SSH_ARGS prefix, see "Off-LAN kubectl / Ansible Access")
 ansible-playbook infra/playbooks/10_base.yml --tags storage --check --diff
 ansible-playbook infra/playbooks/10_base.yml --tags storage
 ssh raspi5 "sudo logrotate -d /etc/logrotate.d/homelab-backup"   # dry run of the snippet
 ssh raspi5 'sudo logrotate -d /etc/logrotate.conf >/dev/null 2>&1; echo rc=$?'   # full config incl. all snippets: rc=0
 ```
 
-Bump the pin before rebuilding a node, too (`docs/090-disaster-recovery.md` §3).
+Check the pattern against `apt-cache policy restic` before rebuilding a node (`docs/090-disaster-recovery.md` §3).
 
 #### Restore Test (Non-Destructive)
 
