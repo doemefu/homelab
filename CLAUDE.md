@@ -75,6 +75,7 @@ Worklogs live in `.claude/worklogs/`.
 
 ```bash
 # Setup: pip install ansible ansible-lint; brew install sops age helm@3 kubectl
+# helm@3 is keg-only: export PATH="$(brew --prefix helm@3)/bin:$PATH"
 ansible-lint infra/                                                   # lint
 yamllint -c .yamllint .                                               # YAML lint (CI scope)
 ansible-playbook infra/playbooks/<pb>.yml -l <node> --check --diff    # dry-run one node
