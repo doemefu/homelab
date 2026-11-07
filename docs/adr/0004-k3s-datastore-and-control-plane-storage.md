@@ -20,7 +20,7 @@
 - container images and the root file system,
 - the k3s audit log, about 2 MB/h (≈ 48 MB/day, `#340`), which is a steady write load on the same card.
 
-The 03:00 `state.db` online backup adds a long read transaction on this card (see "What went wrong"). Both are SD write and latency sources, and both support D1.
+The 03:00 `state.db` online backup adds a long read transaction on this card (see "What went wrong"). The audit log is a steady write load and the backup a latency source; both support D1.
 
 If the card fails, the cluster state and its only backup are gone together. `#91` and `#161` track the backup side of that problem.
 
@@ -118,13 +118,14 @@ Keep the default datastore. Fix the cause with the k3s patch hop (done 2026-11-0
 
 - **Pros:**
   - The probable root cause (kine#414) is fixed by a hop that was planned anyway (`#139` hop 1).
-  - No migration and no new component. Recovery is forward-only: the old `v1.32.2` binaries were removed on 2026-11-06, and `v1.32.2` would reintroduce kine#414. The fallbacks are a `state.db` copy and the offline compaction (see "Rollback").
+  - No migration and no new component.
   - SQLite on a single node is the configuration k3s is tuned for.
   - The offline compaction runbook keeps working as a fallback.
 - **Cons:**
   - kine still runs compaction as `DELETE` statements against a single SQLite file, so a large backlog can still be slow.
   - No built-in snapshot tooling. Backups stay the restic copy via sqlite3's online backup API.
   - The SD-card risk stays until the storage move (D) happens.
+  - Recovery is forward-only, so A no longer fully meets driver 5 (reversibility): the old `v1.32.2` binaries were removed on 2026-11-06, and `v1.32.2` would reintroduce kine#414. The fallbacks are a `state.db` copy and the offline compaction (see Consequences).
 
 ### B. Embedded etcd, single member (`--cluster-init`)
 
@@ -164,7 +165,7 @@ Whichever variant: **the datastore and its backup must end up on different media
 1. **Datastore: option A, accepted.** Stay on SQLite/kine and fix the cause by upgrading, together with the mitigations below. Do **not** migrate to embedded etcd now. Embedded etcd only if an exit criterion trips, and only on an SSD.
 2. **Storage: D1 is wanted but postponed.** There is no hardware choice yet (NVMe HAT with an NVMe drive, or a USB 3 SSD) and the migration method is to be decided when D1 is scheduled. Do it in its own maintenance window, not together with a k3s hop. D1 does **not** block the minor upgrades in `#65`. Until then D0 stays, and the off-node backup work (`#91`/`#161`) carries the whole recovery risk. The datastore SSD must not be the restic SSD of `#161`.
 3. **Embedded etcd (B)** is re-evaluated only when an exit criterion below trips, and only after D1. etcd on the SD card is ruled out.
-4. **M4 (Flux leader-election patch)** is folded into `#65` (the Flux upgrade), after the duplicate `cluster/flux-system/flux-system/gotk-components.yaml` is removed. It is not a separate change.
+4. **M4 (Flux leader-election patch)** is folded into `#65` (the Flux upgrade), after the duplicate `cluster/flux-system/flux-system/gotk-components.yaml` is removed as the first PR under `#65`. It is not a separate change.
 
 ### Mitigations for option A
 
@@ -205,7 +206,7 @@ If a criterion trips while raspi5 is still on SD, D1 comes first, and B is evalu
   - The diagnosis "kine#414 is the root cause" is strong but not proven on this cluster. M3 is the check. If the lag grows on v1.32.13, the exit criteria apply.
   - **Rollback is forward-only.** The old `v1.32.2` binaries were removed on 2026-11-06, and `v1.32.2` would reintroduce kine#414. If the datastore misbehaves, the break-glass is the offline compaction (`scripts/kine-offline-compact.sh`, `DEPLOYMENT.md` § "k3s datastore (kine/SQLite) maintenance"), or restoring a `state.db` copy.
   - Until D1 (postponed, owner hardware decision pending), one SD card still carries the control plane. The upgrade does not change that.
-  - M4 changes Flux's bootstrap manifests. Any later `flux bootstrap` or `flux install` regeneration (Flux 2.9/2.10 in `#65`) must keep the patch. It belongs as a `patches:` entry in `cluster/flux-system/kustomization.yaml`, not inside `gotk-components.yaml`. The Flux sync path (`gotk-sync.yaml` → `./cluster` → `cluster/kustomization.yaml` → `flux-system/`) references only `cluster/flux-system/gotk-components.yaml`. The second copy at `cluster/flux-system/flux-system/gotk-components.yaml` is not referenced by any kustomization. Flux itself committed it (commit 794ebaa), most likely during a bootstrap with a different `--path`. Confirm that before patching, and remove it in its own PR; M4 follows inside `#65`.
+  - M4 changes Flux's bootstrap manifests. Any later `flux bootstrap` or `flux install` regeneration (Flux 2.9/2.10 in `#65`) must keep the patch. It belongs as a `patches:` entry in `cluster/flux-system/kustomization.yaml`, not inside `gotk-components.yaml`. The Flux sync path (`gotk-sync.yaml` → `./cluster` → `cluster/kustomization.yaml` → `flux-system/`) references only `cluster/flux-system/gotk-components.yaml`. The second copy at `cluster/flux-system/flux-system/gotk-components.yaml` is not referenced by any kustomization. Flux itself committed it (commit 794ebaa), most likely during a bootstrap with a different `--path`. Confirm that before patching, and remove it as the first PR under `#65`; M4 follows inside `#65`.
 - **Order relative to `#139` / `#65`** (one change per window):
   1. M3 lag gauge (no restart; playbooks 10 and 41). Done.
   2. M6 off-node copy of the datastore backup (`#91`). Partly done (manual copy script, freshness alert).
@@ -230,16 +231,15 @@ If a criterion trips while raspi5 is still on SD, D1 comes first, and B is evalu
 
 ## Follow-ups
 
-- Done: kine revision gauges + lag alerts + promtool test (M3); `#139` hop 1 (M1).
+- Done: kine compaction-lag gauge + lag alerts + promtool test (M3); `#139` hop 1 (M1); `DEPLOYMENT.md` kine paragraphs updated for v1.32.13 (M5).
 - New task: stepped online backup of `state.db` in the `storage` role (M7).
-- Optional: the `job="kubelet"` scrape duplicates every `apiserver_*` series. Any rule or panel that sums apiserver metrics needs a `job` filter. On kine ≤ v0.14.12 the duplicate scrape also doubles the cost of the datastore-size query.
+- Optional: the `job="kubelet"` scrape duplicates every `apiserver_*` series. Any rule or panel that sums apiserver metrics needs a `job` filter.
 - `#65`: Flux leader-election kustomize patch (M4), after removing the unreferenced `cluster/flux-system/flux-system/gotk-components.yaml`.
-- M5: verify the kine paragraphs in `DEPLOYMENT.md` are updated for v1.32.13 (the "not tunable via k3s flags" note must go).
 - Open exit-criteria item: the positive recovery check (see "Exit criteria"); the 30-day review is due after 2026-12-05.
 - Owner: D1 is postponed. Decide on hardware (NVMe HAT + drive, or USB 3 SSD) when scheduling it; the datastore SSD must not be `#161`'s restic SSD. Migration method is decided then.
 - `#70`: decide where ADRs live. This ADR is accepted, so add it to the parent `docs/INDEX.md` table either way.
 
-## Results note: k3s patch hop (2026-11-03 overnight run)
+## Results note: k3s patch hop (2026-11-03 to 2026-11-06)
 
 - **Pre-flight (read-only, 2026-11-02 23:51 CET):** cluster healthy; kine 2,621 rows, compaction lag 1,164 revisions (`max_id − compact_rev`), `state.db` 74 MB. The online compactor is keeping up on v0.13.9 right now, which matches the reading that the bug needs a trigger.
 - **Hop 1 (M1) was merged 2026-11-03 and rolled out on 2026-11-05** (post-hop readings: "Measured after the hop").
@@ -254,4 +254,4 @@ If a criterion trips while raspi5 is still on SD, D1 comes first, and B is evalu
   - `journalctl -u k3s | grep -c 'Compact failed'` = 0.
   - `compact_rev` read twice, 10 min apart (`mode=ro`), must advance.
   - After 24 h, the kine row count must be below 10 k.
-  - Outcome of the 24-h check (2026-11-06): 0 `Compact failed` lines, lag 1,008, 287 compactions in 24 h. See "Measured after the hop".
+  - Outcome of the 24-h check (2026-11-06): 0 `Compact failed` lines, lag 1,008, 287 compactions in 24 h. The kine row count was not taken in that check, so the < 10 k criterion is still to be read. See "Measured after the hop".
