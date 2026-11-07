@@ -11,6 +11,23 @@
     line: "127.0.1.1 {{ inventory_hostname }}"
     state: present
 
+# apt suites (#346). Run alone with: --tags apt. Without noble-updates a node stays on the release
+# builds (fail2ban 1.0.2-3, #98). Written before the first apt install below.
+- name: Apt suites — manage ubuntu.sources (noble, -updates, -backports, -security)
+  ansible.builtin.template:
+    src: ubuntu.sources.j2
+    dest: /etc/apt/sources.list.d/ubuntu.sources
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Update apt cache
+  tags: [apt]
+
+# Refresh the cache now (not at the end of the play): the apt installs below use cache_valid_time.
+- name: Apt suites — flush handlers so the cache is refreshed after a changed ubuntu.sources
+  ansible.builtin.meta: flush_handlers
+  tags: [apt]
+
 - name: Timezone setzen
   community.general.timezone:
     name: "{{ base_timezone }}"
@@ -74,6 +91,11 @@
     state: present
   when: base_unattended_upgrades_enabled
 
+# unattended-upgrades stays restricted to security origins (#346): this role does not touch
+# /etc/apt/apt.conf.d/50unattended-upgrades, whose Ubuntu default Allowed-Origins are the frozen
+# release pocket ${distro_codename}, ${distro_codename}-security and ESM (checked on all 4 nodes,
+# 2026-11-07). Enabling noble-updates above does NOT make it auto-install -updates packages; those
+# are upgraded manually (e.g. fail2ban, see DEPLOYMENT.md).
 - name: Unattended-Upgrades aktivieren
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/20auto-upgrades

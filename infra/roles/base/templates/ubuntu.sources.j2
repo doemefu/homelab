@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Managed by the base role (#346). Do not edit by hand.
+Types: deb
+URIs: {{ base_apt_mirror_arm64 if ansible_facts["architecture"] == "aarch64" else base_apt_mirror_amd64 }}
+Suites: {{ base_apt_release }} {{ base_apt_release }}-updates {{ base_apt_release }}-backports
+Components: {{ base_apt_components }}
+Signed-By: {{ base_apt_keyring }}
+
+Types: deb
+URIs: {{ base_apt_security_mirror_arm64 if ansible_facts["architecture"] == "aarch64" else base_apt_security_mirror_amd64 }}
+Suites: {{ base_apt_release }}-security
+Components: {{ base_apt_components }}
+Signed-By: {{ base_apt_keyring }}
