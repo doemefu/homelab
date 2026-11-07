@@ -19,3 +19,12 @@ base_packages:
   - lsb-release
 
 base_unattended_upgrades_enabled: true
+
+# apt suites (#346): /etc/apt/sources.list.d/ubuntu.sources, mirrors per architecture.
+base_apt_release: noble
+base_apt_components: "main restricted universe multiverse"
+base_apt_keyring: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+base_apt_mirror_arm64: "http://ports.ubuntu.com/ubuntu-ports/"
+base_apt_security_mirror_arm64: "http://ports.ubuntu.com/ubuntu-ports/"
+base_apt_mirror_amd64: "http://ch.archive.ubuntu.com/ubuntu/"
+base_apt_security_mirror_amd64: "http://security.ubuntu.com/ubuntu/"
