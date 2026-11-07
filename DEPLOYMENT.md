@@ -1131,8 +1131,10 @@ ansible-playbook infra/playbooks/10_base.yml -l <node> --tags hardening   # a se
 
 Known causes: Ubuntu 24.04's release package `1.0.2-3` crashes on Python 3.12 (`No module named 'asynchat'`,
 LP #2055114). The fixed `1.0.2-3ubuntu0.1` is in noble-updates only, which unattended-upgrades does not install,
-and the role's `state: present` never upgrades: `sudo apt-get install --only-upgrade fail2ban`. A configuration
-error exits with status 255, which systemd does not restart. Without `nft`, fail2ban runs but its bans fail
+and the role's `state: present` never upgrades: `sudo apt-get install --only-upgrade fail2ban`. This needs the
+`noble-updates` suite, which the `base` role manages in `/etc/apt/sources.list.d/ubuntu.sources` (#346,
+`ansible-playbook infra/playbooks/10_base.yml --tags apt`); on a node without it the command does nothing. A
+configuration error exits with status 255, which systemd does not restart. Without `nft`, fail2ban runs but its bans fail
 (errors in `/var/log/fail2ban.log`).
 
 ---

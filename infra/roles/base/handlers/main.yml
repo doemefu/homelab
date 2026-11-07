@@ -9,3 +9,7 @@
   ansible.builtin.service:
     name: unattended-upgrades
     state: restarted
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
