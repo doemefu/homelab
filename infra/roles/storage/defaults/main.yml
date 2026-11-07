@@ -15,12 +15,15 @@ storage_backup_fstype: "ext4"
 # Nur auf pi5 aktiviert (k3s_server.yml) — alle anderen Nodes: false
 storage_run_restic_backup: false
 
-# restic is installed on every node from the Ubuntu 24.04 archive and pinned exactly (#94). Ubuntu
-# keeps one version per pocket: once a newer restic reaches noble-security, unattended-upgrades installs it and
-# this version leaves the archive index, so the install task then fails on every node until the pin
-# is bumped. Bump: `apt-cache policy restic` on a node, set the new version here, run
-# `10_base.yml --tags storage`. Bump it before rebuilding a node (docs/090), too.
-storage_restic_version: "0.16.4-2ubuntu0.24.04.3"
+# restic is installed on every node from the Ubuntu 24.04 archive (#94). The apt module treats the version as
+# an fnmatch pattern, so every Ubuntu security rebuild of 0.16.4 (0.16.4-2ubuntu0.24.04.N) passes without a
+# bump, while the release-pocket build 0.16.4-2 does not match. The pattern is stricter than the range the owner
+# approved (0.16.4-*, Dominic, 2026-11-07, an exception to the exact-pin rule). If Ubuntu moves restic to a new
+# upstream version (0.16.5, 0.17, ...), unattended-upgrades installs it and this task then fails: the installed
+# version no longer matches and apt refuses the downgrade. A fresh node fails the same way once no matching build
+# is left in the index. Fix: `apt-cache policy restic` on a node, set the new pattern here, run
+# `10_base.yml --tags storage`.
+storage_restic_version: "0.16.4-2ubuntu0.24.04.*"
 
 # Restic Repository-Pfad (lokales Verzeichnis, interim bis externe SSD angeschlossen)
 # Follow-up: /mnt/backup/restic-repo nach SSD-Anschluss (Prozess in DEPLOYMENT.md)
