@@ -92,9 +92,10 @@
   when: base_unattended_upgrades_enabled
 
 # unattended-upgrades stays restricted to security origins (#346): this role does not touch
-# /etc/apt/apt.conf.d/50unattended-upgrades, whose Ubuntu default allows only
-# ${distro_codename}-security (and ESM). Enabling noble-updates above does NOT make it auto-install
-# -updates packages; those are upgraded manually (e.g. fail2ban, see DEPLOYMENT.md).
+# /etc/apt/apt.conf.d/50unattended-upgrades, whose Ubuntu default Allowed-Origins are the frozen
+# release pocket ${distro_codename}, ${distro_codename}-security and ESM (checked on all 4 nodes,
+# 2026-11-07). Enabling noble-updates above does NOT make it auto-install -updates packages; those
+# are upgraded manually (e.g. fail2ban, see DEPLOYMENT.md).
 - name: Unattended-Upgrades aktivieren
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/20auto-upgrades
