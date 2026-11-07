@@ -15,6 +15,11 @@
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
     apps_namespace: apps
 
+  pre_tasks:
+    - name: Check that helm_binary is Helm 3 (#36)
+      ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
+      tags: [always]
+
   tasks:
     # --- Namespace ---
     - name: Apps Namespace anlegen
@@ -25,6 +30,14 @@
           kind: Namespace
           metadata:
             name: "{{ apps_namespace }}"
+            # Pod Security Admission #160, step 1: warn + audit only, nothing enforced (DEPLOYMENT.md
+            # "Pod Security Admission"). The label-less apps Namespace tasks in 52-55 keep these labels (merge
+            # patch). Bump the -version labels with the next k3s minor.
+            labels:
+              pod-security.kubernetes.io/warn: baseline
+              pod-security.kubernetes.io/warn-version: v1.32
+              pod-security.kubernetes.io/audit: baseline
+              pod-security.kubernetes.io/audit-version: v1.32
       delegate_to: localhost
 
     - name: Prüfen dass sentry_dsn gesetzt ist

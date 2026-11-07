@@ -23,17 +23,13 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: n8n
-          # Pinned 2.37.10 = the version running live since 2026-09-06 (PR #87, playbook 52 run that
-          # day). Multi-arch OCI index digest re-verified 2026-10-14 against registry-1.docker.io
-          # (linux/amd64 + linux/arm64). Held back on purpose: Dependabot bumps to 2.39.7/2.40.5/2.42.3
-          # were merged but never applied, so a routine 52 run would have upgraded n8n by five minors.
-          # The club-assistant workflows are verified on 2.37.10 only; an upgrade is its own planned
-          # change (PVC backup, club re-tests) — see DEPLOYMENT.md "n8n → Upgrade". This is an interim
-          # pin: 2.37.10 is affected by the 2026-09-16 and 2026-09-30 n8n advisory batches (fixed in
-          # 2.39.6/2.40.1 and 2.41.4/2.42.1, e.g. GHSA-728h-pmr2-7cgh, GHSA-597w-c3jh-g8fg,
-          # GHSA-9rhv-fhr8-7q5r); planned target 2.42.7 in an agreed window. SQLite migrations
-          # are forward-only: never point an older image at a PVC a newer image has migrated.
-          image: n8nio/n8n:2.45.4@sha256:80e23ced901f0e22597d4f3464e3aaf9d835372262ea6f08ef760d8ca35df25c
+          # Pinned 2.46.4 (Dependabot PR #330, merged 2026-11-06). Multi-arch OCI index digest verified
+          # 2026-11-06 against registry-1.docker.io (linux/amd64 + linux/arm64). Fixes the 2026-10-28 n8n
+          # advisory batch. An image change is its own planned rollout: playbook 52 refuses it without
+          # n8n_image_change_ack (PVC backup first, club re-tests) — see DEPLOYMENT.md "n8n → Upgrade".
+          # SQLite migrations are forward-only (2.46 adds two irreversible ones): never point an older
+          # image at a PVC a newer image has migrated.
+          image: n8nio/n8n:2.46.4@sha256:4384b9ff20a78bc1708c35ce7864f84f724611de7801fb36d715998db7c000f1
           ports:
             - containerPort: 5678
           env:
@@ -57,7 +53,9 @@ spec:
             # Behind the Cloudflare Tunnel + Traefik, n8n is reached on the
             # standard HTTPS port. Set these explicitly so the OAuth callback
             # URL is built from the public host, not from N8N_PORT (avoids :5678).
-            - name: WEBHOOK_URL
+            # N8N_WEBHOOK_URL replaces the deprecated WEBHOOK_URL and sets the base URL of both
+            # production and test webhooks (UrlService.getWebhookBaseUrl/getTestWebhookBaseUrl, #342).
+            - name: N8N_WEBHOOK_URL
               value: "https://n8n.furchert.ch/"
             - name: N8N_EDITOR_BASE_URL
               value: "https://n8n.furchert.ch/"
@@ -76,6 +74,21 @@ spec:
                   key: n8n-client-secret
             - name: N8N_SSO_OIDC_DISCOVERY_ENDPOINT
               value: "https://auth.furchert.ch/.well-known/openid-configuration"
+            # Telemetry off (default true).
+            - name: N8N_DIAGNOSTICS_ENABLED
+              value: "false"
+            # Pinned to the 2.46.4 defaults, which the startup log flags as changing in a future
+            # version (owner decision 2026-11-07, #342; see DEPLOYMENT.md "n8n → Pinned defaults").
+            - name: N8N_UNVERIFIED_PACKAGES_ENABLED
+              value: "true"
+            - name: N8N_RUNNERS_MODE
+              value: "internal"
+            - name: N8N_RUNNERS_TASK_TIMEOUT # seconds
+              value: "300"
+            - name: N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES # 2 GiB
+              value: "2147483648"
+            - name: N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES
+              value: "5000"
           livenessProbe:
             httpGet:
               path: /healthz

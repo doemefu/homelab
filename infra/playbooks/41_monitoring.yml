@@ -34,6 +34,11 @@
     coroot_node_agent_label: homelab.furchert.ch/coroot-node-agent
     coroot_node_agent_dir: "{{ playbook_dir }}/../../cluster/monitoring/coroot-node-agent"
 
+  pre_tasks:
+    - name: Check that helm_binary is Helm 3 (#36)
+      ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
+      tags: [always]
+
   tasks:
     - name: Prüfen dass alertmanager_discord_webhook_url gesetzt ist
       ansible.builtin.assert:
@@ -54,6 +59,13 @@
           kind: Namespace
           metadata:
             name: monitoring
+            # Pod Security Admission #160, step 1: warn + audit only, nothing enforced (DEPLOYMENT.md
+            # "Pod Security Admission"). Bump the -version labels with the next k3s minor.
+            labels:
+              pod-security.kubernetes.io/warn: baseline
+              pod-security.kubernetes.io/warn-version: v1.32
+              pod-security.kubernetes.io/audit: baseline
+              pod-security.kubernetes.io/audit-version: v1.32
       delegate_to: localhost
 
     - name: Prometheus-Community Helm Repo hinzufügen
@@ -179,6 +191,27 @@
                   equal:
                     - 'namespace'
                     - 'statefulset'
+                # #178: while the hub Deployment has no available replica, its scrape alerts
+                # (McpHubDown, the chart's TargetDown) describe the same outage. `equal` is empty
+                # ON PURPOSE: McpHubDown's absent() branch carries only job="mcp-hub" (no namespace,
+                # no deployment), so any `equal` list would make this rule never match. The source
+                # matchers alone pin it to the hub.
+                - source_matchers:
+                    - 'alertname = WorkloadUnavailable'
+                    - 'namespace = apps'
+                    - 'deployment = mcp-hub'
+                  target_matchers:
+                    - 'alertname =~ "McpHubDown|TargetDown"'
+                    - 'job = mcp-hub'
+                # #178: pod available but the scrape fails (NetworkPolicy, port name, 404):
+                # McpHubDown names the hub-specific checks, so it mutes the chart's generic
+                # TargetDown for the same job. Empty `equal` for the same reason as above.
+                - source_matchers:
+                    - 'alertname = McpHubDown'
+                    - 'job = mcp-hub'
+                  target_matchers:
+                    - 'alertname = TargetDown'
+                    - 'job = mcp-hub'
         wait: true
         wait_timeout: "20m"
       no_log: true
@@ -315,6 +348,36 @@
               matchLabels:
                 app.kubernetes.io/name: cert-manager
                 app.kubernetes.io/component: controller
+      delegate_to: localhost
+
+    # mcp-hub (#178, docs/080-mcp-hub.md §7.4, §9.7): hand-written exposition on the Service port
+    # named `internal` (8084), /metrics, no token; never the public port 8083. No jobLabel, so the
+    # job label is the Service name `mcp-hub`, which the McpHub* rules in
+    # cluster/values/kube-prometheus-stack.yaml (homelab-mcp-hub) rely on. Flux deploys the hub; the
+    # scrape and its rules ship here, like data-service's. A future NetworkPolicy for the hub
+    # (#127) must admit monitoring -> apps:8084.
+    - name: Mcp-hub ServiceMonitor anlegen
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: mcp-hub
+            namespace: monitoring
+            labels:
+              release: kube-prometheus-stack
+          spec:
+            endpoints:
+              - port: internal
+                path: /metrics
+                interval: 30s
+            namespaceSelector:
+              matchNames:
+                - apps
+            selector:
+              matchLabels:
+                app: mcp-hub
       delegate_to: localhost
 
     # --- coroot-node-agent (NM-2, #118; docs/060-network-monitoring.md §6) ---

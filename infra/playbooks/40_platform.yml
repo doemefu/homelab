@@ -18,6 +18,11 @@
     platform_namespace: platform
     # helm_binary kommt aus group_vars/all.yml (zentralisiert, arch-kommentiert)
 
+  pre_tasks:
+    - name: Check that helm_binary is Helm 3 (#36)
+      ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
+      tags: [always]
+
   tasks:
     # --- Namespace ---
     - name: Platform Namespace anlegen
@@ -28,7 +33,15 @@
           kind: Namespace
           metadata:
             name: "{{ platform_namespace }}"
+            # Pod Security Admission #160, step 1: warn + audit only, nothing enforced (DEPLOYMENT.md
+            # "Pod Security Admission"). Bump the -version labels with the next k3s minor.
+            labels:
+              pod-security.kubernetes.io/warn: baseline
+              pod-security.kubernetes.io/warn-version: v1.32
+              pod-security.kubernetes.io/audit: baseline
+              pod-security.kubernetes.io/audit-version: v1.32
       delegate_to: localhost
+      tags: [cloudflared]
 
     # --- cert-manager ---
     - name: Jetstack Helm Repo hinzufügen
@@ -46,6 +59,7 @@
           - update
       delegate_to: localhost
       changed_when: false
+      tags: [cloudflared]
 
     - name: Cert-manager deployen
       kubernetes.core.helm:
@@ -65,6 +79,7 @@
       ansible.builtin.pause:
         seconds: 15
 
+    # diff: false — a --diff run would otherwise print the old and new token if the live Secret drifted.
     - name: Cloudflare API Token Secret anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -78,6 +93,7 @@
           stringData:
             api-token: "{{ cloudflare_api_token }}"
       delegate_to: localhost
+      diff: false
 
     - name: ClusterIssuer letsencrypt-staging anlegen
       kubernetes.core.k8s:
@@ -124,12 +140,17 @@
       delegate_to: localhost
 
     # --- cloudflared ---
+    # Tag cloudflared (#322, also on the namespace and helm repo update tasks above): `--tags cloudflared` deploys the
+    # two replicas and their placement without the tunnel ingress PUT, the restart task or the Traefik values
+    # (DEPLOYMENT.md "Cloudflare Tunnel → Replicas and placement").
+    # Never run this playbook with -v: the helm module's result includes the release values, i.e. the tunnel token.
     - name: Cloudflare Helm Repo hinzufügen
       kubernetes.core.helm_repository:
         name: cloudflare
         repo_url: https://cloudflare.github.io/helm-charts
         binary_path: "{{ helm_binary }}"
       delegate_to: localhost
+      tags: [cloudflared]
 
     - name: Cloudflared deployen
       kubernetes.core.helm:
@@ -147,6 +168,62 @@
         wait: true
         wait_timeout: "3m"
       delegate_to: localhost
+      tags: [cloudflared]
+
+    # Guards manual drains and other eviction-API callers only; nothing in infra/ drains nodes.
+    - name: Cloudflared PodDisruptionBudget (one replica survives a voluntary eviction)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: policy/v1
+          kind: PodDisruptionBudget
+          metadata:
+            name: cloudflared
+            namespace: "{{ platform_namespace }}"
+          spec:
+            minAvailable: 1
+            selector:
+              matchLabels:
+                pod: cloudflared
+      delegate_to: localhost
+      tags: [cloudflared]
+
+    # Chart 0.1.2 renders no affinity or readinessProbe, so they are patched onto its Deployment (strategic merge;
+    # Helm's three-way merge keeps them on later upgrades, like the restartedAt annotation below).
+    # - required anti-affinity: never two replicas on one node, so one node's k3s restart leaves a supervised one;
+    # - readinessProbe /ready (200 only with an edge connection) + minReadySeconds: with the default RollingUpdate
+    #   (2 replicas: maxSurge 1, maxUnavailable 0) an old pod is removed only after a new one holds a connection.
+    # A pod-template change therefore needs a third schedulable node. No wait: this task returns before the rollout
+    # replaces the replica that may carry the operator's off-LAN SSH session. Keep it the last cloudflared-tagged task.
+    - name: Cloudflared replicas on different nodes, Ready only with an edge connection
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: cloudflared-cloudflare-tunnel-remote
+            namespace: "{{ platform_namespace }}"
+          spec:
+            minReadySeconds: 10
+            template:
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      - labelSelector:
+                          matchLabels:
+                            pod: cloudflared
+                        topologyKey: kubernetes.io/hostname
+                containers:
+                  - name: cloudflared
+                    readinessProbe:
+                      httpGet:
+                        path: /ready
+                        port: 2000
+                      periodSeconds: 5
+      delegate_to: localhost
+      tags: [cloudflared]
 
     - name: CF Ingress-Konfiguration als Variable setzen
       ansible.builtin.set_fact:
@@ -157,6 +234,16 @@
                 service: "ssh://192.168.1.61:22"
               - hostname: "grafana.furchert.ch"
                 service: "http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80"
+              # auth-service admin API (/api/v1/*), Swagger UI and OpenAPI documents are internal-only (#306): their
+              # callers (furchert-ch /dashboard/auth, data-service login-event pull) use the in-cluster Service URL,
+              # so the public tunnel answers 404. First match wins, hence this rule stays BEFORE the auth entry.
+              # Prefix match, case-insensitive, repeated slashes. The OIDC/OAuth paths (/oauth2/*, /.well-known/*,
+              # /userinfo, /connect/*, /login, /error, /actuator/health) are not matched. Defence in depth only:
+              # auth-service's own authorization remains the control. A future external API consumer
+              # (auth-service Epic #34) needs this rule revisited.
+              - hostname: "auth.furchert.ch"
+                path: "(?i)^/+(api/+v1|swagger-ui|(v3/+)?api-docs)([^a-z0-9_-]|$)"
+                service: "http_status:404"
               - hostname: "auth.furchert.ch"
                 service: "http://auth-service.apps.svc.cluster.local:8080"
               - hostname: "device.furchert.ch"
@@ -228,14 +315,18 @@
             name: traefik
             namespace: kube-system
           spec:
+            # Traefik chart 39 (bundled since k3s v1.32.13+k3s1) moved the redirect under
+            # ports.web.http and rejects unknown keys in ports.*; chart 34 (k3s v1.32.2)
+            # read ports.web.redirections instead.
             valuesContent: |
               ports:
                 web:
-                  redirections:
-                    entryPoint:
-                      to: websecure
-                      scheme: https
-                      permanent: true
+                  http:
+                    redirections:
+                      entryPoint:
+                        to: websecure
+                        scheme: https
+                        permanent: true
                 metrics:
                   port: 9101
                   exposedPort: 9101

@@ -104,7 +104,7 @@ Internet
 - Scheduled MQTT commands (light, nightlight, rain automation)
 - WebSocket broadcast (STOMP, live device state to frontend)
 - Device control REST endpoint (manual toggle -> MQTT publish)
-- Schedules REST CRUD (planned: device-service#41)
+- Schedules REST CRUD (device-service#41)
 
 **Does NOT:**
 - Handle user authentication or user CRUD
@@ -114,7 +114,7 @@ Internet
 **InfluxDB:** Write-only (sensor measurements)
 **MQTT:** Full client (subscribe + publish)
 
-**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reconciles from its own `schedules` table on a periodic fixed delay (`app.scheduler.poll-interval`, shipped at 60s); once the CRUD API lands (device-service#41), CRUD writes will re-register the affected task directly in-process — no cross-service polling or HTTP notification needed now that device-service owns both the table and the REST API. The periodic reconciliation stays in place as a fallback safety net for out-of-band DB edits, not as the primary change-propagation path.
+**Key design decision:** This is a long-running, stateful service. It maintains persistent MQTT connections and in-process scheduled tasks. Restarting this service briefly disconnects from MQTT but reconnects automatically. The scheduling engine reconciles from its own `schedules` table on a periodic fixed delay (`app.scheduler.poll-interval`, shipped at 60s); since the CRUD API landed (device-service#41), CRUD writes re-register the affected task directly in-process — no cross-service polling or HTTP notification needed now that device-service owns both the table and the REST API. The periodic reconciliation stays in place as a fallback safety net for out-of-band DB edits, not as the primary change-propagation path.
 
 ### data-service
 
@@ -329,12 +329,16 @@ CREATE TABLE devices (
 |--------|------|------|-------------|
 | GET | `/devices` | JWT | List all devices with current state |
 | GET | `/devices/{id}` | JWT | Single device state |
-| POST | `/devices/{id}/control` | JWT | Send control command (-> MQTT publish) |
+| POST | `/devices/{id}/control` | ADMIN | Send control command (-> MQTT publish); every non-GET request under `/devices/**` needs role ADMIN (device-service#81 interim, #115) |
+| POST | `/devices` | ADMIN | Register a device and provision its auth-service `client_credentials` client (device-service#62) |
+| DELETE | `/devices/{name}` | ADMIN | Delete a device and revoke its client (device-service#62) |
 | WS | `/ws` | JWT on STOMP `CONNECT` | STOMP WebSocket: the upgrade is open, the `CONNECT` frame must carry `Authorization: Bearer <access token>`; browser origins limited to `https://furchert.ch`; clients may only subscribe to destinations under `/topic/terrarium/` (broadcasts go to `/topic/terrarium/{deviceName}`) and may `SEND` only to `/app/**` (no handlers exist today); with auth on, `SUBSCRIBE` and `SEND` also require a session that passed `CONNECT`; the token is checked only at `CONNECT` (device-service#84, live since 2026-10-28 via device-service#105) |
-| GET | `/schedules` | JWT | List all schedules (planned: device-service#41) |
-| POST | `/schedules` | ADMIN | Create schedule (planned: device-service#41) |
-| PUT | `/schedules/{id}` | ADMIN | Update schedule (planned: device-service#41) |
-| DELETE | `/schedules/{id}` | ADMIN | Delete schedule (planned: device-service#41) |
+| GET | `/schedules[?device=]`, `/schedules/{id}` | JWT | List / read schedules (device-service#41) |
+| POST | `/schedules` | ADMIN | Create schedule (device-service#41) |
+| PUT | `/schedules/{id}` | ADMIN | Replace schedule (device-service#41) |
+| DELETE | `/schedules/{id}` | ADMIN | Delete schedule (device-service#41) |
+
+device-service validates `iss` and rejects ID tokens (`azp`) since device-service#115; `aud`/`typ` follow auth-service#101. Request and response bodies of `/devices` and `/schedules`: device-service `README.md` ("API Reference"); ADMIN means the `role` claim of a signed-in user's access token, so a proxy forwards the user's token.
 
 ### data-service (:8082)
 
@@ -406,7 +410,7 @@ Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 | InfluxDB writer | Telegraf (separate container) | device-service (direct, Telegraf removed) |
 | Scheduled tasks | schedules.json (static) | PostgreSQL table (runtime editable via REST) |
 | Database | MariaDB | PostgreSQL 17 |
-| Request logging | DB-backed (every request) | Application logs to stdout (collected by cluster) |
+| Request logging | DB-backed (every request) | Application logs to stdout (`kubectl logs`; no log collection pipeline yet) |
 | Repo structure | Monorepo | Multi-repo (one per service) |
 | Deployment | Docker Compose (7 containers) | K3s on Raspberry Pi (pods in apps namespace) |
 | TLS | Nginx + Certbot | Cloudflare Tunnel (TLS at edge) |
@@ -418,6 +422,6 @@ Fits comfortably on raspi5 (8GB) + raspi4 (4GB) with K3s overhead (~500Mi).
 
 1. **Refresh token strategy:** DB-backed (revocable) vs. signed JWT (stateless). Recommend DB-backed for revocability.
 2. **Schedule change notification (resolved 2026-09-01, ADR 0001):** No longer an open decision — device-service is both schedule owner and executor, so CRUD writes (device-service#41) re-register the affected task directly in-process. The shipped 60s periodic reconciliation (`SchedulerService`, `app.scheduler.poll-interval`) remains only as a fallback safety net for out-of-band DB edits, not as the primary change-propagation mechanism.
-3. **WebSocket authentication (resolved 2026-10-28, device-service#84; live since 2026-10-28, device-service#105):** JWT required. The `/ws` upgrade stays open because browsers cannot send an `Authorization` header on it; the STOMP `CONNECT` frame must carry `Authorization: Bearer <access token>`, validated by the same resource-server decoder as the REST API (issuer/audience checks follow with device-service#81). Browser origins are limited to `app.websocket.allowed-origins` (env `APP_WEBSOCKET_ALLOWED_ORIGINS`, default `https://furchert.ch`), `SUBSCRIBE` to `/topic/terrarium/**`, and client `SEND` only to `/app/**` (no handlers exist today). With auth on, `SUBSCRIBE` and `SEND` also require an authenticated session, i.e. a successful `CONNECT`. Clients may not send server-side frames (`MESSAGE`, `RECEIPT`, `ERROR`, `CONNECTED`); these are rejected regardless of the auth switch. Residual risk (accepted): the JWT is validated only at `CONNECT`, so an open session keeps receiving broadcasts after the token's `exp` until it disconnects; the stream is read-only and clients cannot publish (see the device-service README, § WebSocket). Kill switch `APP_WEBSOCKET_REQUIRE_AUTH=false`, set via a PR to `k8s/deployment.yaml` because Flux reverts `kubectl set env`. The security audit (2026-09-24) found `/ws` internet-reachable via `device.furchert.ch` with no authentication, which outweighs the earlier "read-only, so unauthenticated is acceptable" argument.
+3. **WebSocket authentication (resolved 2026-10-28, device-service#84; live since 2026-10-28, device-service#105):** JWT required. The `/ws` upgrade stays open because browsers cannot send an `Authorization` header on it; the STOMP `CONNECT` frame must carry `Authorization: Bearer <access token>`, validated by the same resource-server decoder as the REST API (issuer check and ID-token rejection since device-service#115; audience/`typ` checks follow with device-service#81 / auth-service#101). Browser origins are limited to `app.websocket.allowed-origins` (env `APP_WEBSOCKET_ALLOWED_ORIGINS`, default `https://furchert.ch`), `SUBSCRIBE` to `/topic/terrarium/**`, and client `SEND` only to `/app/**` (no handlers exist today). With auth on, `SUBSCRIBE` and `SEND` also require an authenticated session, i.e. a successful `CONNECT`. Clients may not send server-side frames (`MESSAGE`, `RECEIPT`, `ERROR`, `CONNECTED`); these are rejected regardless of the auth switch. Residual risk (accepted): the JWT is validated only at `CONNECT`, so an open session keeps receiving broadcasts after the token's `exp` until it disconnects; the stream is read-only and clients cannot publish (see the device-service README, § WebSocket). Kill switch `APP_WEBSOCKET_REQUIRE_AUTH=false`, set via a PR to `k8s/deployment.yaml` because Flux reverts `kubectl set env`. The security audit (2026-09-24) found `/ws` internet-reachable via `device.furchert.ch` with no authentication, which outweighs the earlier "read-only, so unauthenticated is acceptable" argument.
 4. **MQTT topic redesign:** Current topics follow `terra{n}/{sensor}/data` pattern. May be simplified or restructured during M2.
 5. **CI/CD pipeline:** GitHub Actions for building multi-arch images per service repo.

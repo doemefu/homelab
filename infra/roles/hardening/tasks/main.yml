@@ -42,32 +42,41 @@
     state: enabled
     logging: "on"
 
-- name: Fail2ban installieren
+# The jail reads sshd's journal (backend = systemd below), which needs the systemd Python
+# bindings. Ubuntu 24.04's fail2ban already depends on python3-systemd and its
+# defaults-debian.conf already sets backend = systemd; both are explicit here so the jail does
+# not hinge on distro defaults (no /var/log/auth.log needed).
+- name: Install fail2ban
   ansible.builtin.apt:
-    name: fail2ban
+    name:
+      - fail2ban
+      - python3-systemd
     state: present
 
-- name: Fail2ban — SSH jail aktivieren
+- name: Configure the fail2ban sshd jail
   ansible.builtin.copy:
     dest: /etc/fail2ban/jail.d/sshd.conf
     content: |
       [sshd]
-      enabled = true
-      port    = ssh
-      filter  = sshd
+      enabled  = true
+      backend  = systemd
+      port     = ssh
+      filter   = sshd
       maxretry = 5
       bantime  = 3600
       findtime = 600
+      ignoreip = {{ hardening_fail2ban_ignoreip | join(' ') }}
     owner: root
     group: root
     mode: "0644"
   notify: Restart fail2ban
 
-- name: Fail2ban aktivieren und starten
-  ansible.builtin.service:
+- name: Enable and start fail2ban
+  ansible.builtin.systemd_service:
     name: fail2ban
-    state: started
     enabled: true
+    masked: false
+    state: started
   ignore_errors: "{{ ansible_check_mode }}"
 
 - name: SSH-Hardening Drop-in anlegen
@@ -78,3 +87,42 @@
     group: root
     mode: "0600"
   notify: Reload sshd
+
+# fail2ban.service is Type=simple: `systemctl start` returns before the server has read its
+# configuration, so a server that exits right after (configuration error, missing Python module)
+# looked like a successful start and was "changed" on every run (#98). These checks run last, so
+# a broken fail2ban cannot hold back the sshd drop-in above. The configuration test records its
+# result instead of failing, so the flush below always runs the pending sshd reload, while the
+# "Restart fail2ban" handler skips a configuration that failed the test. The asserts then fail
+# the host; the diagnosis in DEPLOYMENT.md "fail2ban (#98)" names the cause.
+- name: Test the fail2ban configuration
+  ansible.builtin.command:
+    cmd: fail2ban-client --test
+  register: hardening_fail2ban_test
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Apply pending fail2ban and sshd restarts before the check
+  ansible.builtin.meta: flush_handlers
+
+- name: Assert that the fail2ban configuration is valid
+  ansible.builtin.assert:
+    that:
+      - hardening_fail2ban_test.rc == 0
+    fail_msg: >-
+      fail2ban-client --test failed, so fail2ban was not restarted. Fix the configuration, run
+      `sudo systemctl restart fail2ban` once (the skipped restart is not repeated) and re-run:
+      {{ hardening_fail2ban_test.stdout | default('') }} {{ hardening_fail2ban_test.stderr | default('') }}
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Verify that fail2ban runs the sshd jail
+  ansible.builtin.command:
+    cmd: fail2ban-client status sshd
+  register: hardening_fail2ban_status
+  retries: 20
+  delay: 3
+  until: hardening_fail2ban_status.rc == 0
+  changed_when: false
+  when: not ansible_check_mode

@@ -24,15 +24,9 @@
 # Hintergrund: cloudflare-tunnel-remote 0.1.2 nutzt token-basiertes Setup ("locally configured
 # tunnel") — Ingress kann nicht via Helm Values gesteuert werden, nur via API.
 #
-# Aktuelle Ingress-Regeln (Single Source of Truth: infra/playbooks/40_platform.yml):
-#   - hostname: ssh.furchert.ch     → ssh://192.168.1.61:22  (raspi5 SSH)
-#   - hostname: grafana.furchert.ch → http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
-#   - hostname: auth.furchert.ch    → http://auth-service.apps.svc.cluster.local:8080
-#   - hostname: device.furchert.ch  → http://device-service.apps.svc.cluster.local:8081
-#   - hostname: n8n.furchert.ch     → http://n8n.apps.svc.cluster.local:80
-#   - hostname: ai.furchert.ch      → http://litellm.apps.svc.cluster.local:4000
-#   - service:  http_status:404     (Fallback — alle anderen Anfragen)
-# Bei Drift: 40_platform.yml ist authoritativ — diesen Kommentar entsprechend nachziehen.
+# Current ingress rules: the single source of truth is `cf_ingress_body` in
+# infra/playbooks/40_platform.yml (every public hostname → its cluster Service, ssh.furchert.ch →
+# raspi5:22, `http_status:404` last). The list is deliberately not copied here, so it cannot drift.
 #
 # Neuen Service hinzufügen: Ingress-Liste in 40_platform.yml ergänzen,
 # dann ansible-playbook infra/playbooks/40_platform.yml ausführen.
@@ -42,8 +36,15 @@
 image:
   tag: "2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39"  # pinned — never latest
 
-replicaCount: 1
+# Two replicas of the same tunnel (same token; Cloudflare allows up to 25 per tunnel, #322): cloudflared also carries
+# ssh.furchert.ch, the only off-LAN way in, so one node's k3s restart must never leave the tunnel without a running,
+# supervised replica. Chart 0.1.2's Deployment template renders only replicaCount, image, podAnnotations, podLabels
+# and the token — it ignores resources, affinity, nodeSelector, tolerations and the security contexts below/in its
+# values. The pod anti-affinity (one replica per node), readinessProbe, minReadySeconds and the PodDisruptionBudget
+# are therefore set by 40_platform.yml (tag cloudflared); drop that patch task once a chart version renders them.
+replicaCount: 2
 
+# NOTE: not rendered by chart 0.1.2 (see above) — the pods currently run without requests/limits (#323).
 resources:
   requests:
     cpu: 10m

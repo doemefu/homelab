@@ -41,10 +41,20 @@
     mode: "0644"
   notify: Restart multipathd
 
-- name: Multipathd Service-Status prüfen (nur restarten wenn aktiv)
+# multipathd.service has ConditionKernelCommandLine=!multipath=off. On nodes booted with
+# multipath=off (the Raspberry Pis) systemd skips every start, so `state: started` retried the start
+# and reported changed on every run (#336). Keep it enabled everywhere; start it only where the kernel
+# allows it (MacBooks).
+- name: Enable multipathd
+  ansible.builtin.service:
+    name: multipathd
+    enabled: true
+  failed_when: false
+
+- name: Start multipathd unless the kernel command line has multipath=off
   ansible.builtin.service:
     name: multipathd
     state: started
-    enabled: true
   failed_when: false
   register: longhorn_prereqs_multipathd_status
+  when: "'off' not in ([ansible_facts['proc_cmdline']['multipath'] | default([])] | flatten)"

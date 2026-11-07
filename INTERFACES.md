@@ -33,6 +33,8 @@ This document defines all **integration interfaces** this infrastructure platfor
 | `homeassistant` | Ansible/Helm | Home Assistant only | Any non-HA workloads |
 | `flux-system` | Flux CD | Flux controllers only | Any application workloads |
 
+Pod Security Admission (#160): `platform`, `monitoring`, `apps` and `homeassistant` carry `warn` + `audit` labels for the `baseline` profile (nothing enforced yet); new workloads in `apps` and `platform` must stay baseline-clean (DEPLOYMENT.md "Pod Security Admission").
+
 > **Do not create namespaces outside this list** without explicit approval (CLAUDE.md non-negotiable).
 
 ---
@@ -83,7 +85,7 @@ To expose a new service publicly via Cloudflare Tunnel:
 
 4. **Verify** the pod restarts and shows the new hostname in logs:
    ```bash
-   kubectl -n platform logs -l app=cloudflared-cloudflare-tunnel-remote | tail -20
+   kubectl -n platform logs -l pod=cloudflared --prefix | tail -20
    kubectl -n platform get pods -w
    ```
 
@@ -105,7 +107,7 @@ All services are discoverable via Kubernetes internal DNS.
 
 | Service | FQDN | Port | Metrics Port | Authentication | Notes |
 |---------|------|------|---------------|----------------|-------|
-| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171; excluded from the app-data dumps by design) |
+| PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171; excluded from the app-data dumps by design). `59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service` and `mcp_hub` (#163): only the owning role (and superusers) can connect; a new app database must be added to that task |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
 | Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |
@@ -122,6 +124,8 @@ All services are discoverable via Kubernetes internal DNS.
 | data-service | `data-service.apps.svc.cluster.local` | 8082 | Analytical data plane (ADR 0002): network-telemetry read API `/api/netmon/*` (JWT with `SCOPE_netmon:read` **and** `sub` in `netmon.api.allowed-clients`, default `furchert-ch`; `ROLE_ADMIN` not accepted in v1 — 060 §7.5), cluster-internal only — no tunnel route; contract `docs/060-network-monitoring.md` |
 | mcp-hub | `mcp-hub.apps.svc.cluster.local` | 8083 (MCP), 8084 (health/metrics, internal) | Read-only mail and calendar tools for Claude; resource server for auth-service tokens (audience `https://mcp.furchert.ch/mcp`, scopes `mail:read calendar:read`); contract `docs/080-mcp-hub.md` |
 
+**data-service inbound** (NetworkPolicy `apps/data-service`, `cluster/apps/data-service/networkpolicy.yaml`, #127): TCP 8082 only from the furchert-ch pods (`app: furchert-ch`) and the kube-prometheus-stack Prometheus pods; node-local traffic (kubelet probes, `kubectl port-forward`) is always admitted. A new caller of data-service (for example the planned historical sensor API) needs this policy extended in the same change.
+
 **data-service outbound destinations** (`docs/060-network-monitoring.md` §10): `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`, plus cluster-internal auth-service (:8080), Prometheus (`kube-prometheus-stack-prometheus.monitoring`:9090) and PostgreSQL (:5432). Blocklists are fetched only by data-service.
 
 **mcp-hub outbound destinations** (`docs/080-mcp-hub.md` §9.7): `imap.mail.me.com:993`, `caldav.icloud.com:443` and its `pNN-caldav.icloud.com:443` partition hosts (#170); Gmail IMAP `imap.gmail.com:993` (#172); `graph.microsoft.com:443`, `login.microsoftonline.com:443` (#171); the university's published-calendar host only if #173 uses a published calendar; cluster-internal auth-service (:8080, JWKS) and PostgreSQL (:5432, database `mcp_hub`). No NetworkPolicy yet (homelab#127).
@@ -132,7 +136,7 @@ All services are discoverable via Kubernetes internal DNS.
 |---------|------|------|----------|
 | Traefik metrics | `traefik.kube-system.svc.cluster.local` | 9101 | `kube-system` |
 | cert-manager | `cert-manager.platform.svc.cluster.local` | 9402 | `platform` |
-| cloudflared | `cloudflared-cloudflare-tunnel-remote.platform.svc.cluster.local` | - | `platform` |
+| cloudflared | no Service — Deployment `cloudflared-cloudflare-tunnel-remote` (chart `cloudflare-tunnel-remote` 0.1.2 renders only a Deployment, a Secret and a ServiceAccount; the connector only dials out) | - | `platform` |
 
 ---
 
@@ -165,6 +169,7 @@ All services are discoverable via Kubernetes internal DNS.
 - Client Secret: `LITELLM_OIDC_CLIENT_SECRET` (from `litellm-secrets`)
 - PKCE: Required (`GENERIC_CLIENT_USE_PKCE: true`)
 - Callback: `https://ai.furchert.ch/sso/callback` (via `PROXY_BASE_URL`)
+- Roles: from the userinfo claim `role` on every login — `ADMIN` → `proxy_admin`, anything else → `internal_user_viewer` (`GENERIC_ROLE_MAPPINGS_*`, DEPLOYMENT.md "SSO roles")
 
 ### Auth Service (Public: `https://auth.furchert.ch`, Internal: `http://auth-service.apps.svc.cluster.local:8080`)
 
@@ -176,6 +181,8 @@ All services are discoverable via Kubernetes internal DNS.
 | `https://auth.furchert.ch/oauth2/authorize` | Authorization endpoint |
 | `https://auth.furchert.ch/oauth2/token` | Token endpoint |
 | `https://auth.furchert.ch/userinfo` | UserInfo endpoint |
+
+**Internal only** (#306): the tunnel answers `404` for the admin API `/api/v1/*`, the Swagger UI and the OpenAPI documents on `auth.furchert.ch`. Callers use the internal URL (furchert-ch `/dashboard/auth`, data-service login-event pull) or a `kubectl port-forward` (DEPLOYMENT.md "Internal-only paths on public hosts").
 
 **Registered OIDC Clients** (from `59_app_services.yml`):
 - `n8n` — for n8n SSO
@@ -495,6 +502,7 @@ data-service's egress collector (`docs/060` §4.6). Alerts: `NetmonNewExternalDe
 
 | Target | ServiceMonitor | Port / path | Alert rules | Source |
 |--------|----------------|-------------|-------------|--------|
+| mcp-hub (`apps`) | `monitoring/mcp-hub` (job `mcp-hub`) | `internal` (8084) `/metrics`, 30 s, no auth; never the public port 8083 | `homelab-mcp-hub` group: `McpHubAccountAuthExpired` (30 min), `McpHubDown` (10 min); families and label enums in `docs/080-mcp-hub.md` §9.7 | ServiceMonitor in `41_monitoring.yml`; rules in `additionalPrometheusRulesMap.homelab-mcp-hub` (#178) |
 | cert-manager controller (`platform`) | `monitoring/cert-manager` (job `cert-manager`, `honorLabels`) | `tcp-prometheus-servicemonitor` (9402) `/metrics`, 60 s | `homelab-platform` group: `CertManagerCertificateExpiringSoon` (< 14 d), `CertManagerCertificateNotReady`, `CertManagerDown` | ServiceMonitor in `41_monitoring.yml`; rules in `additionalPrometheusRulesMap.homelab-platform` (#284) |
 | Flux objects (`flux-system`) | none: kube-state-metrics custom-resource-state (`kube-state-metrics.customResourceState`) | `gotk_resource_info{namespace, name, customresource_kind, ready, suspended}`, one series per Kustomization, GitRepository, OCIRepository, HelmRepository, HelmRelease, ImageRepository, ImagePolicy, ImageUpdateAutomation | `FluxReconciliationFailed`, `FluxResourceMetricsMissing` | `cluster/values/kube-prometheus-stack.yaml` (#284) |
 | Workloads in `apps`, `platform`, `flux-system` | none: kube-state-metrics | `kube_deployment_*`, `kube_statefulset_*` | `WorkloadUnavailable` (0 available/ready while spec > 0, 5 min), `WorkloadMissing` (named Deployments/StatefulSets absent, 15 min). **Contract:** the names in `WorkloadMissing` (auth-service, device-service, furchert-ch, data-service, mcp-hub, litellm, n8n, open-webui, mosquitto, cloudflared-cloudflare-tunnel-remote, postgresql, influxdb2, and the Flux controllers source-, kustomize-, helm-, notification-, image-reflector- and image-automation-controller in `flux-system`) must follow a rename in the owning repo, playbook or Flux bundle | `additionalPrometheusRulesMap.homelab-platform` (#284) |
@@ -510,7 +518,8 @@ as a normal node-exporter series.
 
 | Producer | File | Metrics |
 |----------|------|---------|
-| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds` |
+| `homelab-backup.sh` on raspi5 (`infra/roles/storage`) | `homelab-backup.prom` | `homelab_backup_exit_code`, `homelab_backup_duration_seconds`, `homelab_backup_last_success_timestamp_seconds`, `homelab_backup_integrity_check_failed` (1 = a nightly `restic check` failed and was not cleared, #301) |
+| `homelab-backup-mark` on raspi5 (`infra/roles/storage`), called over SSH by `scripts/backup-app-data.sh` and `scripts/copy-restic-repo.sh` | `homelab-backup-offnode.prom` | `homelab_backup_offnode_last_success_timestamp_seconds{kind="app-data"\|"restic-copy"}` (node clock, 0 = never, #301) |
 | `homelab-netmon-collect` on every node (`infra/roles/netmon_node`) | `homelab_netmon.prom` | see "Node textfile metrics (NM-3)" below |
 
 Write the file atomically (temp file in the same directory, then `mv`); a partially written file
@@ -529,6 +538,7 @@ makes node-exporter discard the whole directory and set `node_textfile_scrape_er
 | `homelab_netmon_last_success_timestamp_seconds` | `node` | staleness (`NetmonNodeScriptStale`) |
 | `homelab_netmon_truncated_series` | `node`, `metric` | cap overflow (`NetmonSeriesTruncated`) |
 | `homelab_k3s_state_db_bytes` | `node` (raspi5 only) | kine `state.db` + WAL bytes (`K3sDatastoreLarge` > 500 MB, `K3sDatastoreSizeMissing`); not read by data-service (#150) |
+| `homelab_k3s_kine_compaction_lag_revisions` | `node` (raspi5 only) | kine `MAX(id) - compact_rev_key`, read-only SQLite read (`K3sKineCompactionLagging` > 50k for 2 h, `K3sKineCompactionLagMissing`); not read by data-service (#129) |
 
 `src_ip` is a LAN IP verbatim, the literal `10.42.0.0/16` for pod IPs, a public IP verbatim (UFW/sshd only) or `other`. The `node` label is the Ansible inventory hostname; node-exporter's ServiceMonitor keeps it (`honorLabels: true`).
 

@@ -1,0 +1,95 @@
+# Managed by Ansible — do not edit manually
+# kube-apiserver audit policy (homelab#158). Rules are evaluated top to bottom and the first
+# match wins. Nothing is logged above level Metadata, so request and response bodies (Secret
+# values, tokens) never reach the log. The None rules drop the high-volume, low-value traffic
+# (leader-election leases are ~80 % of all API writes, homelab#129) to keep writes to raspi5's
+# SD card small; retention is set on the apiserver flags in k3s-server.service.j2.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  # 1. Health, metrics, discovery and OpenAPI endpoints.
+  - level: None
+    nonResourceURLs:
+      - "*"
+
+  # 2. Leases, events and the authn/authz reviews kubelets and controllers send constantly.
+  - level: None
+    resources:
+      - group: coordination.k8s.io
+        resources: ["leases"]
+      - group: ""
+        resources: ["events"]
+      - group: events.k8s.io
+        resources: ["events"]
+      - group: authentication.k8s.io
+        resources: ["tokenreviews"]
+      - group: authorization.k8s.io
+        resources: ["subjectaccessreviews", "selfsubjectaccessreviews"]
+
+  # 3. Status heartbeats written by kubelets and controllers.
+  - level: None
+    verbs: ["update", "patch"]
+    resources:
+      - group: ""
+        resources: ["nodes/status", "pods/status"]
+      - group: apps
+        resources: ["*/status"]
+      - group: batch
+        resources: ["*/status"]
+      - group: longhorn.io
+        resources: ["*/status"]
+      - group: helm.cattle.io
+        resources: ["*/status"]
+      - group: cert-manager.io
+        resources: ["*/status"]
+      - group: acme.cert-manager.io
+        resources: ["*/status"]
+      - group: monitoring.coreos.com
+        resources: ["*/status"]
+      - group: source.toolkit.fluxcd.io
+        resources: ["*/status"]
+      - group: kustomize.toolkit.fluxcd.io
+        resources: ["*/status"]
+      - group: helm.toolkit.fluxcd.io
+        resources: ["*/status"]
+      - group: image.toolkit.fluxcd.io
+        resources: ["*/status"]
+      - group: notification.toolkit.fluxcd.io
+        resources: ["*/status"]
+
+  # 4. Kubelet reads (one watch per Secret/ConfigMap a pod mounts, re-opened every few minutes).
+  - level: None
+    userGroups: ["system:nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # 5. Secrets and service-account tokens: who read or changed which one (never the value).
+  #    Kubelet reads are already dropped by rule 4.
+  - level: Metadata
+    omitStages: ["ResponseStarted"]
+    resources:
+      - group: ""
+        resources: ["secrets", "serviceaccounts/token"]
+
+  # 6. Interactive access into workloads and nodes, and container logs (may contain secrets).
+  #    Keeps ResponseStarted so a long exec/attach/port-forward session is logged when it opens.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources:
+          - pods/exec
+          - pods/attach
+          - pods/portforward
+          - pods/proxy
+          - pods/log
+          - services/proxy
+          - nodes/proxy
+
+  # 7. All other reads.
+  - level: None
+    verbs: ["get", "list", "watch"]
+
+  # 8. Everything else (create, update, patch, delete, deletecollection): metadata only.
+  - level: Metadata
+    omitStages: ["ResponseStarted"]

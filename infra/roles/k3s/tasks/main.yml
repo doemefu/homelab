@@ -13,7 +13,29 @@
     owner: root
     group: root
     force: true
+    checksum: "sha256:{{ k3s_binary_sha256[ansible_facts['architecture']] }}"
   when: k3s_version not in (k3s_installed_version.stdout | default(''))
+  notify: Restart k3s
+
+- name: K3s Konfigurationsverzeichnis anlegen
+  ansible.builtin.file:
+    path: "{{ k3s_kubeconfig_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# homelab#156: the join token lives in a root-only file instead of an Environment= line in
+# the world-readable unit. no_log + diff: false keep it out of the playbook output and diffs.
+- name: Write the k3s join token file
+  ansible.builtin.copy:
+    content: "{{ k3s_token }}\n"
+    dest: "{{ k3s_token_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
   notify: Restart k3s
 
 - name: Server-Tasks ausführen

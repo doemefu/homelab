@@ -23,17 +23,13 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: open-webui
-          # Pinned version: v0.11.4 (released 2026-09-21; Dependabot PR #144). OCI index digest
-          # sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f verified
-          # 2026-10-14 via the GHCR anonymous-token API (linux/amd64 + linux/arm64 entries).
-          # Security bump: v0.11.3 (live since 2026-09-09) is affected by 19 published advisories
-          # (4 high, e.g. GHSA-vpq8-f445-hcq7 session-token theft by any website,
-          # GHSA-f9xp-mfmq-x6cg session-token theft via DOCX preview); all 19 list v0.11.4 as
-          # patched and none affects v0.11.4 (GHSA API, 2026-10-14).
-          # Source: https://github.com/open-webui/open-webui/security/advisories . v0.12.0
-          # (2026-10-10) is a new minor — not adopted yet. Python 3.11 / pydantic / httpx unchanged
-          # since v0.10.2, so the club pipe function needs no change. Image still runs as UID 0
-          # (Dockerfile ARG UID=0) — the SECURITY DEVIATION block below remains valid.
+          # Pinned version: v0.13.0 (Dependabot PR #331, merged 2026-11-06). OCI index digest
+          # sha256:2272b0fb7c8783a016bcc179abb467cfa34590c99c5e6560fe0e9155b4820a09 verified
+          # 2026-11-06 (linux/amd64 + linux/arm64). Version history: Dependabot PRs #144 (v0.11.4),
+          # #207 (v0.12.2), #261 (v0.12.5), #331. v0.13.0 adds three alembic migrations (rollback =
+          # restore the pre-upgrade backup) and renames open_webui.utils.misc helpers (the club pipe
+          # does not import them). Python 3.12.16, user 0:0 (Dockerfile ARG UID=0) — the SECURITY
+          # DEVIATION block below remains valid.
           #
           # ┌─────────────────────────────────────────────────────────────────────────┐
           # │  SECURITY DEVIATION — CONTAINER RUNS AS ROOT (UID 0)                   │
@@ -53,7 +49,7 @@ spec:
           # │  docs/02 §11 (decision log) before Phase 1 close (AC-0.x pending).    │
           # │  Monitor upstream for a future release that ships non-root by default. │
           # └─────────────────────────────────────────────────────────────────────────┘
-          image: ghcr.io/open-webui/open-webui:v0.12.5@sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded
+          image: ghcr.io/open-webui/open-webui:v0.13.0@sha256:2272b0fb7c8783a016bcc179abb467cfa34590c99c5e6560fe0e9155b4820a09
           ports:
             - containerPort: 8080
           env:
@@ -92,6 +88,28 @@ spec:
                 secretKeyRef:
                   name: club-assistant-secrets
                   key: LITELLM_CLUB_KEY
+            # Pinned defaults (owner decision 2026-11-07, #342; see DEPLOYMENT.md "Open WebUI → Pinned
+            # defaults"). Limits sit above the pre-v0.13.0 values (256; sub-agents 20/20/30/30000)
+            # instead of v0.13.0's 1024 and unlimited.
+            - name: CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS
+              value: "512"
+            - name: SUBAGENTS_MAX_CONCURRENT
+              value: "30"
+            - name: SUBAGENTS_MAX_ASYNC
+              value: "30"
+            - name: SUBAGENTS_MAX_ITERATIONS
+              value: "50"
+            - name: SUBAGENTS_MAX_OUTPUT # characters
+              value: "50000"
+            - name: ENABLE_NOTIFICATIONS
+              value: "false"
+            - name: ENABLE_COMMENTS
+              value: "false"
+            # Default "*". Also sets the socket.io allowed origins: a browser page on any other origin
+            # gets no CORS headers and its socket.io connection is refused (400). Requests without an
+            # Origin header (server-side callers) are not checked.
+            - name: CORS_ALLOW_ORIGIN
+              value: "https://club.furchert.ch"
           # The v0.11.0/v0.11.1 regressions noted here earlier (Admin > Models toggle deleting a model,
           # open-webui#29036; Workspace > Knowledge page hang, #29104) were fixed in v0.11.2 (2026-08-31).
           # Source: https://github.com/open-webui/open-webui/releases/tag/v0.11.2
