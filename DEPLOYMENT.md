@@ -1870,10 +1870,18 @@ default or name that changes in a future version.
 
 Playbook 52 patches the live Deployment (strategic merge), which adds env entries but never removes
 one. After the first 52 run with this manifest the live pod still carries the old `WEBHOOK_URL` next to
-`N8N_WEBHOOK_URL` (same value, harmless, n8n prefers the new one). Drop it once afterwards, which
-restarts n8n again: `kubectl -n apps set env deployment/n8n WEBHOOK_URL-`. Never drop it before 52 has
-added `N8N_WEBHOOK_URL`: with neither set, n8n builds webhook URLs as `https://n8n.furchert.ch:5678/`
-and re-registers external webhooks (Telegram) with that URL.
+`N8N_WEBHOOK_URL` (same value, harmless, n8n prefers the new one). Keeping both works.
+
+Optional cleanup (removes the deprecation warning, costs one more n8n restart of about 4 min). First
+confirm that `N8N_WEBHOOK_URL` is live; the command must print `https://n8n.furchert.ch/`:
+
+```bash
+kubectl -n apps get deploy n8n -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="N8N_WEBHOOK_URL")].value}'
+kubectl -n apps set env deployment/n8n WEBHOOK_URL-   # only after the check above printed the URL
+```
+
+Never drop `WEBHOOK_URL` before 52 has added `N8N_WEBHOOK_URL`: with neither set, n8n builds webhook
+URLs as `https://n8n.furchert.ch:5678/` and re-registers external webhooks (Telegram) with that URL.
 
 ---
 
@@ -1911,7 +1919,8 @@ Accepted defaults (owner decision 2026-11-07):
   with native function calling, the model can save a workspace Python tool, and saving runs the module on
   the server (the container runs as UID 0, see the SECURITY DEVIATION block in the manifest).
 - **The workspace-tools user permission stays off** (`USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS`, default
-  `false`), so only admins can create tools this way.
+  `false`), so only admins (and members of a group granted Workspace → Tools access) can create tools
+  this way.
 
 ---
 
