@@ -1,6 +1,6 @@
 # 060 — Network Monitoring: Cross-Repo Contract
 
-> Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here (since homelab PR #126). Relative `adr/` links refer to the parent workspace's `docs/adr/` (not in this repo).
+> Canonical copy (infrastructure repo). The parent workspace file `docs/060-network-monitoring.md` forwards here (since homelab PR #126). ADR 0002 is in this repo's `docs/adr/`; ADR 0001 stays in the parent workspace.
 
 **Status:** NM-0…NM-4 live 2026-09-24 (coroot gate on all four nodes pending #167)
 **Epic:** `doemefu/homelab#114` · **ADR:** [`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)
