@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/100-web-analytics.md` forwards here (since homelab#349, WA-0). Relative `adr/` links resolve to `docs/adr/` in this repo. The specialist reports behind §15 are local-only and not part of this repo.
 
-**Status:** Accepted (rev 3.4, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.4 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
+**Status:** Accepted (rev 3.5, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.5 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
 **Epic:** `doemefu/homelab#348` · **Parent worklog:** `20261108-163648-web-analytics-epic-caea` (local-only)
 **Canonical location:** this file (`infrastructure/docs/100-web-analytics.md`). The parent workspace file `docs/100-web-analytics.md` is a forwarder (since `homelab#349`), following the `060` precedent.
 **ADR:** none new. [ADR 0002](adr/0002-network-telemetry-ownership.md) decisions 1 and 2 cover this (analytical data plane; one store, one owner); the push write path is a recorded exception to its decision 3 (§1.4); ADR 0002 carries the dated amendment of 2026-11-08 (WA-0).
@@ -122,7 +122,7 @@ No new tunnel route, hostname, NetworkPolicy, SOPS variable or Secret key.
 |---|---|---|
 | `TRACKED_PATHS` (`src/lib/analytics/paths.ts`) | keys of `PAGE_LAST_MODIFIED` minus `/imprint`, `/privacy` | test: full sitemap coverage except the legal pages, no `/dashboard` path |
 | `NAV_TARGETS` | `TRACKED_PATHS` ∪ {`/imprint`, `/privacy`, `/dashboard`} | anything else becomes `(other)` |
-| `TRACK_IDS` (`src/data/track-ids.ts`) | `cta`: exactly `FROM_IDS` plus new `about-contact`, `rowing-contact`; `link`: `home-hero-automation`, `home-hero-projects`, `home-tile-automation`, `home-tile-it`, `home-tile-projects`, `home-tile-rowing`, `it-automation`, `it-projects`, `about-projects`, `rowing-projects`, `automation-tile-example`, `automation-about-page`, `contact-automation`, `project-card-<slug>`, `project-back`; `faq`: the FAQ ids; `section`: §3.7 | ids `^[a-z0-9][a-z0-9-]{0,63}$`, total ≤ 100; source test for every `data-track` value |
+| `TRACK_IDS` (`src/data/track-ids.ts`) | `cta`: exactly `FROM_IDS` plus new `about-contact`, `rowing-contact`; `link`: `home-hero-automation`, `home-hero-about`, `home-tile-automation`, `home-tile-it`, `home-tile-projects`, `home-tile-rowing`, `it-automation`, `it-projects`, `about-projects`, `rowing-projects`, `automation-tile-example`, `automation-about-page`, `contact-automation`, `project-card-<slug>` (the five current project slugs; the `aemtlifyer` project was removed by furchert-ch #160), `project-back`; `faq`: the FAQ ids; `section`: §3.7 | ids `^[a-z0-9][a-z0-9-]{0,63}$`, total ≤ 100; source test for every `data-track` value |
 | FAQ ids (`src/data/automation-faqs.ts`) | `cost`, `fit`, `buy-self`, `adoption`, `swiss-german`, `monitoring`, `data-ch`, `copilot-payroll`, `access`, `student-time` | never index or question text |
 
 The redirects `/ki` and `/bau` (Q6) carry `utm_source=print&utm_medium=shortlink&utm_campaign=ki` and `utm_campaign=bau` respectively.
@@ -173,8 +173,8 @@ Order: `hero`, `so-arbeite-ich`, `beispiel`, `preise`, `daten`, `ueber-mich`, `f
 | Field | Source | Stored as |
 |---|---|---|
 | Path, locale | `usePathname()` | locale-free path + `de`/`en` |
-| Referrer | §3.4 | `referrerDomain` |
-| UTM | source, medium, campaign | normalised strings (§5.5) |
+| Referrer | §3.4 | `referrerDomain` (the client sends at most 64 characters; a longer host is sent as `null`) |
+| UTM | source, medium, campaign | normalised strings (§5.5); the client sends at most 64 characters per value, longer values are sent as `null` |
 | Viewport | `window.innerWidth`, mapped in the browser | `<480`, `480-767`, `768-1023`, `1024-1439`, `>=1440` |
 | Country | `CF-IPCountry` | ISO alpha-2 or `null` |
 | Device class, browser family, OS family | `User-Agent`, `Sec-CH-UA-Mobile`, `Sec-CH-UA-Platform` | enums without versions (§5.7) |
@@ -198,7 +198,7 @@ Order: `hero`, `so-arbeite-ich`, `beispiel`, `preise`, `daten`, `ueber-mich`, `f
 - `<Analytics />` (client) inside `<Providers>` in `src/app/[locale]/layout.tsx`, after `<Footer />`, outside `<main className="page-enter">`.
 - Client tracker: module singleton; `start()` idempotent; unmount never stops it; withdrawal, opt-out or sign-in call `stop()`.
 - **Server singletons:** forward queue, per-scope token caches and [WA-5] rate limiters on `globalThis[Symbol.for('furchert.analytics.<name>')]`, shared by `/api/v`, forget and the Server Action. Verify in phase 1 (WA-2b) with a production build.
-- Budget (gzip, enforced by a post-build CI step in furchert-ch): the consent layer is async-only (nothing of it in the initial or prerendered bundle) in one controller chunk: controller ≤ 2.75 KB, bar ≤ 1.0 KB, privacy link ≤ 0.75 KB. The tracker is async-only, one chunk, loaded via dynamic `import()` after Allow: measured size + 10 %, at most 6 KB. Post-build check with `node:zlib`.
+- Budget (gzip, enforced by a post-build CI step in furchert-ch): the consent layer is async-only (nothing of it in the initial or prerendered bundle) in one controller chunk: controller ≤ 3 200 B (re-baselined after the WA-2b growth), bar ≤ 1.0 KB, privacy link ≤ 0.75 KB. The tracker is async-only, one chunk, loaded via dynamic `import()` after Allow: measured size + 10 %, at most 4 265 B. Post-build check with `node:zlib`.
 - Pure `.ts` modules with injected `window`/`document`/clock (vitest `node`). `navigator.webdriver === true` → tracker off (cheap, early).
 
 ---
@@ -359,7 +359,7 @@ Steps 1 to 4 (body `{}`). **Never subject to the collect rate limits** (§5.8) a
 | Bot [WA-5] | empty UA, < 20 chars, or `/bot\|crawl\|spider\|slurp\|scrap\|fetch\|preview\|monitor\|uptime\|headless\|lighthouse\|pagespeed\|gtmetrix\|phantom\|selenium\|playwright\|puppeteer\|curl\|wget\|python\|httpx\|axios\|go-http\|java\/\|okhttp\|node-fetch\|undici\|libwww\|feed\|facebookexternalhit\|embedly\|whatsapp\|telegram\|discord\|slack\|bingpreview/i` |
 | `browserFamily` | `Edg/`, `EdgA/`, `EdgiOS/` → `edge`; `OPR/`, `Opera`, `SamsungBrowser` → `other`; `Firefox/`, `FxiOS` → `firefox`; `CriOS`, `Chrome/`, `Chromium` → `chrome`; `Version/…Safari/` → `safari`; else `other` |
 | `osFamily` | `iPhone`, `iPod`, `iPad` → `ios`; `Android` → `android`; `Windows` → `windows`; `Macintosh` → `macos`; `CrOS`, `Linux` → `linux`; else `other`; `Sec-CH-UA-Platform` wins |
-| `deviceClass` | `Sec-CH-UA-Mobile: ?1`, `Mobi`, `iPhone`, `iPod` → `mobile`; `iPad`, `Tablet`, `Android` without `Mobile` → `tablet`; desktop OS → `desktop`; else `other` |
+| `deviceClass` | `iPad`, `Tablet` → `tablet` (checked before `Mobi`, because the iPad Safari UA contains `Mobile/`); `Sec-CH-UA-Mobile: ?1`, `Mobi`, `iPhone`, `iPod` → `mobile`; `Android` without `Mobile` → `tablet`; desktop OS → `desktop`; else `other` |
 | `country` | `CF-IPCountry` if `^[A-Z]{2}$` and not `XX`/`T1`, else `null` |
 
 Raw UA and IP discarded after the request. Before WA-5, crawlers are filtered by consent itself (they do not click Allow) and by `navigator.webdriver`.
@@ -536,9 +536,9 @@ Partition keys break `event_id` dedupe; `ctid` batching is unsafe on partitioned
 | Enable gate | (1) homelab WA-3a PR (daily class + catch-all exclusion) merged; (2) the owner runs playbook `41_monitoring.yml`; (3) only then a follow-up data-service `k8s/deployment.yaml` change sets the environment variable `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED=true` (relaxed binding of the dashed property name works while the explicit YAML entry `netmon.collectors.webanalytics-rollup.enabled: false` is present; the form without separators does not; `SPRING_APPLICATION_JSON` is only an alternative), and the explicit `false` default in the committed YAML stays mandatory (env binding for the dashed collector name verified in WA-3a phase 1) | WA-3a |
 | Schedule | two daily runs, both `zone = "Europe/Zurich"` and through the same `CollectorRunner` (one lock, so they never overlap): **01:12** `@Scheduled(cron = "0 12 1 * * *")` (night run, §7.6) and **07:30** `@Scheduled(cron = "0 30 7 * * *")` (morning run, after yesterday closes at 07:15). 07:30 is clear of Longhorn 02:00, restic 03:00, `RetentionJob` (04:30/05:30), Longhorn trim 05:00 and blocklists (06:00/07:00); the mba1 scheduled reboot at 07:40 only happens after ≥ 3.5 days uptime and the run takes seconds, so an interrupted run is simply redone by the next night's lookback. It shares the minute mark with the 30-minute reputation and 5-minute Cloudflare collectors, which the scheduler pool (size 4) runs in parallel. Documented exception to "crons in UTC" | WA-3a |
 | Lock | `pg_try_advisory_xact_lock(hashtext('webanalytics-rollup'))` per day; a failed lock stops the whole run (warning and early return), it never skips a single day | WA-3a |
-| First run | no `rollup_day` rows yet: process yesterday only: at 01:12 as provisional; a first trigger at 07:30 does yesterday only if it is closed, otherwise nothing (zero rows + a `rollup_day` row when empty) | WA-3a |
+| First run | no `rollup_day` rows yet: process yesterday only (zero rows + a `rollup_day` row when empty). At 01:12 it is written as provisional; a first-ever trigger at 07:30 may also write yesterday as provisional (never served, finalised at the next 01:12) | WA-3a |
 | Selection | one `eligible(day, now)` predicate for every selection path (catch-up, lookback, backfill, finalisation); [WA-5] freeze-guard conditions hook in there. Candidate days come from a gap scan over `rollup_day` (missing or non-final days in [first rolled day, yesterday]); a day is final iff `now ≥ close(D)`, derived from the clock, not from a trigger or pass flag; at the morning slot the candidates are only closed non-final days. A failing day aborts the run; `now` is taken immediately before the window is loaded; each day is its own transaction. `collector_state.last_window_end` = the newest day of the all-final contiguous prefix (status display only), updated in the per-day transaction, so `/status` `lastWindowEnd` = `start(D + 1)` of that day | WA-3a |
-| Days per run | **01:12:** the last 2 complete days (yesterday provisional, the day before final), catch-up by the gap scan, up to 31 days with an outdated `definition_version`, newest first, within 30 days. **07:30:** every day that is closed but still has `final = false` (normally only yesterday), written as final | WA-3a |
+| Days per run | the Selection row governs: candidates are the missing or non-final days found by the gap scan, plus up to 31 days with an outdated `definition_version`, newest first, within 30 days. Normally that is yesterday (provisional) and the day before (final) at **01:12**, and at **07:30** every day that is closed but still has `final = false` (normally only yesterday), written as final | WA-3a |
 | Final vs provisional | a day D is **closed** once `start(D + 1) + 6 h` (visit cap) `+ 75 min` (60 min forward-queue age + 15 min clock-skew window) has passed, i.e. D + 1 at 07:15 Zurich time. A rollup of D before that writes `rollup_day.final = false` (provisional); a rollup after it writes `final = true`. The 01:12 run writes yesterday as provisional; the 07:30 run rewrites it as final the same morning. `lastCompleteDay` = the newest day with `final = true`; read endpoints serve only final days (provisional rows are not exposed). On DST-change days the close is computed in Europe/Zurich elapsed time and moves by ±1 h (06:15 on fall-back days, 08:15 on spring-forward days); on a spring-forward day the 07:30 run leaves yesterday provisional and the next 01:12 run finalises it. After 07:30 "data through" is therefore normally yesterday; between 00:00 and 07:30 it is the day before yesterday | WA-3a |
 | Empty days | always a `rollup_day` row, so `lastCompleteDay` advances | WA-3a |
 | Write mode | per day one transaction: DELETE the day from every rollup-owned table, then batch INSERT of the rows computed by the Java visit model (a documented deviation from INSERT … SELECT, because visits are built in Java; never `daily_ingest_stats`, `daily_enquiries`) | WA-3a |
@@ -552,7 +552,7 @@ Partition keys break `event_id` dedupe; `ctid` batching is unsafe on partitioned
 |---|---|---|
 | New vs returning | per visitor of D: `EXISTS (event with the same visitor_id and occurred_at < the visit's first pageview)` via index `(visitor_id, occurred_at)` | a visitor id lives ≤ 365 days, raw keeps 396 days, so every earlier event of a live id is still present for every day inside the 30-day recompute horizon |
 | First-known channel (converting visits) | per converting visitor of D: its earliest `landing = true` pageview (`min(occurred_at)`) and that pageview's referrer/UTM, classified with §8.4 | same bound as above |
-| Rolling uniques (`visitors_7d`, `visitors_28d`, `repeat_offer_viewers_28d`) | distinct visitors of NON-excluded visits starting in [start(D − 6), start(D + 1)) and [start(D − 27), start(D + 1)), from the same Java visit model as the day rollup (excluded visits only add to `excluded_visits`); repeat offer viewers rebuild visits over the 28-day window | ≤ 28 days back, always inside retention |
+| Rolling uniques (`visitors_7d`, `visitors_28d`, `repeat_offer_viewers_28d`) | distinct visitors of NON-excluded visits starting in [start(D − 6), start(D + 1)) and [start(D − 27), start(D + 1)), from the same Java visit model as the day rollup (excluded visits only add to `excluded_visits`); the 28-day figures are computed for every rolled day, from memoised per-day summaries; repeat offer viewers rebuild visits over the 28-day window | ≤ 28 days back, always inside retention |
 | `monthly_visitors` | distinct visitors of non-excluded visits over the current Zurich month (and the previous one on days 1 to 2), same visit model | ≤ 62 days back |
 
 Before WA-5 there is no retention, so these reads see all raw data; with the dark launch that is empty until go-live.
@@ -605,13 +605,13 @@ Re-evaluation: an id-free per-visit fact table is rejected (rare country + devic
 | `daily_group_path` | `(day, path_key)` | `visits`, `converting_visits` | 3b |
 | `daily_entry_exit` | `(day, entry_path, exit_path)` | `visits` | 3b |
 | `daily_intent_seen` | `(day, seen)` (`about`, `projects`, `prices`, `none`) | `visits` | 3b |
-| `daily_dimension` | `(day, dimension, value)` (`country`, `browser_family`, `os_family`, `viewport`, `visitor_type`) | `visits`, `engaged_visits`, `converting_visits` | 3b |
+| `daily_dimension` | `(day, dimension, value)` (`country`, `browser_family`, `os_family`, `viewport`, `visitor_type`) | `visits`, `engaged_visits` (no `converting_visits`: conversions per country, browser, OS or viewport kept forever could tie attributes to a named enquirer; WA-4b applies the §8.6 minimum of 3 to the dimension lists) | 3b |
 | `daily_cf_baseline` | `(day, path, locale)` | `requests`, `sampled` | 3b |
 | `daily_submits` | `(day)` = Zurich day of the goal event's `occurred_at` (submission day) | `consented_submits` (goal events, excluded visits included) | 3b |
 
-Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects/*`, `/about`; personal `/rowing`; contact `/contact`; repeats collapsed, first 4 steps then `…`, `(exit)` terminal.
+Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`, `/projects/*`, `/about`); `personal` (`/rowing`); `contact` (`/contact`); `other` (every other tracked path). `daily_group_path.path_key`: repeats collapsed, the first 4 groups joined by `" > "`, then `" > …"` when more follow, and always ending `" > (exit)"`.
 
-`daily_cf_baseline` from `netmon.inbound_request_groups` (host `furchert.ch`, `GET`, 200–299, path `^/(de|en)(/[a-z0-9][a-z0-9-]{0,63}){0,2}/?$` → locale-free path + locale, hours inside the Zurich day), no IP-derived column. **One-time backfill:** when empty, the first WA-3b run fills every day netmon still holds (≈ 90 days) as a pre-launch baseline; then nightly.
+`daily_cf_baseline` from `netmon.inbound_request_groups` (host `furchert.ch`, `GET`, 200–299, path `^/(de|en)(/[a-z0-9][a-z0-9-]{0,63}){0,2}/?$` → locale-free path + locale, hours inside the Zurich day), no IP-derived column. The path expression excludes the first segments `dashboard`, `imprint` and `privacy` (consistent with `TRACKED_PATHS`). **One-time backfill:** when empty, the first WA-3b run fills every day netmon still holds (≈ 90 days) as a pre-launch baseline; then nightly. The CF baseline (nightly replace and backfill) runs in a separate, **non-fatal** transaction in the same collector after the day loop: a failure is logged (class only) and counted, and never aborts the analytics rollup. A day is skipped when `D < today − (inbound retention − 1)` or when netmon returns 0 rows while rows are stored; the backfill is exempt from `eligible()` (it writes neither events-derived tables nor `rollup_day`), checks emptiness after taking the advisory lock in the same transaction (a held lock is a partial-run warning), skips the oldest (partial) netmon day, and an empty netmon is simply retried on the next run. Hours without Cloudflare traffic have no row and are not zero-filled (documented limit, like R8).
 
 ### 7.9 Metrics and alerts
 
@@ -688,19 +688,19 @@ Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects
 
 **`GET /pages`**: `items[]` with `path`, `pageviews`, `pageviewsByLocale {de, en}`, `visitsViewed`, `entries`, `exits`, `landingEngagedVisits`, `landingConvertingVisits`, `engagementSamples`, `engagedMsSum`, `engagedHistogram [8]`, `scrollSamples`, `scrollReached {p25, p50, p75, p90, p100}`.
 
-**`GET /pages/detail?path=…`**: `summary` (one pages item), `previous`/`next` (`[{path, count}]`, `null` until WA-3b), `clicks` (`[{kind, target, area, clicks, visits, convertingVisits}]`), `sections {reached [{section, pageviews}], deepestAtExit [{section, visits}]}` and `faqOpens [{faq, opens, visits}]` (only `/automation`), `daily [{day, pageviews, visitsViewed}]`.
+**`GET /pages/detail?path=…`**: `summary` (one pages item), `previous`/`next` (`[{path, count}]`, `null` until WA-3b; from WA-3b the top `limit` entries of §8.1 (default 5) including `(entrance)` and `(exit)`, plus `(other)` for the remainder), `clicks` (`[{kind, target, area, clicks, visits, convertingVisits}]`), `sections {reached [{section, pageviews}], deepestAtExit [{section, visits}]}` and `faqOpens [{faq, opens, visits}]` (only `/automation`), `daily [{day, pageviews, visitsViewed}]`.
 
-**`GET /clicks?kind=…`**: `items[]` with `kind`, `target` (`null` for mailto/tel), `path`, `area`, `clicks`, `visits`, `convertingVisits`, `pageVisits`.
+**`GET /clicks?kind=…`**: the remainder beyond `limit` is the single item with `kind` `outbound` and `target` `(other)` (a nav target `(other)` stays its own item); `items[]` with `kind`, `target` (`null` for mailto/tel), `path`, `area`, `clicks`, `visits`, `convertingVisits`, `pageVisits`.
 
 **`GET /sources`**: `channels [{channel, visits, newVisits, engagedVisits, offerVisits, convertingVisits}]` (all seven), `referrers [{domain, channel, visits, convertingVisits}]`, `campaigns [{source, medium, campaign, visits, convertingVisits}]`, `converters {byLandingChannel, byFirstChannel, byEntryPath}`.
 
 **`GET /funnels`** (3b): `definitionVersion`, `funnels [{id: "offer" | "contact_form", steps [{index, key, visits}], previous [...]}]`; F1 keys `visit`, `offer_visit`, `reached_prices`, `contact_intent`, `form_start`, `contact_submit`; F2 keys `contact_pageview`, `form_start`, `contact_submit`.
 
-**`GET /paths`** (3b): `groupPaths [{path, visits, convertingVisits}]`, `entryExit [{entry, exit, visits}]`, `seenBeforeContacting {intentVisits, items [{seen, visits}]}`, `transitions [{fromPath, toPath, count}]`.
+**`GET /paths`** (3b): `groupPaths [{path, visits, convertingVisits}]`, `entryExit [{entry, exit, visits}]`, `seenBeforeContacting {intentVisits, items [{seen, visits}]}`, `transitions [{fromPath, toPath, count}]` (self-loops, a path followed by itself, are collapsed). The `locale` and `device` filters affect `transitions` only and are echoed as `filters {applied, ignored}`; the other `/paths` blocks ignore them. Dimension values stored as `''` are returned as `null`.
 
 **`GET /audience`** (3b): `newVsReturning {newVisits, returningVisits}`, `repeatOfferViewers {value, basis}`, `deviceClass`, `entryLocale`, `dimensions {country, browserFamily, osFamily, viewport, visitorType}` (each `[{value, visits}]`).
 
-**`GET /coverage`** (3b): `baselineFrom`, `daily [{day, consentedPageviews, cloudflareRequests, sampled}]`, `byPage [{path, locale, consentedPageviews, cloudflareRequests, sampled}]` (page locale), `enquiries {consentedSubmits, totalSubmits}`, `dataQuality {edge {…}, secondLine {…}, duplicates, cappedDays}`. **Coverage window starts at go-live:** `baselineFrom` = the first day with `rollup_day.raw_pageviews > 0` (go-live day), `null` before; `daily`, `byPage` and the CF totals cover only `[max(from, baselineFrom), to]`. The pre-launch CF rows from the backfill stay stored but are never compared with tracked pageviews. `enquiries` counts both sides by **submission day**: `consentedSubmits = Σ daily_submits.consented_submits` and `totalSubmits = Σ daily_enquiries.submissions` over the same days (not by visit start day).
+**`GET /coverage`** (3b): `baselineFrom`, `daily [{day, consentedPageviews, cloudflareRequests, sampled}]`, `byPage [{path, locale, consentedPageviews, cloudflareRequests, sampled}]` (page locale), `enquiries {consentedSubmits, totalSubmits}`, `dataQuality {edge {…}, secondLine {…}, duplicates, cappedDays}`. **Coverage window starts at go-live:** `baselineFrom` = the configured go-live date `webanalytics.coverage.go-live-date` (default unset, set in WA-6; no latching from raw data), `null` while unset or in the future; `daily`, `byPage`, `enquiries` and the CF totals cover only `[max(from, baselineFrom), to]` and are empty before go-live. `consentedPageviews` = `Σ daily_page.pageviews` (consistent with `byPage`; it differs from `rollup_day.raw_pageviews`, which counts all raw pageviews of the day). `dataQuality` comes from `daily_ingest_stats` with every reason key present and 0-filled, `cappedDays` is `null` until WA-5. The pre-launch CF rows from the backfill stay stored but are never compared with tracked pageviews. `enquiries` counts both sides by **submission day**: `consentedSubmits = Σ daily_submits.consented_submits` and `totalSubmits = Σ daily_enquiries.submissions` over the same days (not by visit start day).
 
 ### 8.3 Metric definitions (binding)
 
@@ -721,15 +721,15 @@ Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects
 | Conversion per entry page | `landingConvertingVisits / entries` |
 | Repeat offer viewer | offer pageviews in ≥ 2 visits within the basis window |
 | Attribution | visit-scoped last touch; secondary first known channel; `heardVia` stays manual |
-| Consent coverage | two separate series from `baselineFrom`; rounded 4-week band only if both ≥ 50; no consent-rate %; enquiry coverage `Σ daily_submits.consented_submits / Σ daily_enquiries.submissions`, both by submission day |
+| Consent coverage | two separate series from `baselineFrom`; rounded 4-week band only if both ≥ 50, labelled indicative (prefetch-inflated) until the Cloudflare content-type probe, a tracked owner follow-up; no consent-rate %; enquiry coverage `Σ daily_submits.consented_submits / Σ daily_enquiries.submissions`, both by submission day |
 
 ### 8.4 Channels
 
 `campaign` (`utm_source` present) → `ai` (`chatgpt.com`, `chat.openai.com`, `perplexity.ai`, `claude.ai`, `gemini.google.com`, `copilot.microsoft.com`) → `search` (google.*, `bing.com`, `duckduckgo.com`, `ecosia.org`, `search.brave.com`, `startpage.com`, `yahoo.com`) → `social` (`linkedin.com`, `lnkd.in`, `facebook.com`, `instagram.com`, `x.com`, `t.co`, `reddit.com`) → `referral` → `direct` (no referrer, landing) → `internal` (first pageview not a landing).
 
-### 8.5 Funnels (`DEFINITION_VERSION = 1`)
+### 8.5 Funnels (`DEFINITION_VERSION = 2` with WA-3b)
 
-F1 `offer`: visit → offer visit → reached `preise` → contact intent → form start → `contact_submit`. F2 `contact_form`: `/contact` pageview → form start → `contact_submit`. F3: `daily_section`. A definition change recomputes the last 30 days.
+F1 `offer`: visit → offer visit → reached `preise` → contact intent → form start → `contact_submit`. F2 `contact_form`: `/contact` pageview → form start → `contact_submit`. F3: `daily_section`. A definition change recomputes the last 30 days. WA-3b raises `DEFINITION_VERSION` from 1 to 2: days rolled before the bump keep version 1 and have no WA-3b rows; `/status` and `/funnels` report `definitionVersion`, and `/funnels` and `/paths` also return `definitionFrom` (the first version-2 day) and clamp `from` to it. Funnel and seen-before steps are matched greedily at the earliest occurrence, in order. Section reach and `formStarted` are ordered by their pageview's start time (slot start); two steps inside one pageview have no finer order (documented limit).
 
 ### 8.6 Small-numbers rules (furchert-ch)
 
@@ -843,6 +843,7 @@ One token per scope, never combined; client reused. auth-service: `application.y
 | data-service | `webanalytics.retention.events-days` [WA-5] | `396` (min 370) | §7.7 |
 | data-service | `netmon.collectors.webanalytics-rollup.enabled` | `false` explicit default (enabled by the WA-3a follow-up through `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED=true`, §7.5) | rollup kill switch |
 | data-service | `webanalytics.timezone` | `Europe/Zurich` | day boundaries |
+| data-service | `webanalytics.coverage.go-live-date` | unset (set in WA-6) | `/coverage` window start (§8.2) |
 
 No new env var in data-service or auth-service beyond the WA-3a enable switch; no new SOPS variable or Secret key.
 
@@ -1132,11 +1133,11 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 
 **homelab-data-service: "WA-3b: Paths, funnels, audience, CF baseline with backfill and coverage"**
 - Verify in phase 1: `edgeResponseContentTypeName` availability (follow-up only).
-- V8 tables (incl. `daily_submits`); `DEFINITION_VERSION` bump recomputes the horizon.
+- V8 tables (incl. `daily_submits`); `DEFINITION_VERSION` 2 recomputes the horizon (older days keep version 1 and no WA-3b rows; `definitionFrom` clamp on `/funnels` and `/paths`); CF baseline in a separate non-fatal transaction, backfill rules and path exclusions per §7.8; `/coverage` from the configured go-live date.
 - Funnels monotonic, out-of-order not counted; transitions `(entrance)` = `(exit)` = visits; group paths, entry × exit, seen-before.
 - **Exact uniques test: one visitor with offer pageviews in visits on two different days within 28 days counts once in `repeat_offer_viewers_28d`, and one visitor active on two days of the same 7-day range counts once in the audience visitors figure.**
 - `daily_cf_baseline` one-time backfill when empty (seeded netmon rows), nightly afterwards, `sampled` carried, no IP column; empty-table and idempotency tests.
-- `/coverage`: `baselineFrom` = first day with tracked pageviews, comparisons only from there (test with pre-launch CF rows); `consentedSubmits` by submission day (test: a visit starting 23:50 with a goal at 00:10 counts the submit on the second day, matching `daily_enquiries`).
+- `/coverage`: `baselineFrom` = the configured go-live date, comparisons only from there (test with pre-launch CF rows); `consentedSubmits` by submission day (test: a visit starting 23:50 with a goal at 00:10 counts the submit on the second day, matching `daily_enquiries`).
 - Contract tests for `/funnels`, `/paths`, `/audience`, `/coverage`, detail `previous`/`next`.
 
 ### WA-4a (3.5 PD)
@@ -1188,6 +1189,7 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 **furchert-ch: "WA-6: Go-live: privacy text and enable consent bar and tracking"**
 - Preconditions: every WA-5 issue merged and rolled out (incl. the auth-service fix and the five alerts).
 - One PR: `legal.ts` L1 to L7 (no retention period, no location, no backup claim) + `ANALYTICS_UI_ENABLED = true` + `PAGE_LAST_MODIFIED['/privacy']`.
+- Set `webanalytics.coverage.go-live-date` in data-service `k8s/deployment.yaml` to the go-live day (§8.2 `/coverage`).
 - Flipped-flag bundle check: with `ANALYTICS_UI_ENABLED=true` no consent chunk is referenced from the prerendered HTML.
 - End-to-end checklist right after the flip (live site, fresh profile): no request and no `fa_vid` before a choice; Decline → one forget, no `fa_vid`; GPC browser → no bar, one forget; Allow → pageview without reload, `fa_vid` with exact attributes; two tabs allowing at once → one `fa_vid`; one pageview per soft navigation; locale button → `lang` click only; flush on hide/close; bfcache eligible; clicks incl. middle click and Enter; one goal per successful submit, none on failure; enquiry count +1 with and without consent; signed-in browsing and the never-track switch send nothing; withdrawal during an in-flight request leaves no `fa_vid` and erases that id's rows; `ingest.eventsToday` moves within 1 min; the visit appears once its day is final (the next morning after 07:30); `/coverage.baselineFrom` equals the go-live day.
 - `/dashboard/network` and `/api/netmon/status` regression check; owner reminded to tag shared links with UTM; PVC usage re-recorded 30 days later (homelab).
@@ -1339,6 +1341,31 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 32 | §17 criteria aligned: WA-3a filters by `group()`, WA-2a zero `setItem` (`removeItem` only for an invalid record), WA-1 `(other)` only for nav `clickTarget` | §17 WA-1/WA-2a/WA-3a | data-service #53, #54, furchert-ch #153 |
 | 33 | Daily visitors and new/returning from the non-excluded visit model | §7.8 | data-service #54 |
 | 34 | For `to < from` after clamping `lastCompleteDay` keeps its known value | §8.1 | data-service #54 |
+
+### Revision 3.5 (follow-ups after the WA-2b, WA-3a and WA-3b plan reviews, 2026-11-08)
+
+| # | Item | Sections changed | Affected WA issues |
+|---|---|---|---|
+| 27 | A first-ever rollup run at 07:30 may write yesterday as provisional (never served, finalised at the next 01:12) | §7.5 | data-service #54 |
+| 28 | 28-day figures are computed for every rolled day from memoised per-day summaries | §7.5 | data-service #54 |
+| 29 | `deviceClass` checks `iPad`/`Tablet` before `Mobi` | §5.7 | furchert-ch #154 |
+| 30 | Consent controller budget re-baselined to 3 200 B, tracker to 4 265 B | §3.10 | furchert-ch #153, #154 |
+| 31 | "Days per run" aligned with the Selection row | §7.5 | data-service #54 |
+| 32 | Registry: `home-hero-about` instead of `home-hero-projects`, five project slugs (`aemtlifyer` removed by furchert-ch #160); client cap 64 characters for UTM values and the referrer host | §3.3, §3.8 | furchert-ch #154 |
+| 33 | `DEFINITION_VERSION = 2` with WA-3b; older days keep version 1 and no WA-3b rows | §8.5, §17 WA-3b | data-service #55 |
+| 34 | Funnel and seen-before steps ordered by their pageview's start time | §8.5 | data-service #55 |
+| 35 | Group-path key format and the groups `home`, `offer`, `proof`, `personal`, `contact`, `other` | §7.8 | data-service #55 |
+| 36 | `/coverage`: `consentedPageviews` from `daily_page`; every series over `[max(from, baselineFrom), to]`, empty before go-live | §8.2 | data-service #55 |
+| 37 | Transitions collapse self-loops; detail previous/next; `/paths` filters affect transitions only; dimension nulls; `dataQuality` 0-filled, `cappedDays` null until WA-5 | §8.2 | data-service #55 |
+| 38 | CF SQL excludes `dashboard`, `imprint`, `privacy` | §7.8 | data-service #55 |
+| 39 | Contract shapes: self-loop collapse, previous/next via `limit` (default 5) + `(other)`, `/paths` filter echo, `/clicks` remainder shape, sixth group `other` | §8.2, §7.8 | data-service #55 |
+| 40 | Slot-start ordering limit | §8.5 | data-service #55 |
+| 41 | `daily_dimension` without `converting_visits` (privacy); WA-4b applies the §8.6 minimum to the dimension lists | §7.8 | data-service #55, furchert-ch #156 |
+| 42 | Coverage band labelled indicative until the Cloudflare content-type probe | §8.3 | data-service #55, furchert-ch #156 |
+| 43 | CF baseline in a separate non-fatal transaction; skip and backfill rules | §7.8 | data-service #55 |
+| 44 | `baselineFrom` = configured `webanalytics.coverage.go-live-date` (set in WA-6) | §8.2, §11, §17 WA-6 | data-service #55, furchert-ch #158 |
+| 45 | `/funnels` and `/paths` expose `definitionFrom` and clamp `from` to it | §8.5 | data-service #55 |
+| 46 | Zero-traffic Cloudflare hours have no row: documented limit | §7.8 | data-service #55 |
 
 ### Committed (2026-11-08, WA-0)
 
