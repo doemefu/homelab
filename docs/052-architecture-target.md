@@ -1,7 +1,8 @@
 # Target Architecture — Microservices
 
 > Amended 2026-09-01 per ADR 0001 (parent `docs/adr/0001-schedules-ownership-and-data-plane.md`): schedules ownership -> device-service.
-> Amended 2026-09-23 per ADR 0002 (parent `docs/adr/0002-network-telemetry-ownership.md`): data-service = analytical data plane (sensor history + network telemetry), owns Postgres DB `data_service` (schema `netmon`); contract in [`060-network-monitoring.md`](060-network-monitoring.md).
+> Amended 2026-09-23 per ADR 0002 ([`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)): data-service = analytical data plane (sensor history + network telemetry), owns Postgres DB `data_service` (schema `netmon`); contract in [`060-network-monitoring.md`](060-network-monitoring.md).
+> Amended 2026-11-08 per the ADR 0002 amendment (homelab#349, WA-0): data-service also owns schema `webanalytics` in `data_service` (browser push write path, scopes `analytics:write` and `analytics:read`); contract in [`100-web-analytics.md`](100-web-analytics.md).
 > Amended 2026-09-28 per ADR 0003 ([`adr/0003-mcp-hub-authorization.md`](adr/0003-mcp-hub-authorization.md)): new service mcp-hub (read-only mail/calendar MCP endpoint, resource server for auth-service tokens); contract in [`080-mcp-hub.md`](080-mcp-hub.md).
 
 This document describes the target architecture for the Terrarium IoT application after the migration from the legacy monolith.
@@ -118,11 +119,12 @@ Internet
 
 ### data-service
 
-**Domain:** Analytical data plane (amended 2026-09-23, ADR 0002): historical sensor data retrieval and network telemetry (Epic `homelab#114`, contract [`060-network-monitoring.md`](060-network-monitoring.md)).
+**Domain:** Analytical data plane (amended 2026-09-23, ADR 0002): historical sensor data retrieval and network telemetry (Epic `homelab#114`, contract [`060-network-monitoring.md`](060-network-monitoring.md)) and web analytics (Epic `homelab#348`, contract [`100-web-analytics.md`](100-web-analytics.md), amended 2026-11-08).
 
 **Responsibilities:**
 - InfluxDB queries (historical temperature, humidity, device status)
 - Network telemetry: scheduled, idempotent collectors (Cloudflare GraphQL, blocklists, Prometheus snapshots, auth-service login events), retention, and the read API `/api/netmon/*` (ADR 0002)
+- Web analytics: write path `POST /api/webanalytics/events` (browser events pushed by furchert-ch, the recorded exception to ADR 0002 decision 3), nightly rollup, retention and the read API `/api/webanalytics/*` (schema `webanalytics`)
 - JWT validation for all endpoints
 
 **Does NOT:**
@@ -130,7 +132,7 @@ Internet
 - Write to InfluxDB (current; see target picture)
 - Manage users or issue tokens
 
-**Database:** PostgreSQL — `data_service` (schema `netmon`, role `data_service`; created by `infra/playbooks/59_app_services.yml`, migrated by data-service's Flyway). Amended 2026-09-23 (ADR 0002); previously "none". It does not join `homelabdb`.
+**Database:** PostgreSQL — `data_service` (schemas `netmon` and `webanalytics` (amended 2026-11-08, ADR 0002 amendment), role `data_service`; created by `infra/playbooks/59_app_services.yml`, migrated by data-service's Flyway). Amended 2026-09-23 (ADR 0002); previously "none". It does not join `homelabdb`.
 **InfluxDB:** Read-only (queries)
 **Egress:** `api.cloudflare.com:443`, `www.spamhaus.org:443`, `raw.githubusercontent.com:443`, `api.abuseipdb.com:443`; cluster-internal auth-service, Prometheus and PostgreSQL (060 §10). No public tunnel route.
 
@@ -347,6 +349,9 @@ device-service validates `iss` and rejects ID tokens (`azp`) since device-servic
 | GET | `/data/measurements` | JWT | Historical sensor data (params: device, period) |
 | GET | `/data/devices/{id}/status` | JWT | Device online/offline history |
 | GET | `/api/netmon/*` | JWT with `SCOPE_netmon:read` **and** `sub` in `netmon.api.allowed-clients` (default `furchert-ch`); `ROLE_ADMIN` is not accepted in v1 (060 §7.5) | Network telemetry read API — amended 2026-09-23 (ADR 0002); endpoint list in [`060-network-monitoring.md`](060-network-monitoring.md) §7.2 |
+| POST | `/api/webanalytics/events` | JWT with `SCOPE_analytics:write` **and** `sub` in `webanalytics.api.write-clients` (default `furchert-ch`); `ROLE_ADMIN` is not accepted (100 §6.1) | Browser event ingest, push write path — amended 2026-11-08 (ADR 0002 amendment); contract in [`100-web-analytics.md`](100-web-analytics.md) §6 |
+| DELETE | `/api/webanalytics/visitors/{visitorId}` | same as the POST row | Visitor erasure with tombstone [WA-5] (100 §6.5) |
+| GET | `/api/webanalytics/*` | JWT with `SCOPE_analytics:read` **and** `sub` in `webanalytics.api.read-clients` (default `furchert-ch`); GET only (100 §8.1) | Web analytics read API; endpoint list in [`100-web-analytics.md`](100-web-analytics.md) §8.2 |
 
 ---
 

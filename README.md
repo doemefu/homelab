@@ -323,8 +323,9 @@ docs/                        # Architecture and planning documents
   051-architecture-current.md # Legacy monolith architecture
   052-architecture-target.md  # Target microservices architecture
   080-mcp-hub.md              # MCP hub cross-repo contract (canonical)
+  100-web-analytics.md        # Web analytics cross-repo contract (canonical)
   090-disaster-recovery.md    # Rebuild order from git + backups, scenarios, RTO/RPO, gaps (draft)
-  adr/                        # ADRs (0003 MCP hub authorization, 0004 k3s datastore (accepted); 0001/0002 in the parent workspace)
+  adr/                        # ADRs (0002 network telemetry ownership, 0003 MCP hub authorization, 0004 k3s datastore (accepted); 0001 in the parent workspace)
   plans/                      # Feature plans
   specs/                      # Architecture specifications
 
