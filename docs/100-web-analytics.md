@@ -533,7 +533,7 @@ Partition keys break `event_id` dedupe; `ctid` batching is unsafe on partitioned
 |---|---|---|
 | Runner | `NetmonCollector` `webanalytics-rollup` via `CollectorRunner`; `NetmonCollector.group()` (default `netmon`, the webanalytics collectors `webanalytics`) and `/api/netmon/status` filters by group, not by name prefix, so it excludes the `webanalytics` group (network strip unchanged); `/api/webanalytics/status` lists them | WA-3a |
 | Default off | ships with `netmon.collectors.webanalytics-rollup.enabled=false`. `CollectorMetricsInitializer` exports no freshness gauge for a disabled collector, so the existing `NetmonCollectorStale` catch-all cannot fire before the alert change is live | WA-3a |
-| Enable gate | (1) homelab WA-3a PR (daily class + catch-all exclusion) merged; (2) the owner runs playbook `41_monitoring.yml`; (3) only then a follow-up data-service `k8s/deployment.yaml` change sets the property to `true` through `SPRING_APPLICATION_JSON` (the dashed collector name is not bindable as a plain environment variable), while the committed default stays an explicit `false` (env binding for the dashed collector name verified in WA-3a phase 1) | WA-3a |
+| Enable gate | (1) homelab WA-3a PR (daily class + catch-all exclusion) merged; (2) the owner runs playbook `41_monitoring.yml`; (3) only then a follow-up data-service `k8s/deployment.yaml` change sets the environment variable `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED=true` (relaxed binding of the dashed property name works while the explicit YAML entry `netmon.collectors.webanalytics-rollup.enabled: false` is present; the form without separators does not; `SPRING_APPLICATION_JSON` is only an alternative), and the explicit `false` default in the committed YAML stays mandatory (env binding for the dashed collector name verified in WA-3a phase 1) | WA-3a |
 | Schedule | two daily runs, both `zone = "Europe/Zurich"` and through the same `CollectorRunner` (one lock, so they never overlap): **01:12** `@Scheduled(cron = "0 12 1 * * *")` (night run, §7.6) and **07:30** `@Scheduled(cron = "0 30 7 * * *")` (morning run, after yesterday closes at 07:15). 07:30 is clear of Longhorn 02:00, restic 03:00, `RetentionJob` (04:30/05:30), Longhorn trim 05:00 and blocklists (06:00/07:00); the mba1 scheduled reboot at 07:40 only happens after ≥ 3.5 days uptime and the run takes seconds, so an interrupted run is simply redone by the next night's lookback. It shares the minute mark with the 30-minute reputation and 5-minute Cloudflare collectors, which the scheduler pool (size 4) runs in parallel. Documented exception to "crons in UTC" | WA-3a |
 | Lock | `pg_try_advisory_xact_lock(hashtext('webanalytics-rollup'))` per day | WA-3a |
 | First run | no high-water mark: process yesterday only (zero rows + `rollup_day` when empty), set the mark | WA-3a |
@@ -840,7 +840,7 @@ One token per scope, never combined; client reused. auth-service: `application.y
 | data-service | `webanalytics.api.write-clients` / `read-clients` | `[furchert-ch]` | `sub` allowlists |
 | data-service | `webanalytics.ingest.daily-cap` / `hourly-cap` / `visitor-daily-cap` [WA-5] | `10000` / `2500` / `500` | §6.4 |
 | data-service | `webanalytics.retention.events-days` [WA-5] | `396` (min 370) | §7.7 |
-| data-service | `netmon.collectors.webanalytics-rollup.enabled` | `false` explicit default (enabled by the WA-3a follow-up through `SPRING_APPLICATION_JSON`, §7.5) | rollup kill switch |
+| data-service | `netmon.collectors.webanalytics-rollup.enabled` | `false` explicit default (enabled by the WA-3a follow-up through `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED=true`, §7.5) | rollup kill switch |
 | data-service | `webanalytics.timezone` | `Europe/Zurich` | day boundaries |
 
 No new env var in data-service or auth-service beyond the WA-3a enable switch; no new SOPS variable or Secret key.
@@ -1320,7 +1320,7 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 15 | Read API `range` echo `{from, to, days, lastCompleteDay, previous}` and the empty state | §8.1 | data-service #54 |
 | 16 | Any `ROLE_*` token → 403 on the read chain | §8.1 | data-service #54 |
 | 17 | "Id-free" = no uuid and no `visitor_id`/`visit_id` column; count columns named `visitors…` are fine | §7.8 | data-service #54 |
-| 18 | Rollup enable through `SPRING_APPLICATION_JSON` with an explicit `false` default | §7.5, §11 | data-service #54 |
+| 18 | Rollup enable through `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED=true` in `k8s/deployment.yaml` (`SPRING_APPLICATION_JSON` only as an alternative); the explicit YAML `false` default stays mandatory | §7.5, §11 | data-service #54 |
 | 19 | `NetmonCollector.group()`; `/api/netmon/status` filters by group | §7.5, §17 WA-3a | data-service #54 |
 | 20 | Uniques from the visit model (non-excluded visits starting in the window); a visitor is new if any visit on D is new | §7.5, §17 WA-3a | data-service #54 |
 | 21 | `raw_events`/`raw_pageviews` defined (±6 h margin excluded) | §7.8, §17 WA-3a | data-service #54 |
