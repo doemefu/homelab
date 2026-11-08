@@ -341,7 +341,7 @@ The scheduler is Spring `@Scheduled` on the Boot-managed `ThreadPoolTaskSchedule
 | `NetmonDataServiceDown` | `up{job="data-service"} == 0 or absent(up{job="data-service"})` | 10m | warning |
 
 - `g` is `netmon_collector_last_success_timestamp_seconds`.
-- The classes, each with a static label `threshold`, are: `26h` for `blocklists` and `retention`; `3h` for `egress`; `90m` for `lan` and `reputation`; `15m` for every other collector, as a catch-all.
+- The classes, each with a static label `threshold`, are: `26h` for `blocklists`, `retention` and `webanalytics-rollup` (amended 2026-11-08, WA-3a: homelab#350); `3h` for `egress`; `90m` for `lan` and `reputation`; `15m` for every other collector, as a catch-all.
 - The NaN branch waits until the Pod is older than `T`, so a fresh Pod does not alert on a daily collector that has not reached its slot yet. Pod age comes from kube-state-metrics' `kube_pod_start_time`. The JVM's `process_start_time_seconds` would reset on every in-Pod container restart and restart the grace period.
 - **Contract for data-service:** a disabled collector (`netmon.collectors.<name>.enabled=false`) must not export the gauge. A NaN that never changes would otherwise fire permanently.
 - (amended 2026-09-23, NM-1: homelab#116)
