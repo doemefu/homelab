@@ -878,7 +878,7 @@ All additive; **no backwards-incompatible change.** `/api/netmon/status` output 
 4. WA-3a: data-service WA-3a deployed with the rollup **disabled**; homelab daily-class PR merged; the owner runs playbook `41_monitoring.yml`; then the data-service follow-up enables the rollup. Then WA-3b.
 5. WA-4a, WA-4b: dashboard (it shows "no data yet" while dark).
 6. WA-5 "Compliance & hardening": auth-service side finding; data-service hardening rolled out first; then furchert-ch hardening (dark) and the homelab alerts; owner checks; final texts on the WA-6 branch.
-7. WA-6 go-live: one furchert-ch PR (legal text + flag flip) and one data-service PR (the coverage go-live date, data-service WA-6 issue (tbd)); end-to-end checklist right after the flip (no production end-to-end test is possible earlier; accepted); then the homelab `WebAnalyticsIngestSilent` rule.
+7. WA-6 go-live: one furchert-ch PR (legal text + flag flip) and one data-service PR (the coverage go-live date, homelab-data-service#61); end-to-end checklist right after the flip (no production end-to-end test is possible earlier; accepted); then the homelab `WebAnalyticsIngestSilent` rule.
 
 ### 12.4 Rollback
 
@@ -1194,7 +1194,7 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 - End-to-end checklist right after the flip (live site, fresh profile): no request and no `fa_vid` before a choice; Decline → one forget, no `fa_vid`; GPC browser → no bar, one forget; Allow → pageview without reload, `fa_vid` with exact attributes; two tabs allowing at once → one `fa_vid`; one pageview per soft navigation; locale button → `lang` click only; flush on hide/close; bfcache eligible; clicks incl. middle click and Enter; one goal per successful submit, none on failure; enquiry count +1 with and without consent; signed-in browsing and the never-track switch send nothing; withdrawal during an in-flight request leaves no `fa_vid` and erases that id's rows; `ingest.eventsToday` moves within 1 min; the visit appears once its day is final (the next morning after 07:30); `/coverage.baselineFrom` equals the go-live day.
 - `/dashboard/network` and `/api/netmon/status` regression check; owner reminded to tag shared links with UTM; PVC usage re-recorded 30 days later (homelab).
 
-**homelab-data-service: "WA-6: set the coverage go-live date" (issue to be created; data-service WA-6 issue (tbd))**
+**homelab-data-service: "WA-6: set the coverage go-live date" (doemefu/homelab-data-service#61)**
 - One `k8s/deployment.yaml` PR setting `WEBANALYTICS_COVERAGE_GOLIVEDATE` to the go-live day (§8.2 `/coverage`, §11); merged and rolled out together with the furchert-ch go-live PR.
 
 **homelab: "WA-6: WebAnalyticsIngestSilent rule" (within the 0.5 PD; after the go-live end-to-end checklist passed)**
@@ -1211,7 +1211,7 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 | WA-3 | #350 (3a daily class) | #54 (3a), #55 (3b) | — | — |
 | WA-4 | — | — | — | #155 (4a), #156 (4b) |
 | WA-5 | #351 | #56 | #143 | #157 |
-| WA-6 | #352 (IngestSilent) | data-service WA-6 issue (tbd) | — | #158 |
+| WA-6 | #352 (IngestSilent) | homelab-data-service#61 | — | #158 |
 
 ---
 
@@ -1366,10 +1366,10 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 41 | `daily_dimension` without `converting_visits` (privacy); WA-4b applies the §8.6 minimum to the dimension lists | §7.8 | data-service #55, furchert-ch #156 |
 | 42 | Coverage band labelled indicative until the Cloudflare content-type probe | §8.3 | data-service #55, furchert-ch #156 |
 | 43 | CF baseline in a separate non-fatal transaction; skip and backfill rules | §7.8, §17 WA-3b | data-service #55 |
-| 44 | `baselineFrom` = configured `webanalytics.coverage.go-live-date` (set in WA-6 by a data-service PR, env `WEBANALYTICS_COVERAGE_GOLIVEDATE`) | §8.2, §11, §12.3, §17 WA-3b/WA-6 | data-service #55, data-service WA-6 issue (tbd) |
+| 44 | `baselineFrom` = configured `webanalytics.coverage.go-live-date` (set in WA-6 by a data-service PR, env `WEBANALYTICS_COVERAGE_GOLIVEDATE`) | §8.2, §11, §12.3, §17 WA-3b/WA-6 | data-service #55, homelab-data-service#61 |
 | 45 | `/funnels` and `/paths` expose `definitionFrom` and clamp `from` to it | §8.5 | data-service #55 |
 | 46 | Zero-traffic Cloudflare hours have no row: documented limit | §7.8 | data-service #55 |
-| 47 | The go-live date is set by a new data-service WA-6 PR, not by the furchert-ch go-live PR; §11 lists the env var and its binding test | §11, §12.3, §17 WA-6, issue map | data-service WA-6 issue (tbd), data-service #55 |
+| 47 | The go-live date is set by a new data-service WA-6 PR, not by the furchert-ch go-live PR; §11 lists the env var and its binding test | §11, §12.3, §17 WA-6, issue map | homelab-data-service#61, data-service #55 |
 | 48 | `limit` default 5 for `/pages/detail` previous/next; `''` key values returned as `null` as a general rule | §8.1 | data-service #55 |
 | 49 | The first-ever-run exception is stated in the Selection and Final-vs-provisional rows | §7.5 | data-service #54 |
 | 50 | `/clicks` remainder item defined (`outbound`, `(other)`, `path` `(other)`, `area` `null`, counts all kinds) | §8.2 | data-service #55 |
