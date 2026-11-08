@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/100-web-analytics.md` forwards here (since homelab#349, WA-0). Relative `adr/` links resolve to `docs/adr/` in this repo. The specialist reports behind §15 are local-only and not part of this repo.
 
-**Status:** Accepted (rev 3.1, owner approval 2026-11-08); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review and re-review applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
+**Status:** Accepted (rev 3.2, owner approval of rev 3.1 2026-11-08; rev 3.2 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
 **Epic:** `doemefu/homelab#348` · **Parent worklog:** `20261108-163648-web-analytics-epic-caea` (local-only)
 **Canonical location:** this file (`infrastructure/docs/100-web-analytics.md`). The parent workspace file `docs/100-web-analytics.md` is a forwarder (since `homelab#349`), following the `060` precedent.
 **ADR:** none new. [ADR 0002](adr/0002-network-telemetry-ownership.md) decision 1 covers this; the push write path is a recorded exception to its decision 3 (§1.4); ADR 0002 carries the dated amendment of 2026-11-08 (WA-0).
@@ -69,15 +69,15 @@ Real-time or "active now"; heatmaps, session replay, rage/dead clicks, form-fiel
  Browser (consented)                      furchert-ch (ns apps, :3000, replicas 1)                   data-service (ns apps, :8082, replicas 1)
  ───────────────────                      ────────────────────────────────────────                   ─────────────────────────────────────────
  tracker chunk ──fetch keepalive, JSON───► POST /api/v          validate, drop, enrich, mint fa_vid
-   (loaded only after Allow)               POST /api/v/forget   clear fa_vid; [WA-5] purge queue + erase
+   (loaded only after Allow)               POST /api/v/forget   clear fa_vid; [WA-5] purge queue + synchronous erase
  contact form ──Server Action────────────► submitContact        on success: goal (consent) + enquiry count (always)
                                            ordered in-memory forward queue ──POST, Bearer analytics:write───► POST   /api/webanalytics/events
-                                                                           ──DELETE [WA-5]───────────────────► DELETE /api/webanalytics/visitors/{id}
+                                           forget handler ──DELETE [WA-5], awaited───────────────────────────► DELETE /api/webanalytics/visitors/{id}
                                                                                                                 │ dedupe; [WA-5] caps, tombstones
                                                                                                                 ▼
                                                                                                      PostgreSQL data_service, schema webanalytics
                                                                                                      netmon.inbound_request_groups ─► daily CF baseline
-                                                                                                                ▲ rollup 01:12 Europe/Zurich
+                                                                                                                ▲ rollup 01:12 (provisional) + 07:30 (final), Europe/Zurich
  Admin ──► /[locale]/dashboard/analytics (SSR, ADMIN) ──GET, Bearer analytics:read─────────────────────────► GET /api/webanalytics/*
  Alerts: NetmonCollectorStale daily class (WA-3a) + 5 WebAnalytics* rules [WA-5] + IngestSilent (WA-6) ─► Alertmanager ─► Discord
 ```
@@ -181,10 +181,11 @@ Order: `hero`, `so-arbeite-ich`, `beispiel`, `preise`, `daten`, `ueber-mich`, `f
 
 | Item | Rule |
 |---|---|
-| Transport | `fetch('/api/v', {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json'}, credentials: 'same-origin', body})` for every flush incl. `hidden`/`pagehide`; no `sendBeacon` (an `application/json` Blob is restricted in Chrome, crbug 490015; `text/plain` excluded by K1) |
+| Transport | `fetch('/api/v', {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json'}, credentials: 'same-origin', body, signal})` for every flush incl. `hidden`/`pagehide`; every request carries an `AbortController` signal so withdrawal can abort it (§4.4); no `sendBeacon` (an `application/json` Blob is restricted in Chrome, crbug 490015; `text/plain` excluded by K1) |
 | Flush | ≥ 20 events; 10 s after the first queued event; `hidden`/`pagehide`; before outbound/mailto/tel clicks |
 | Body | ≤ 7 680 bytes serialised; larger batches split |
-| In flight | one request at a time |
+| In flight | one request at a time per tab |
+| First flush across tabs | the first flush after the tracker starts in a tab runs inside `navigator.locks.request('fa-first-flush', …)`, so first flushes of parallel tabs are serialised and only the first one can mint `fa_vid`; the next tab's request then carries the cookie. Without the Web Locks API (pre-2022 browsers) the flush runs unserialised and two tabs may mint two ids; the second `Set-Cookie` wins and the first id stays a one-request orphan. This is a documented data-quality limit (at most one extra visitor per browser, only at the moment of consent) |
 | Retry | network error or 5xx: re-queue, retry after 5 s, then 30 s, then drop; no retry on 4xx; 429 pauses flushing 60 s |
 | Queue | max 100 events in memory; never persisted |
 | Lifecycle | no `unload`/`beforeunload` listeners; listeners stay on `pagehide` |
@@ -193,7 +194,7 @@ Order: `hero`, `so-arbeite-ich`, `beispiel`, `preise`, `daten`, `ueber-mich`, `f
 
 - `<Analytics />` (client) inside `<Providers>` in `src/app/[locale]/layout.tsx`, after `<Footer />`, outside `<main className="page-enter">`.
 - Client tracker: module singleton; `start()` idempotent; unmount never stops it; withdrawal, opt-out or sign-in call `stop()`.
-- **Server singletons:** forward queue, per-scope token caches and [WA-5] rate limiter on `globalThis[Symbol.for('furchert.analytics.<name>')]`, shared by `/api/v`, forget and the Server Action. Verify in phase 1 (WA-2b) with a production build.
+- **Server singletons:** forward queue, per-scope token caches and [WA-5] rate limiters on `globalThis[Symbol.for('furchert.analytics.<name>')]`, shared by `/api/v`, forget and the Server Action. Verify in phase 1 (WA-2b) with a production build.
 - Budget (gzip): consent store + bar + controller ≤ 1.5 KB initial; tracker chunk ≤ 3 KB via dynamic `import()` after Allow; post-build vitest with `node:zlib`.
 - Pure `.ts` modules with injected `window`/`document`/clock (vitest `node`). `navigator.webdriver === true` → tracker off (cheap, early).
 
@@ -221,11 +222,12 @@ Until WA-5, a GPC/DNT browser simply sees the bar (dark launch: nobody sees it b
 | Key | Where | Value | Written | Removed |
 |---|---|---|---|---|
 | `fa_consent` | `localStorage` | `{"v": <int>, "choice": "granted" \| "denied", "by": "user" \| "signal", "at": "YYYY-MM-DD"}` | on Allow, Decline, [WA-5] signal | `at` + 12 months (fixed), version mismatch, new choice |
-| `fa_vid` | cookie, set only by the server | `<uuid v4>.<consent version>` | by `POST /api/v` when absent/stale and `cv` current | `POST /api/v/forget`, expiry |
+| `fa_vid` | cookie, set only by the server | `<uuid v4>.<consent version>` | by `POST /api/v` when absent/stale, `cv` current and `consentDate` valid | `POST /api/v/forget`, expiry |
+| `fa_forget` [WA-5] | cookie, set only by the server | `<uuid v4>` of the visitor whose erasure is still pending | by `POST /api/v/forget` when the erasure could not be completed (503) | by the next successful forget; `Max-Age` 30 days |
 | `fa_optout` | `localStorage` | `"1"` | owner switch | the same switch |
 | `fa_forget_pending` | `localStorage` | `"1"` | before a forget call | after forget answered 204 |
 
-`fa_vid`: `HttpOnly; Secure; SameSite=Lax; Path=/; Expires=<consentDate + 365 d, 00:00 UTC>`; never sliding (`Set-Cookie` only on mint and clear); `Secure` omitted outside production. `Path=/` is required by the contact Server Action; the cookie therefore accompanies page requests to furchert-ch (never logged) and is visible to Cloudflare, already a listed processor. Server cookie rationale: Safari ITP deletes script-writable storage after 7 days without interaction; server-set first-party cookies are not covered.
+`fa_vid`: `HttpOnly; Secure; SameSite=Lax; Path=/; Expires=<consentDate + 365 d, 00:00 UTC>`; never sliding (`Set-Cookie` only on mint and clear); `Secure` omitted outside production. `Path=/` is required by the contact Server Action; the cookie therefore accompanies page requests to furchert-ch (never logged) and is visible to Cloudflare, already a listed processor. Server cookie rationale: Safari ITP deletes script-writable storage after 7 days without interaction; server-set first-party cookies are not covered. `fa_forget`: `HttpOnly; Secure; SameSite=Strict; Path=/api/v/forget; Max-Age=2592000`; it only ever reaches the forget route and exists only while an erasure is pending.
 
 ### 4.3 Consent version
 
@@ -235,11 +237,13 @@ Integer `ANALYTICS_CONSENT_VERSION` (start `1`) used by bar, `/api/v` and Server
 
 | Trigger | Client (early, WA-2a/2b) | Server early (WA-2b) | Server [WA-5] |
 |---|---|---|---|
-| Decline on the bar | store `denied`, set `fa_forget_pending`, `POST /api/v/forget` | expire `fa_vid` | plus: purge that id's queued events, then forward `DELETE /visitors/{id}` after pending batches |
-| Withdrawal (Allow → Decline) | `stop()`, drop the client queue, then as above | as above | as above |
+| Decline on the bar | store `denied`, set `fa_forget_pending`, `POST /api/v/forget` | expire `fa_vid` | plus: purge that id's queued events, wait for an in-flight batch, then delete synchronously (§5.4) |
+| Withdrawal (Allow → Decline) | store `denied`; `stop()`; drop the client queue; **abort every in-flight `/api/v` request via its `AbortController`**; only then set `fa_forget_pending` and `POST /api/v/forget` | as above | as above |
 | GPC/DNT auto-decline | — | — | client [WA-5]: store `denied` (`by: "signal"`), forget once |
-| Owner switch on | set `fa_optout`, forget | as above | as above |
-| Forget failed | `fa_forget_pending` retried once on the next document load | — | — |
+| Owner switch on | set `fa_optout`, abort in-flight requests, forget | as above | as above |
+| Forget failed (network error or 503) | `fa_forget_pending` stays; the next document load retries forget once | — | 503 sets `fa_forget` so the retry still knows the id (§5.4) |
+
+**Race with an in-flight first collect.** Withdrawal writes `denied` before anything else, so no new flush starts; it aborts in-flight requests, so their responses are discarded by the browser; and forget runs strictly after the abort. A `Set-Cookie: fa_vid` from a collect response that the browser had already processed before the abort is cleared again by the forget response, which always arrives later. `/api/v` itself never mints when the envelope does not carry a current `cv` and a valid `consentDate` (§5.3 step 10 runs before step 12); the tracker only sends while the stored choice is `granted`, so a withdrawn or absent consent state never produces a request that could mint.
 
 Erasure reaches live data only (§13). Id-free aggregates for days outside the 2-day recompute window keep that visitor's counts.
 
@@ -252,7 +256,7 @@ Erasure reaches live data only (§13). Id-free aggregates for days outside the 2
 | Method + path | Purpose |
 |---|---|
 | `POST /api/v` | event batches (`src/app/api/v/route.ts`, `runtime = 'nodejs'`, `dynamic = 'force-dynamic'`) |
-| `POST /api/v/forget` | expire `fa_vid`; [WA-5] purge queue and request erasure |
+| `POST /api/v/forget` | expire `fa_vid`; [WA-5] purge queue and erase synchronously |
 
 Neutral naming avoids generic filter tokens; no rotation or disguise. `/api` is disallowed in `robots.txt` and outside the intl proxy.
 
@@ -306,22 +310,26 @@ Strict schema (unknown keys → 400), depth ≤ 3, strings ≤ 128 chars before 
 | 5 | Kill switches `ANALYTICS_UI_ENABLED`, `ANALYTICS_COLLECT_ENABLED` | 204 | WA-2b |
 | 6 | C6 D8: cookie name starting with `__Secure-authjs.session-token` or `authjs.session-token` (presence only) | 204, `signed_in` | WA-2b |
 | 7 | C6 bot list: UA empty, < 20 chars or §5.7 regex; `Sec-Purpose`/`Purpose: prefetch` | 204, `bot` | [WA-5] |
-| 8 | C3 rate limits (§5.8) | 429 + `Retry-After` | [WA-5] |
+| 8 | C3 collect rate limits (§5.8); never applied to `/api/v/forget` | 429 + `Retry-After` | [WA-5] |
 | 9 | C2 envelope schema | 400 | WA-2b |
-| 10 | `cv`, `consentDate` | 204, `consent` | WA-2b |
+| 10 | `cv`, `consentDate`; a request failing this step never reaches step 12, so it can never mint | 204, `consent` | WA-2b |
 | 11 | C7/C8 per-event validation and canonicalisation; invalid events dropped alone | `invalid` / `path` | WA-2b |
 | 12 | `fa_vid` read; mint when absent/malformed/stale; [WA-5] mint limit 5/h per key, over → request dropped (`mint_limited`) | — | WA-2b / [WA-5] |
 | 13 | C10 enrichment (§5.6, §5.7) | — | WA-2b |
 | 14 | C12 enqueue | overflow counted, 204 | WA-2b |
 | 15 | C9 respond 204 empty, `Cache-Control: no-store` | | WA-2b |
 
-All non-error outcomes are 204; error bodies empty. The only `Set-Cookie` is `fa_vid` mint/clear (C9 adapted for K2).
+All non-error outcomes are 204; error bodies empty. The only `Set-Cookie` headers are `fa_vid` mint/clear and [WA-5] `fa_forget` (C9 adapted for K2).
 
 ### 5.4 `POST /api/v/forget`
 
-Steps 1 to 4 (body `{}`) and, from WA-5, step 8. Not affected by the signed-in drop or the kill switches (works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in). Always 204 with `Set-Cookie: fa_vid=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`; never mints.
-- **Early (WA-2b):** only expires the cookie.
-- **[WA-5]:** if `fa_vid` was present and well-formed, purge that id's queued events and append `DELETE /api/webanalytics/visitors/{uuid}` to the ordered queue after pending batches. The id comes from the cookie only, never from the body.
+Steps 1 to 4 (body `{}`). **Never subject to the collect rate limits** (§5.8) and not affected by the signed-in drop or the kill switches (works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in). Never mints `fa_vid`. Every response, including 429 and 503, first clears the cookie: `Set-Cookie: fa_vid=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`.
+
+- **Early (WA-2b):** only expires the cookie; always 204.
+- **[WA-5] own limit:** 30 forget requests per key per minute (generous; a user clicks Decline a few times at most). Above it the response is still 204 with the cookie cleared; only the delete forwarding is skipped for that request (an erasure for the same id is already done or pending).
+- **[WA-5] durable erasure:** the id is taken from `fa_vid`, else from `fa_forget`, never from the body. The handler purges that id's events from the forward queue, waits until a batch currently in flight has completed (so no event of that id can be sent afterwards), then calls `DELETE /api/webanalytics/visitors/{uuid}` **synchronously** with a bounded retry (3 attempts, 1 s apart, 3 s timeout each, ≤ 12 s in total) before answering:
+  - data-service answered 204 → respond 204 and clear `fa_forget` (`Max-Age=0`);
+  - data-service unreachable or 5xx after the retries → respond **503** and set `fa_forget=<uuid>` (§4.2), so the id survives the cleared `fa_vid`; the tracker keeps `fa_forget_pending` in `localStorage` and retries forget once on the next document load.
 
 ### 5.5 Canonicalisation and allowlists (C7, C8; WA-2b)
 
@@ -351,14 +359,15 @@ Raw UA and IP discarded after the request. Before WA-5, crawlers are filtered by
 
 ### 5.8 Rate limits, mint limit [WA-5]
 
-In-process sliding windows (contact limiter pattern; valid with `replicas: 1`; with N replicas divide by N or use a shared store). Key = `CF-Connecting-IP`, IPv6 /64, memory only.
+In-process sliding windows (contact limiter pattern; valid with `replicas: 1`; with N replicas divide by N or use a shared store). Key = `CF-Connecting-IP`, IPv6 /64, memory only. The collect limits and the forget limit are separate limiter instances; forget never consumes or checks the collect budget.
 
-| Window | Limit |
-|---|---|
-| per key | 20 requests / 60 s **and** 200 events / 10 min |
-| per key, `fa_vid` mints | 5 / hour |
-| global | 300 requests / 60 s **and** 2 000 events / 60 s |
-| tracked keys | 10 000, oldest evicted |
+| Window | Applies to | Limit |
+|---|---|---|
+| per key | `/api/v` | 20 requests / 60 s **and** 200 events / 10 min |
+| per key, `fa_vid` mints | `/api/v` | 5 / hour |
+| global | `/api/v` | 300 requests / 60 s **and** 2 000 events / 60 s |
+| per key | `/api/v/forget` | 30 requests / 60 s; over it the cookie is still cleared (§5.4) |
+| tracked keys | each limiter | 10 000, oldest evicted |
 
 Batching check: one active visitor sends ≤ 8 requests/min at peak and 1 to 3 typically, ~20 events per 10 min; the per-key limits admit 3 to 10 concurrent visitors behind one NAT. 20 events fit 8 KiB.
 
@@ -368,23 +377,25 @@ Batching check: one active visitor sends ≤ 8 requests/min at peak and 1 to 3 t
 
 | Event | Condition | Payload |
 |---|---|---|
-| `goal` | `input.analytics === true` AND well-formed current `fa_vid` AND no Auth.js session cookie AND both kill switches on | `{type: "goal", goal: "contact_submit", visitorId, path: "/contact", locale, pageviewId: null, seq: null, occurredAt = receivedAt = now}` |
-| `enquiry` | every successful submission without session cookie; `ANALYTICS_COLLECT_ENABLED` on (independent of `ANALYTICS_UI_ENABLED`, §1.4) | `eventId`, `type: "enquiry"`, `occurredAt`, `receivedAt`; every other field of the §6.2 event shape serialised as `null` |
+| `goal` | `input.analytics === true` AND an **existing** well-formed current `fa_vid` AND no Auth.js session cookie AND both kill switches on. The Server Action never mints `fa_vid`: a submission without an existing cookie records no goal (the enquiry counter still counts it) | `{eventId: <server-generated>, type: "goal", goal: "contact_submit", visitorId, path: "/contact", locale, pageviewId: null, seq: null, occurredAt = receivedAt = now}` |
+| `enquiry` | every successful submission without session cookie; `ANALYTICS_COLLECT_ENABLED` on (independent of `ANALYTICS_UI_ENABLED`, §1.4) | `eventId` (server-generated), `type: "enquiry"`, `occurredAt`, `receivedAt`; every other field of the §6.2 event shape serialised as `null` |
 
-Nothing from the form is attached. A failure to enqueue never affects the form result. The note under the form stays unchanged.
+`eventId` for goal and enquiry is generated by furchert-ch with `crypto.randomUUID()` (UUID v4) when the event is created; it is the idempotency key for forward-queue retries. Nothing from the form is attached. A failure to enqueue never affects the form result. The note under the form stays unchanged.
 
 ### 5.10 Forward queue (C12; WA-2b unless marked)
 
 | Item | Rule |
 |---|---|
 | Model | re-serialise from the validated model; add `edgeDrops` counts |
-| Order | one ordered pipeline (batches and, [WA-5], deletes) |
+| Order | one ordered pipeline for batches; [WA-5] forget waits for the in-flight batch before its synchronous delete (§5.4) |
 | Queue | 2 000 events; overflow dropped and counted |
-| Flush | every 5 s or at 200 events; one in flight; timeout 3 s |
+| Batches | ≤ 200 events **and** ≤ 48 KiB serialised (data-service caps at 200 events and 64 KiB; the margin covers envelope and encoding); a batch reaching either bound is closed and a new one started |
+| Flush | every 5 s or when a batch is full; one in flight; timeout 3 s |
 | Circuit | open 60 s after 3 consecutive failures |
 | Age | events older than 60 min dropped (`expired`) |
-| Capped 429 [WA-5] | read `capScope`, `retryAt`; pause analytics events until `retryAt`; goal, enquiry and deletes keep flowing |
-| Errors | 400/413 drop and count; 401 drop token, retry once; 403 drop, log a configuration hint |
+| Capped 429 [WA-5] | read `capScope`, `retryAt`; pause analytics events until `retryAt`; goal and enquiry keep flowing |
+| 413 | never drops valid events: the batch is split in halves and each half is retried; only a single event that alone exceeds the cap (impossible within the §6.2 field limits) is dropped and counted `invalid` |
+| Other errors | 400 drop the batch and count; 401 drop token, retry once; 403 drop, log a configuration hint |
 | Delivery | at-most-once; lost on pod restart (accepted) |
 | Token | `analytics:write` only, own `globalThis` cache |
 | Logging (C17) | `[analytics]`; ≤ 1 summary line per minute with counts; never body, IP, UA, visitor id, referrer, URL with query |
@@ -455,7 +466,7 @@ Seeded at startup from `events.received_at`. Exempt: `goal`, `enquiry` (bounded 
 
 ### 6.5 `DELETE /api/webanalytics/visitors/{visitorId}` and tombstones [WA-5]
 
-Write scope. Deletes all `events` rows of that id, adds it to an in-memory tombstone set for 2 h; events for a tombstoned id are rejected (`erased`). 204 (also when nothing matched), 400 for a bad uuid. Log `[webanalytics] visitor erased rows=<n>` only. Tombstones are lost on restart; the furchert-ch queue purge covers the normal case.
+Write scope. Deletes all `events` rows of that id, adds it to an in-memory tombstone set for 2 h; events for a tombstoned id are rejected (`erased`). 204 (also when nothing matched), 400 for a bad uuid. Log `[webanalytics] visitor erased rows=<n>` only. Tombstones are lost on restart; the furchert-ch queue purge covers the normal case. Called synchronously by the forget handler (§5.4).
 
 ---
 
@@ -507,15 +518,27 @@ Partition keys break `event_id` dedupe; `ctid` batching is unsafe on partitioned
 | Runner | `NetmonCollector` `webanalytics-rollup` via `CollectorRunner`; `/api/netmon/status` excludes `webanalytics-*` collectors (network strip unchanged); `/api/webanalytics/status` lists them | WA-3a |
 | Default off | ships with `netmon.collectors.webanalytics-rollup.enabled=false`. `CollectorMetricsInitializer` exports no freshness gauge for a disabled collector, so the existing `NetmonCollectorStale` catch-all cannot fire before the alert change is live | WA-3a |
 | Enable gate | (1) homelab WA-3a PR (daily class + catch-all exclusion) merged; (2) the owner runs playbook `41_monitoring.yml`; (3) only then a follow-up data-service `k8s/deployment.yaml` change sets the property to `true` (env binding for the dashed collector name verified in WA-3a phase 1) | WA-3a |
-| Schedule | `@Scheduled(cron = "0 12 1 * * *", zone = "Europe/Zurich")` (§7.6), documented exception to "crons in UTC" | WA-3a |
+| Schedule | two daily runs, both `zone = "Europe/Zurich"` and through the same `CollectorRunner` (one lock, so they never overlap): **01:12** `@Scheduled(cron = "0 12 1 * * *")` (night run, §7.6) and **07:30** `@Scheduled(cron = "0 30 7 * * *")` (morning run, after yesterday closes at 07:15). 07:30 is clear of Longhorn 02:00, restic 03:00, `RetentionJob` (04:30/05:30), Longhorn trim 05:00 and blocklists (06:00/07:00); the mba1 scheduled reboot at 07:40 only happens after ≥ 3.5 days uptime and the run takes seconds, so an interrupted run is simply redone by the next night's lookback. It shares the minute mark with the 30-minute reputation and 5-minute Cloudflare collectors, which the scheduler pool (size 4) runs in parallel. Documented exception to "crons in UTC" | WA-3a |
 | Lock | `pg_try_advisory_xact_lock(hashtext('webanalytics-rollup'))` per day | WA-3a |
 | First run | no high-water mark: process yesterday only (zero rows + `rollup_day` when empty), set the mark | WA-3a |
-| Days per run | last 2 complete days; catch-up after the mark; up to 31 days with an outdated `definition_version`, newest first, within 30 days | WA-3a |
+| Days per run | **01:12:** the last 2 complete days (yesterday provisional, the day before final), catch-up after the mark, up to 31 days with an outdated `definition_version`, newest first, within 30 days. **07:30:** every day that is closed but still has `final = false` (normally only yesterday), written as final | WA-3a |
+| Final vs provisional | a day D is **closed** once `start(D + 1) + 6 h` (visit cap) `+ 75 min` (60 min forward-queue age + 15 min clock-skew window) has passed, i.e. D + 1 at 07:15 Zurich time. A rollup of D before that writes `rollup_day.final = false` (provisional); a rollup after it writes `final = true`. The 01:12 run writes yesterday as provisional; the 07:30 run rewrites it as final the same morning. `lastCompleteDay` = the newest day with `final = true`; read endpoints serve only final days (provisional rows are not exposed). After 07:30 "data through" is therefore normally yesterday; between 00:00 and 07:30 it is the day before yesterday | WA-3a |
 | Empty days | always a `rollup_day` row, so `lastCompleteDay` advances | WA-3a |
 | Write mode | per day one transaction: DELETE the day from every rollup-owned table, INSERT … SELECT (never `daily_ingest_stats`, `daily_enquiries`) | WA-3a |
 | Freeze guard | a day is (re)computed only if (a) `day < today`; (b) `day ≥ today − (retentionDays − 1)`, with `retentionDays` = the configured `webanalytics.retention.events-days`; (c) `day ≥ today − 30` or no `rollup_day` row; (d) not (`rollup_day.raw_events > 0` and now 0 raw events). Needed only once retention deletes data | [WA-5] |
 
-**Algorithm for day D:** load events in [start(D) − 6 h, start(D + 1) + 6 h); per visitor order by `occurred_at`, `event_id` (`seq` within a pageview); split at gaps > 30 min and at landings with referrer/UTM; cut at 6 h; keep visits starting in D (no pageview → `orphan_visits`); exclude visits with > 100 pageviews or > 500 events; merge same-path pageviews within 30 s; per pageview MAX engaged/scroll, OR masks; per visit entry/exit, entry locale, device class, landing attributes, engaged (≥ 10 s, or ≥ 2 distinct pages, or a key event), offer visit, contact intent, converting, new/returning; channel and first channel; WA-3b: funnels, group path, entry × exit, seen-before, transitions, dimensions, CF baseline; top 50 per open dimension, rest `(other)`; write rows and `rollup_day(D)`. Funnels and path keys in Java; `SET LOCAL work_mem = '16MB'`, `statement_timeout = '120s'`.
+**Algorithm for day D:** load events in [start(D) − 6 h, start(D + 1) + 6 h); per visitor order by `occurred_at`, `event_id` (`seq` within a pageview); split at gaps > 30 min and at landings with referrer/UTM; cut at 6 h; keep visits starting in D (no pageview → `orphan_visits`); exclude visits with > 100 pageviews or > 500 events; merge same-path pageviews within 30 s; per pageview MAX engaged/scroll, OR masks; per visit entry/exit, entry locale, device class, landing attributes, engaged (≥ 10 s, or ≥ 2 distinct pages, or a key event), offer visit, contact intent, converting, new/returning; channel and first channel; WA-3b: funnels, group path, entry × exit, seen-before, transitions, dimensions, CF baseline, submits by day; top 50 per open dimension, rest `(other)`; write rows and `rollup_day(D)`. Funnels and path keys in Java; `SET LOCAL work_mem = '16MB'`, `statement_timeout = '120s'`.
+
+**Raw-history reads beyond the day window** (all on `webanalytics.events`, all within raw retention):
+
+| Purpose | Read | Bound |
+|---|---|---|
+| New vs returning | per visitor of D: `EXISTS (event with the same visitor_id and occurred_at < the visit's first pageview)` via index `(visitor_id, occurred_at)` | a visitor id lives ≤ 365 days, raw keeps 396 days, so every earlier event of a live id is still present for every day inside the 30-day recompute horizon |
+| First-known channel (converting visits) | per converting visitor of D: its earliest `landing = true` pageview (`min(occurred_at)`) and that pageview's referrer/UTM, classified with §8.4 | same bound as above |
+| Rolling uniques (`visitors_7d`, `visitors_28d`, `repeat_offer_viewers_28d`) | `count(DISTINCT visitor_id)` over pageviews in [start(D − 6), start(D + 1)) and [start(D − 27), start(D + 1)); repeat offer viewers rebuild visits over the 28-day window | ≤ 28 days back, always inside retention |
+| `monthly_visitors` | distinct visitors over the current Zurich month (and the previous one on days 1 to 2) | ≤ 62 days back |
+
+Before WA-5 there is no retention, so these reads see all raw data; with the dark launch that is empty until go-live.
 
 ### 7.6 Rollup slot (K6)
 
@@ -557,7 +580,7 @@ Re-evaluation: an id-free per-visit fact table is rejected (rare country + devic
 | `daily_click` | `(day, path, entry_locale, device_class, kind, target, area)` | `clicks`, `visits`, `converting_visits` | 3a |
 | `daily_source` | `(day, entry_locale, device_class, channel, referrer_domain, utm_source, utm_medium, utm_campaign)` | `visits`, `new_visits`, `engaged_visits`, `offer_visits`, `converting_visits` | 3a |
 | `daily_conversion` | `(day, entry_locale, device_class, entry_path, channel, first_channel)` | `converting_visits`, `conversions` | 3a |
-| `rollup_day` | `(day)` | `raw_events`, `raw_pageviews`, `visits`, `orphan_visits`, `definition_version`, `rolled_up_at` | 3a |
+| `rollup_day` | `(day)` | `raw_events`, `raw_pageviews`, `visits`, `orphan_visits`, `definition_version`, `final` (boolean), `rolled_up_at` | 3a |
 | `daily_transition` | `(day, entry_locale, device_class, from_path, to_path)` | `transitions` | 3b |
 | `daily_funnel` | `(day, funnel_id, step, entry_locale, device_class)` | `visits` | 3b |
 | `daily_group_path` | `(day, path_key)` | `visits`, `converting_visits` | 3b |
@@ -565,6 +588,7 @@ Re-evaluation: an id-free per-visit fact table is rejected (rare country + devic
 | `daily_intent_seen` | `(day, seen)` (`about`, `projects`, `prices`, `none`) | `visits` | 3b |
 | `daily_dimension` | `(day, dimension, value)` (`country`, `browser_family`, `os_family`, `viewport`, `visitor_type`) | `visits`, `engaged_visits`, `converting_visits` | 3b |
 | `daily_cf_baseline` | `(day, path, locale)` | `requests`, `sampled` | 3b |
+| `daily_submits` | `(day)` = Zurich day of the goal event's `occurred_at` (submission day) | `consented_submits` (goal events, excluded visits included) | 3b |
 
 Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects/*`, `/about`; personal `/rowing`; contact `/contact`; repeats collapsed, first 4 steps then `…`, `(exit)` terminal.
 
@@ -605,12 +629,12 @@ Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects
 | Base | `http://data-service.apps.svc.cluster.local:8082/api/webanalytics` |
 | Auth | `SCOPE_analytics:read` and `sub ∈ webanalytics.api.read-clients`; `GET` only |
 | Source | aggregates only (repository test); `/status.ingest` from memory; no visitor id in any response |
-| Range | `from`, `to` (Zurich dates, inclusive); default `to` = `lastCompleteDay`, `from` = `to − 27 d`; span ≤ 366 d; `to` clamped; invalid → 400 `invalid_window` |
+| Range | `from`, `to` (Zurich dates, inclusive); default `to` = `lastCompleteDay`, `from` = `to − 27 d`; span ≤ 366 d; `to` clamped to `lastCompleteDay` (provisional days are never served, §7.5); invalid → 400 `invalid_window` |
 | Compare | `compare=previous` (default) or `none` |
 | Filters | `locale=de\|en` (entry locale), `device=desktop\|mobile\|tablet`; echoed as `"filters": {"applied": {…}, "ignored": [...]}` |
 | Numbers | counts only; rates, intervals, medians in furchert-ch; daily series |
 | Lists | `limit` default 20, max 100; remainder in `(other)` |
-| Empty data | every day up to `lastCompleteDay` with zeros; before any rollup `lastCompleteDay` `null` |
+| Empty data | every day up to `lastCompleteDay` with zeros; before any final rollup `lastCompleteDay` `null` |
 
 | Endpoint | WA | `locale` | `device` |
 |---|---|---|---|
@@ -624,7 +648,7 @@ Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects
 
 ### 8.2 Endpoints
 
-**`GET /status`**: `{"collectors": [{"name": "webanalytics-rollup", "enabled", "lastSuccessAt", "lastWindowEnd", "consecutiveFailures", "lastErrorCode", "stale"}], "lastCompleteDay", "rawRetentionStart", "definitionVersion", "ingest": {"lastEventAt", "eventsToday", "dailyCap", "capped"}}`. `stale` = older than 26 h. `eventsToday` = accepted cap-counted events with `received_at` in the current UTC day. `dailyCap` and `capped` are `null` before WA-5; `rawRetentionStart` is `null` before WA-5.
+**`GET /status`**: `{"collectors": [{"name": "webanalytics-rollup", "enabled", "lastSuccessAt", "lastWindowEnd", "consecutiveFailures", "lastErrorCode", "stale"}], "lastCompleteDay", "provisionalDay", "rawRetentionStart", "definitionVersion", "ingest": {"lastEventAt", "eventsToday", "dailyCap", "capped"}}`. `stale` = older than 26 h. `lastCompleteDay` = newest `final` day: after the 07:30 run normally yesterday, between 00:00 and 07:30 the day before yesterday. `provisionalDay` = newest rolled-up day with `final = false`, informational only: it is yesterday between the 01:12 and the 07:30 run and `null` otherwise. `eventsToday` = accepted cap-counted events with `received_at` in the current UTC day. `dailyCap` and `capped` are `null` before WA-5; `rawRetentionStart` is `null` before WA-5.
 
 **`GET /overview`**
 
@@ -655,7 +679,7 @@ Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects
 
 **`GET /audience`** (3b): `newVsReturning {newVisits, returningVisits}`, `repeatOfferViewers {value, basis}`, `deviceClass`, `entryLocale`, `dimensions {country, browserFamily, osFamily, viewport, visitorType}` (each `[{value, visits}]`).
 
-**`GET /coverage`** (3b): `baselineFrom`, `daily [{day, consentedPageviews, cloudflareRequests, sampled}]`, `byPage [{path, locale, consentedPageviews, cloudflareRequests, sampled}]` (page locale), `enquiries {consentedSubmits, totalSubmits}`, `dataQuality {edge {…}, secondLine {…}, duplicates, cappedDays}`. **Coverage window starts at go-live:** `baselineFrom` = the first day with `rollup_day.raw_pageviews > 0` (go-live day), `null` before; `daily`, `byPage` and the CF totals cover only `[max(from, baselineFrom), to]`. The pre-launch CF rows from the backfill stay stored but are never compared with tracked pageviews.
+**`GET /coverage`** (3b): `baselineFrom`, `daily [{day, consentedPageviews, cloudflareRequests, sampled}]`, `byPage [{path, locale, consentedPageviews, cloudflareRequests, sampled}]` (page locale), `enquiries {consentedSubmits, totalSubmits}`, `dataQuality {edge {…}, secondLine {…}, duplicates, cappedDays}`. **Coverage window starts at go-live:** `baselineFrom` = the first day with `rollup_day.raw_pageviews > 0` (go-live day), `null` before; `daily`, `byPage` and the CF totals cover only `[max(from, baselineFrom), to]`. The pre-launch CF rows from the backfill stay stored but are never compared with tracked pageviews. `enquiries` counts both sides by **submission day**: `consentedSubmits = Σ daily_submits.consented_submits` and `totalSubmits = Σ daily_enquiries.submissions` over the same days (not by visit start day).
 
 ### 8.3 Metric definitions (binding)
 
@@ -672,11 +696,11 @@ Page groups: home `/`; offer `/automation`, `/it`; proof `/projects`, `/projects
 | Scroll reach | `scrollReached.pNN / scrollSamples` |
 | Section reach | `reached_pageviews / pageviews(/automation)` |
 | CTR | `visits / pageVisits` |
-| Visit conversion rate | `convertingVisits / visits` |
+| Visit conversion rate | `convertingVisits / visits` (visit-start day) |
 | Conversion per entry page | `landingConvertingVisits / entries` |
 | Repeat offer viewer | offer pageviews in ≥ 2 visits within the basis window |
 | Attribution | visit-scoped last touch; secondary first known channel; `heardVia` stays manual |
-| Consent coverage | two separate series from `baselineFrom`; rounded 4-week band only if both ≥ 50; no consent-rate %; enquiry coverage `consentedSubmits / Σ daily_enquiries` |
+| Consent coverage | two separate series from `baselineFrom`; rounded 4-week band only if both ≥ 50; no consent-rate %; enquiry coverage `Σ daily_submits.consented_submits / Σ daily_enquiries.submissions`, both by submission day |
 
 ### 8.4 Channels
 
@@ -714,7 +738,7 @@ F1 `offer`: visit → offer visit → reached `preise` → contact intent → fo
 | Token | `analytics:read` only; env `DATA_SERVICE_URL`, `DATA_SERVICE_TOKEN_URL` reused |
 | Rendering (C16) | React text only; no `dangerouslySetInnerHTML`, no stored-value hrefs; inline SVG/div, ETHON tokens |
 | Controls | range `7d`/`28d` (default)/`90d`/`12m`/custom, compare on, locale (entry), device; ignored filters shown per section |
-| Header | "Data through <day> · consented visits only · own visits excluded" |
+| Header | "Data through <lastCompleteDay> · consented visits only · own visits excluded" (`lastCompleteDay` is the newest final day: normally yesterday after the 07:30 run, the day before yesterday before it) |
 | Design pass | `dataviz` + `frontend-design` skills, owner review (WA-4a, whole page) |
 
 ### 9.2 Sections
@@ -736,7 +760,7 @@ No per-visitor timeline, converting-visit list, id lookup or export. Docs (`INTE
 
 ### 9.3 "Never track this browser" (D8)
 
-On: `fa_optout`, forget, stop. Off: remove `fa_optout`. Per browser/device; not auto-enabled on sign-in.
+On: `fa_optout`, abort in-flight requests, forget, stop. Off: remove `fa_optout`. Per browser/device; not auto-enabled on sign-in.
 
 ---
 
@@ -768,11 +792,11 @@ i18n: `analytics.consent.{title, body, privacyLink, accept, decline, current, cu
 |---|---|
 | L1 | New section after "Sicherheitsüberwachung": "Nutzungsstatistik (nur mit Einwilligung)" / "Usage statistics (only with consent)": cookie `fa_vid` for 12 months; data list per §3.8/§3.6; consent basis; GPC/DNT = refusal; withdrawal deletes the identifier and erases the individual events recorded with it from the website's live data. **No server retention period, no location, no backup statement (Q1, Q2)** |
 | L2 | "Sicherheitsüberwachung": aggregated per-page request counts without IP addresses also serve as a reference figure |
-| L3 | "Cookies" → "Cookies und lokaler Speicher": cookie `fa_vid` (only with consent, 12 months) and the choice in local storage (also when declined, 12 months) |
+| L3 | "Cookies" → "Cookies und lokaler Speicher": cookie `fa_vid` (only with consent, 12 months), the cookie `fa_forget` (only while an erasure request could not yet be completed, removed once it succeeds) and the choice in local storage (also when declined, 12 months) |
 | L4 | "Ihre Rechte": consent can be withdrawn at any time via "Datenschutz-Einstellungen" |
 | L5 | Header comment: dated owner decisions 2026-11-08 (Q1 "Keine Fristen", Q2 "So lassen") and the consent-version bump rule |
 | L6 | `updated` and `PAGE_LAST_MODIFIED['/privacy']` bumped |
-| L7 | `legal.test.ts`: existing guards unchanged; add needles `fa_vid`, `Nutzungsstatistik`/`Usage statistics`, `Datenschutz-Einstellungen`/`Privacy settings`; the section's only duration is "12 Monate"/"12 months" |
+| L7 | `legal.test.ts`: existing guards unchanged; add needles `fa_vid`, `fa_forget`, `Nutzungsstatistik`/`Usage statistics`, `Datenschutz-Einstellungen`/`Privacy settings`; the section's only duration is "12 Monate"/"12 months" |
 
 ---
 
@@ -780,7 +804,7 @@ i18n: `analytics.consent.{title, body, privacyLink, accept, decline, current, cu
 
 | Scope | Client | Used by | Checked by |
 |---|---|---|---|
-| `analytics:write` (new, WA-0) | `furchert-ch` (`client_credentials`) | forward queue | `POST /events`, [WA-5] `DELETE /visitors/{id}` |
+| `analytics:write` (new, WA-0) | `furchert-ch` (`client_credentials`) | forward queue, forget handler | `POST /events`, [WA-5] `DELETE /visitors/{id}` |
 | `analytics:read` (new, WA-0) | `furchert-ch` | dashboard | `GET /api/webanalytics/*` |
 | `netmon:read` | `furchert-ch` | `/dashboard/network` | `/api/netmon/**` |
 
@@ -905,7 +929,7 @@ Local-only specialist reports (not in this repo), summarised in this section. A 
 | privacy-consent | No client session id | A | §3.2, §7.5 |
 | privacy-consent | Minimised fields | A | §3.8, §5.5, §5.7 |
 | privacy-consent | GPC/DNT = Decline | A → WA-5 | §4.1 |
-| privacy-consent | Delete-on-withdraw | A → WA-5 | §4.4, §6.5 (cookie cleared early) |
+| privacy-consent | Delete-on-withdraw | A → WA-5 | §4.4, §5.4, §6.5 (cookie cleared early) |
 | privacy-consent | Goal as bare fact, never linked | A | §5.9, §13 |
 | privacy-consent | Dashboard aggregate-only | A | §9 |
 | privacy-consent | Retention/location in text (OD5) | owner | Q1: neither |
@@ -960,7 +984,7 @@ Local-only specialist reports (not in this repo), summarised in this section. A 
 | data-model | Skew correction | D | 15-min window |
 | data-model | Replace-per-day, `rollup_day`, version backfill | A | §7.5 |
 | data-model | Freeze guard | A → WA-5 | needed only with retention |
-| data-model | Rollup 01:15 | D | 01:12 |
+| data-model | Rollup 01:15 | D | 01:12 (provisional) + 07:30 (final) |
 | data-model | Id-free aggregates, uniques, `daily_cf_path` | A | §7.8 |
 | data-model | Locale as path prefix | R | `entry_locale` keys |
 | data-model | `RetentionTarget` extension, 396 d | A → WA-5 | §7.7 |
@@ -982,8 +1006,9 @@ Local-only specialist reports (not in this repo), summarised in this section. A 
 | R8 | CF baseline includes bots, prefetches | separate lines |
 | R9 | First 12 months almost everyone "new" | UI note |
 | R10 | Content blockers | accepted |
-| R11 | Erased visitor's events in flight | WA-5 purge + tombstone |
+| R11 | Erased visitor's events in flight | abort on withdrawal, queue purge, synchronous delete, tombstone |
 | R12 | WA-5 slips while value work is done | go-live depends on WA-5; flag stays off |
+| R13 | Two ids minted at consent in browsers without Web Locks | documented data-quality limit (§3.9) |
 
 **Owner questions:** all answered on 2026-11-08 (Q1 to Q7, O1; §1.2). None open.
 
@@ -1039,7 +1064,7 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 **furchert-ch: "WA-2a: Consent bar and privacy settings link" (skill: `frontend-design`)**
 - Design pass first; owner review.
 - Before a choice: zero requests to `/api/v`, zero storage writes, no device-property reads (tests + DevTools); equal buttons, Decline first; Esc/close/scroll ≠ consent.
-- Decline and withdrawal stop the tracker immediately, store `denied` and call forget (stubbed contract test incl. `fa_forget_pending` retry).
+- Decline and withdrawal store `denied` first, stop the tracker, abort in-flight requests (`AbortController`) and only then call forget (stubbed contract test incl. order of operations and `fa_forget_pending` retry).
 - `fa_consent` 12 months fixed; version bump re-asks; multi-tab withdrawal.
 - Footer link with current state; a11y; Lighthouse: bar not LCP, CLS 0; behind `ANALYTICS_UI_ENABLED = false`; no `legal.ts` change.
 - Deferred to WA-5 (WA-5 furchert-ch issue): GPC/DNT auto-decline; final copy sign-off.
@@ -1048,12 +1073,13 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 
 **furchert-ch: "WA-2b: Tracker, /api/v with basic safety, minimal forget, goal and enquiry, registries, redirects"**
 - Verify in phase 1: `CF-IPCountry` reaches the pod; locale switch soft vs full reload; `fetch keepalive` on `pagehide` (Chrome, Safari macOS/iOS, Firefox) with `Sec-Fetch-Site`/`Origin`; `globalThis` singletons shared in a production build.
-- Tracker §3.4 to §3.10 with unit tests (landing rule, engagement, scroll, sections, clicks, transport, singleton, payload hygiene); bundle budget test; `navigator.webdriver` off.
+- Tracker §3.4 to §3.10 with unit tests (landing rule, engagement, scroll, sections, clicks, transport incl. `AbortController` per request and the Web Locks first-flush serialisation with fallback, singleton, payload hygiene); bundle budget test; `navigator.webdriver` off.
 - Registries and wiring (`TRACKED_PATHS`, `NAV_TARGETS`, `TRACK_IDS` ≤ 100 with source test, FAQ ids, `data-track-section`, `track` props); `about-contact`/`rowing-contact`; `contact-sources.test.ts` FROM_IDS regex `/^(automation|home|about|rowing)-[a-z-]+$/` and `CTA_FILES` gains the about and rowing pages; `CHANGELOG.md` notes the new «Quelle:» values.
-- `/api/v` basic safety tested: 405, 415, 403 (foreign/missing `Sec-Fetch-Site`+`Origin`), 8 KiB streamed cap incl. chunked, 21 events → 400, unknown key → 400, signed-in drop, `cv`/`consentDate` drop, canonicalisation (query and fragment stripping, UTM rules, referrer → host, `mailto:x@y` → type only, `/imprint`/`/privacy` dropped), `XX`/`T1` → null, kill switches; forwarded payload never contains IP or UA.
-- Cookie minted only when absent/stale with exact attributes and expiry; minimal forget expires it, works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in.
-- Goal per §5.9 (the form's `analytics` flag follows §4.1: user grant overrides GPC/DNT; a client-posted goal is dropped); enquiry for every successful submission, serialised with every other field `null`, live with `ANALYTICS_UI_ENABLED = false` (test); note under the form unchanged; forward queue (order, retry, circuit, age) and C17 logging tested; Q6 redirects with `src/redirects.test.ts`; endpoint-path pin test; `securityHeaders.test.ts` unchanged; `ANALYTICS_COLLECT_ENABLED: "true"` in `k8s/deployment.yaml`; `INTERFACES.md`, `DEPLOYMENT.md`, `.env.local.example`, `CHANGELOG.md`.
-- Deferred to WA-5 (WA-5 furchert-ch issue): per-IP/global rate limits, mint limit, bot UA list, 429 `retryAt` pause, forget queue purge and delete forwarding.
+- `/api/v` basic safety tested: 405, 415, 403 (foreign/missing `Sec-Fetch-Site`+`Origin`), 8 KiB streamed cap incl. chunked, 21 events → 400, unknown key → 400, signed-in drop, `cv`/`consentDate` drop (and no `Set-Cookie` on such a request), canonicalisation (query and fragment stripping, UTM rules, referrer → host, `mailto:x@y` → type only, `/imprint`/`/privacy` dropped), `XX`/`T1` → null, kill switches; forwarded payload never contains IP or UA.
+- Cookie minted only when absent/stale with exact attributes and expiry; minimal forget expires it, is never rate-limited, works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in.
+- Goal per §5.9 (server-generated `eventId`; no goal without an existing `fa_vid`, while the enquiry still counts; the form's `analytics` flag follows §4.1; a client-posted goal is dropped); enquiry for every successful submission, server-generated `eventId`, serialised with every other field `null`, live with `ANALYTICS_UI_ENABLED = false` (test); note under the form unchanged.
+- Forward queue: batches split at 200 events and 48 KiB; a 413 splits and retries without dropping valid events (test); order, retry, circuit, age and C17 logging tested; Q6 redirects with `src/redirects.test.ts`; endpoint-path pin test; `securityHeaders.test.ts` unchanged; `ANALYTICS_COLLECT_ENABLED: "true"` in `k8s/deployment.yaml`; `INTERFACES.md`, `DEPLOYMENT.md`, `.env.local.example`, `CHANGELOG.md`.
+- Deferred to WA-5 (WA-5 furchert-ch issue): collect rate limits, forget's own limit, mint limit, bot UA list, 429 `retryAt` pause, forget queue purge and synchronous erasure with `fa_forget`.
 
 ### WA-3a (4.5 PD)
 
@@ -1065,20 +1091,21 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 **homelab-data-service: "WA-3a: Core rollup, core aggregates and read API"**
 - Verify in phase 1: environment binding of `netmon.collectors.webanalytics-rollup.enabled` from `k8s/deployment.yaml`.
 - Shipped with `netmon.collectors.webanalytics-rollup.enabled=false`: test that no `netmon_collector_last_success_timestamp_seconds{collector="webanalytics-rollup"}` series exists while disabled; enabling is a separate follow-up PR (`k8s/deployment.yaml`) merged only after the homelab WA-3a PR is merged and playbook `41_monitoring.yml` has run.
-- V7 creates the WA-3a tables; information_schema test for id-free aggregates.
-- Rollup at 01:12 Europe/Zurich: first run on empty state, 2-day lookback, catch-up, version backfill within 30 days, idempotent (byte-identical), advisory lock, `rollup_day` for empty days; `/api/netmon/status` excludes `webanalytics-*` (test).
-- Data tests: `Σ daily_page.pageviews = Σ daily_visits.pageviews`; `Σ entries = Σ exits = visits`; `new + returning = visitors`; `max(daily) ≤ visitors_7d ≤ Σ daily`; DST cases (2026-10-25 23:30, 2026-03-29 00:30, midnight crossing); gap and referrer/UTM split; 6 h cut; 30-s merge; bot exclusion; engaged MAX; channels; top-50 `(other)`; entry-locale filter counts a visit once.
-- Read chain and JSON contract tests for `/status`, `/overview`, `/pages`, `/pages/detail` (`previous`/`next` `null`), `/clicks`, `/sources`; filter echo; no raw-table reads (test); < 2 s for 365 days measured on the cluster; docs.
+- V7 creates the WA-3a tables (incl. `rollup_day.final`); information_schema test for id-free aggregates.
+- Rollup with two triggers, 01:12 and 07:30 Europe/Zurich, both through the same `CollectorRunner` lock (test: the two runs never overlap); first run on empty state, 2-day lookback, catch-up, version backfill within 30 days, idempotent (byte-identical), advisory lock, `rollup_day` for empty days; provisional/final rule tested with a fixed clock: the 01:12 run writes yesterday with `final = false`, the 07:30 run rewrites it with `final = true` (yesterday closes at 07:15), so after 07:30 `lastCompleteDay` = yesterday and before it the day before yesterday; provisional days are not served; a skipped 07:30 run is made good by the next 01:12 lookback; `/api/netmon/status` excludes `webanalytics-*` (test).
+- Data tests: `Σ daily_page.pageviews = Σ daily_visits.pageviews`; `Σ entries = Σ exits = visits`; `new + returning = visitors`; `max(daily) ≤ visitors_7d ≤ Σ daily`; **exact 7-day uniques: one visitor with visits on two different days of the window counts once in `visitors_7d` (and once in `visitors_28d`)**; DST cases (2026-10-25 23:30, 2026-03-29 00:30, midnight crossing); gap and referrer/UTM split; 6 h cut; 30-s merge; bot exclusion; engaged MAX; channels; first-channel from the visitor's earliest landing; new vs returning with an earlier event 300 days back; top-50 `(other)`; entry-locale filter counts a visit once.
+- Read chain and JSON contract tests for `/status` (incl. `provisionalDay`), `/overview`, `/pages`, `/pages/detail` (`previous`/`next` `null`), `/clicks`, `/sources`; filter echo; no raw-table reads (test); < 2 s for 365 days measured on the cluster; docs.
 - Deferred to WA-5 (WA-5 data-service issue): freeze guard.
 
 ### WA-3b (4.0 PD)
 
 **homelab-data-service: "WA-3b: Paths, funnels, audience, CF baseline with backfill and coverage"**
 - Verify in phase 1: `edgeResponseContentTypeName` availability (follow-up only).
-- V8 tables; `DEFINITION_VERSION` bump recomputes the horizon.
+- V8 tables (incl. `daily_submits`); `DEFINITION_VERSION` bump recomputes the horizon.
 - Funnels monotonic, out-of-order not counted; transitions `(entrance)` = `(exit)` = visits; group paths, entry × exit, seen-before.
+- **Exact uniques test: one visitor with offer pageviews in visits on two different days within 28 days counts once in `repeat_offer_viewers_28d`, and one visitor active on two days of the same 7-day range counts once in the audience visitors figure.**
 - `daily_cf_baseline` one-time backfill when empty (seeded netmon rows), nightly afterwards, `sampled` carried, no IP column; empty-table and idempotency tests.
-- `/coverage`: `baselineFrom` = first day with tracked pageviews, comparisons only from there (test with pre-launch CF rows).
+- `/coverage`: `baselineFrom` = first day with tracked pageviews, comparisons only from there (test with pre-launch CF rows); `consentedSubmits` by submission day (test: a visit starting 23:50 with a goal at 00:10 counts the submit on the second day, matching `daily_enquiries`).
 - Contract tests for `/funnels`, `/paths`, `/audience`, `/coverage`, detail `previous`/`next`.
 
 ### WA-4a (3.5 PD)
@@ -1086,20 +1113,20 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 **furchert-ch: "WA-4a: /dashboard/analytics core and never-track switch" (skills: `dataviz`, `frontend-design`)**
 - Design pass for the whole page; owner review.
 - Gate tests (SignInGate, NoAccess without data call, ADMIN, `DevSubnav` tab).
-- Sections 0, 1, 3, 4, 5, 9; 4b sections "not yet available"; §8.6 functions tested.
+- Sections 0, 1, 3, 4, 5, 9; 4b sections "not yet available"; §8.6 functions tested; "Data through" shows `lastCompleteDay` (final days only).
 - C16 XSS fixtures as text; grep test against `dangerouslySetInnerHTML` and stored-value hrefs.
-- Controls validated server-side; ignored filters shown; never-track switch (forget, tracker silent); docs.
+- Controls validated server-side; ignored filters shown; never-track switch (abort, forget, tracker silent); docs.
 
 ### WA-4b (3.5 PD)
 
 **furchert-ch: "WA-4b: Funnel, paths, audience, coverage and page-flow sections" (skills: `dataviz`, `frontend-design`)**
 - Sections 2, 6, 7, 8 and drilldown previous/next per the WA-4a design.
-- Small-cell rule on paths and funnels; coverage as two lines from `baselineFrom`, band only when both ≥ 50; enquiry coverage.
+- Small-cell rule on paths and funnels; coverage as two lines from `baselineFrom`, band only when both ≥ 50; enquiry coverage by submission day.
 - States, DE/EN, lint/typecheck/test/build, docs.
 
 ### WA-5 Compliance & hardening (5.5 PD; all of it before go-live, everything still dark)
 
-Order inside WA-5: the auth-service issue and the **data-service issue are rolled out first**; the furchert-ch issue and the homelab alert issue follow only after the data-service WA-5 rollout (the furchert-ch 429 handling and the alerts need its caps and gauges).
+Order inside WA-5: the auth-service issue and the **data-service issue are rolled out first**; the furchert-ch issue and the homelab alert issue follow only after the data-service WA-5 rollout (the furchert-ch 429 handling, the synchronous erasure and the alerts need its caps, delete endpoint and gauges).
 
 **homelab-auth-service: "WA-5: reserve registered client ids as usernames; restrict service scopes to client_credentials" (0.5 PD; homelab-auth-service#143)**
 - Auth-service hardening as specified in homelab-auth-service#143, with tests; `INTERFACES.md` updated.
@@ -1111,18 +1138,18 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 - Freeze guard (a) to (d), with (b) derived from the configured retention (`today − (retentionDays − 1)`): a forced rollup of a purged day is refused and its aggregates stay unchanged; test with a non-default retention value.
 - Gauges `ingest_capped`, `events_today`, `raw_table_bytes`; `/status` `dailyCap`, `capped`, `rawRetentionStart`; docs.
 
-**furchert-ch: "WA-5: Abuse limits, forget erasure forwarding, GPC/DNT and final texts" (2.0 PD; after the data-service WA-5 rollout)**
-- Rate limits per key and global with `Retry-After`, IPv6 /64, mint limit 5/h, bot UA list (`bots.ts` test table), `Sec-Purpose: prefetch` drop.
-- Forward queue honours 429 `retryAt`; goal, enquiry, deletes keep flowing.
-- Forget purges that id's queued events and sends the delete after pending batches (race tests: queued batch, in-flight batch, retry after delete).
+**furchert-ch: "WA-5: Abuse limits, durable forget erasure, GPC/DNT and final texts" (2.0 PD; after the data-service WA-5 rollout)**
+- Collect rate limits per key and global with `Retry-After`, IPv6 /64, mint limit 5/h, bot UA list (`bots.ts` test table), `Sec-Purpose: prefetch` drop; forget has its own limit (30/min per key) and is never blocked by the collect limits; over its limit it still clears the cookie (tests).
+- Forward queue honours 429 `retryAt`; goal and enquiry keep flowing.
+- Durable forget (§5.4): purge queued events of the id, wait for the in-flight batch, synchronous `DELETE` with 3 attempts; 204 on success (clears `fa_forget`); 503 with `fa_forget` when data-service is unreachable; the tracker keeps `fa_forget_pending` and the next load's retry erases via `fa_forget` (race tests: queued batch, in-flight batch, data-service down then up).
 - GPC/DNT auto-decline stores `denied` (`by: "signal"`) and calls forget once; explicit Allow (`by: "user"`) overrides, also for the goal flag (tests).
-- `legal.ts` L1 to L7 and the final bar copy prepared as a reviewed commit on the WA-6 go-live branch (never merged before the flip); owner sign-off of the copy recorded.
+- `legal.ts` L1 to L7 (incl. `fa_forget` in L3) and the final bar copy prepared as a reviewed commit on the WA-6 go-live branch (never merged before the flip); owner sign-off of the copy recorded.
 
 **homelab: "WA-5: WebAnalytics alerts, record of processing, runbooks and owner checks" (1.0 PD, plus 0.5 PD integration re-test across repos; after the data-service WA-5 rollout)**
 - Five §7.9 WA-5 rules under `homelab-webanalytics`, promtool tests, no duplicate key (IngestSilent follows in WA-6).
 - Record of processing and DPIA note finalised in the canonical spec (§13.1, §13.2).
 - `DEPLOYMENT.md` runbooks: purge a day after poisoning, change caps, disable ingest, reset the rollup mark; "Cloudflare rules" with the optional WAF rule and "`/api/v` outside the auth rate-limit rule"; backup note per Q2 (dumps unchanged, contain pseudonymous ids); NetworkPolicy unchanged; restore test of `data_service` into a scratch DB with matching `webanalytics` row counts.
-- Owner checks recorded: Cloudflare Web Analytics/RUM and Zaraz off; `cf.client.bot`; n8n schedules vs 01:12; PVC usage vs threshold.
+- Owner checks recorded: Cloudflare Web Analytics/RUM and Zaraz off; `cf.client.bot`; n8n schedules vs 01:12 and 07:30; PVC usage vs threshold.
 - Infra `INTERFACES.md` lists `furchert.ch/api/v`.
 
 ### WA-6 Go-live (0.5 PD)
@@ -1130,7 +1157,7 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 **furchert-ch: "WA-6: Go-live: privacy text and enable consent bar and tracking"**
 - Preconditions: every WA-5 issue merged and rolled out (incl. the auth-service fix and the five alerts).
 - One PR: `legal.ts` L1 to L7 (no retention period, no location, no backup claim) + `ANALYTICS_UI_ENABLED = true` + `PAGE_LAST_MODIFIED['/privacy']`.
-- End-to-end checklist right after the flip (live site, fresh profile): no request and no `fa_vid` before a choice; Decline → one forget, no `fa_vid`; GPC browser → no bar, one forget; Allow → pageview without reload, `fa_vid` with exact attributes; one pageview per soft navigation; locale button → `lang` click only; flush on hide/close; bfcache eligible; clicks incl. middle click and Enter; one goal per successful submit, none on failure; enquiry count +1 with and without consent; signed-in browsing and the never-track switch send nothing; withdrawal erases that id's rows; `ingest.eventsToday` moves within 1 min; the visit appears after the next rollup; `/coverage.baselineFrom` equals the go-live day.
+- End-to-end checklist right after the flip (live site, fresh profile): no request and no `fa_vid` before a choice; Decline → one forget, no `fa_vid`; GPC browser → no bar, one forget; Allow → pageview without reload, `fa_vid` with exact attributes; two tabs allowing at once → one `fa_vid`; one pageview per soft navigation; locale button → `lang` click only; flush on hide/close; bfcache eligible; clicks incl. middle click and Enter; one goal per successful submit, none on failure; enquiry count +1 with and without consent; signed-in browsing and the never-track switch send nothing; withdrawal during an in-flight request leaves no `fa_vid` and erases that id's rows; `ingest.eventsToday` moves within 1 min; the visit appears once its day is final (the next morning after 07:30); `/coverage.baselineFrom` equals the go-live day.
 - `/dashboard/network` and `/api/netmon/status` regression check; owner reminded to tag shared links with UTM; PVC usage re-recorded 30 days later (homelab).
 
 **homelab: "WA-6: WebAnalyticsIngestSilent rule" (within the 0.5 PD; after the go-live end-to-end checklist passed)**
@@ -1200,6 +1227,22 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 | N7 | Freeze guard (b) derived from the configured retention: `day ≥ today − (retentionDays − 1)` | §7.5, §17 WA-5 |
 | N8 | §9 subsections renumbered 9.1 to 9.3, §10 subsections 10.1 to 10.2; references updated | §1.2, §9, §10, §15, §18 |
 
+### Revision 3.2 (CodeRabbit design review of homelab PR #353, 2026-11-08)
+
+WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-3a daily class), #351 (WA-5), #352 (WA-6 IngestSilent); data-service #53 (WA-1), #54 (WA-3a), #55 (WA-3b), #56 (WA-5); auth-service #142 (WA-0 scopes), #143 (WA-5 side finding); furchert-ch #153 (WA-2a), #154 (WA-2b), #155 (WA-4a), #156 (WA-4b), #157 (WA-5), #158 (WA-6). The §17 issue map is filled with them.
+
+| # | Item | Sections changed | Affected WA issues |
+|---|---|---|---|
+| 1 | Withdrawal writes `denied`, aborts in-flight requests via `AbortController`, then calls forget; a late collect `Set-Cookie` is cleared by the later forget; `/api/v` never mints without a current `cv` and a valid `consentDate`. Cross-tab first mint: the first flush per tab is serialised with the Web Locks API (`fa-first-flush`); without it, two ids are a documented data-quality limit (R13) | §3.9, §4.2, §4.4, §5.3, §9.3, §16, §17 WA-2a/WA-2b/WA-4a/WA-6 | furchert-ch #153, #154, #155, #158 |
+| 2 | Forget is never subject to the collect rate limits; separate limiter (30/min per key); every forget response clears `fa_vid` first, also when its own limit is hit | §3.10, §5.3, §5.4, §5.8, §17 WA-2b/WA-5 | furchert-ch #154, #157 |
+| 3 | Durable erasure [WA-5]: forget purges the queue, waits for the in-flight batch and calls the data-service `DELETE` synchronously with a bounded retry before answering; 503 when unreachable, with a new cookie `fa_forget` (Path=/api/v/forget, 30 d) so the id survives; the tracker keeps `fa_forget_pending` and retries on the next load. Early forget stays cookie-only. Privacy text names `fa_forget` | §2, §4.2, §4.4, §5.1, §5.3, §5.4, §5.10, §6.5, §10.2 (L3, L7), §11, §16, §17 WA-2b/WA-5 | furchert-ch #154, #157, #158; data-service #56 |
+| 4 | Goal and enquiry `eventId`s generated server-side (`crypto.randomUUID()`); a submission without an existing `fa_vid` records no goal, the enquiry counter still counts it | §5.9, §17 WA-2b | furchert-ch #154 |
+| 5 | Forward batches capped at 200 events and 48 KiB; a 413 splits the batch and retries, never dropping valid events | §5.10, §17 WA-2b | furchert-ch #154 |
+| 6 | Final vs provisional days: a day is closed at D + 1 07:15 Zurich (6 h visit cap + 75 min margin). A second daily rollup run at **07:30** Europe/Zurich (after the close; clear of Longhorn 02:00, restic 03:00, retention 04:30/05:30, trim 05:00) rewrites yesterday as `final = true`; the 01:12 run stays and writes yesterday as provisional. `lastCompleteDay` only covers final days, so after 07:30 the dashboard normally shows data through yesterday (before 07:30 through the day before yesterday); provisional days are not served; `/status.provisionalDay` added | §2, §7.5, §7.8, §8.1, §8.2, §9.1, §15, §17 WA-3a/WA-4a/WA-5/WA-6 | data-service #54; furchert-ch #155, #158; homelab #351 (owner check vs 07:30) |
+| 7 | Explicit raw-history reads (new/returning, first-known channel, rolling uniques, monthly visitors) and their bound by raw retention (396 d > 365 d id lifetime) | §7.5, §17 WA-3a | data-service #54, #55 |
+| 8 | `consentedSubmits` counted by submission day via the new rollup table `daily_submits`, matching `daily_enquiries` | §7.5, §7.8, §8.2, §8.3, §17 WA-3b/WA-4b | data-service #55; furchert-ch #156 |
+| 9 | Exact uniques tests: one visitor on two days counts once in `visitors_7d`/`visitors_28d` (WA-3a) and in `repeat_offer_viewers_28d` and the audience figure (WA-3b) | §17 WA-3a/WA-3b | data-service #54, #55 |
+
 ### Committed (2026-11-08, WA-0)
 
-Revision 3.1 committed unchanged in content except: status Accepted, Epic and issue map filled with the real issue numbers, auth-service migration expected V10, and the WA-5 auth-service hardening referenced by issue only (`homelab-auth-service#143`).
+Revision 3.2 committed with these differences from the working draft: status Accepted, Epic and Parent worklog lines, auth-service migration expected V10, and the WA-5 auth-service hardening referenced by issue only (`homelab-auth-service#143`).
