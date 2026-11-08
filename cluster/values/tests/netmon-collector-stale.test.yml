@@ -1,0 +1,197 @@
+# promtool unit tests for the NetmonCollectorStale rules in
+# additionalPrometheusRulesMap.homelab-netmon in cluster/values/kube-prometheus-stack.yaml
+# (docs/060-network-monitoring.md §4.1 and the freshness rules; homelab#350 adds the daily
+# `webanalytics-rollup` collector, docs/100-web-analytics.md §7.5 and §7.9).
+# Run: scripts/promtool-test-rules.sh — it extracts every rule group from the values file into
+# rules.yaml next to a copy of this file. CI runs it in the `Test Prometheus Rules` job.
+# Every input series runs through its eval_time. Series values are Unix timestamps: a constant
+# `V` is a gauge last set at second V, `0+60xN` is a gauge that always equals the evaluation
+# time (fresh). kube_pod_start_time `0` is an old Pod; a value close to the eval time is a young Pod.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # webanalytics-rollup stale for 28 h on an old Pod: daily 26h class fires, no 15m alert.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="webanalytics-rollup"}
+        values: '0x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              threshold: 26h
+              collector: webanalytics-rollup
+              namespace: apps
+              pod: data-service-abc
+            exp_annotations:
+              summary: data-service collector webanalytics-rollup has not succeeded for more than 26h
+              description: 'The netmon collector webanalytics-rollup in data-service has no successful run within 26h (value = seconds since the last success; NaN = never succeeded although the pod has been up longer than 26h). Check GET /api/netmon/status (lastError, consecutiveFailures) and the data-service logs; runbook in DEPLOYMENT.md "data-service NM-1: Cloudflare keys, scrape and alerts".'
+  # webanalytics-rollup fresh (gauge equals the evaluation time): no alert.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="webanalytics-rollup"}
+        values: '0+60x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts: []
+  # webanalytics-rollup last success 40 min ago: must NOT fall into the 15m catch-all (regression for the exclusion), nor the 26h class.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="webanalytics-rollup"}
+        values: '0x100'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: NetmonCollectorStale
+        exp_alerts: []
+  # webanalytics-rollup never succeeded (NaN) on a Pod older than 26 h: the NaN branch fires the 26h class.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="webanalytics-rollup"}
+        values: 'NaN+0x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              threshold: 26h
+              collector: webanalytics-rollup
+              namespace: apps
+              pod: data-service-abc
+            exp_annotations:
+              summary: data-service collector webanalytics-rollup has not succeeded for more than 26h
+              description: 'The netmon collector webanalytics-rollup in data-service has no successful run within 26h (value = seconds since the last success; NaN = never succeeded although the pod has been up longer than 26h). Check GET /api/netmon/status (lastError, consecutiveFailures) and the data-service logs; runbook in DEPLOYMENT.md "data-service NM-1: Cloudflare keys, scrape and alerts".'
+  # webanalytics-rollup never succeeded (NaN) on a young Pod (about 3 h old): no alert; it would fire in the old 15m catch-all.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="webanalytics-rollup"}
+        values: 'NaN+0x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '90000x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts: []
+  # retention last success 25 h ago: below 26h, no alert.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="retention"}
+        values: '12000x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts: []
+  # blocklists stale for 28 h: 26h class unchanged.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="blocklists"}
+        values: '0x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              threshold: 26h
+              collector: blocklists
+              namespace: apps
+              pod: data-service-abc
+            exp_annotations:
+              summary: data-service collector blocklists has not succeeded for more than 26h
+              description: 'The netmon collector blocklists in data-service has no successful run within 26h (value = seconds since the last success; NaN = never succeeded although the pod has been up longer than 26h). Check GET /api/netmon/status (lastError, consecutiveFailures) and the data-service logs; runbook in DEPLOYMENT.md "data-service NM-1: Cloudflare keys, scrape and alerts".'
+  # egress last success 4 h ago: 3h class unchanged.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="egress"}
+        values: '87600x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              threshold: 3h
+              collector: egress
+              namespace: apps
+              pod: data-service-abc
+            exp_annotations:
+              summary: data-service collector egress has not succeeded for more than 3h
+              description: 'The netmon collector egress in data-service has no successful run within 3h (value = seconds since the last success; NaN = never succeeded although the pod has been up longer than 3h). Check GET /api/netmon/status (lastError, consecutiveFailures) and the data-service logs; runbook in DEPLOYMENT.md "data-service NM-1: Cloudflare keys, scrape and alerts".'
+  # lan last success 2 h ago: 90m class unchanged.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="lan"}
+        values: '94800x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              threshold: 90m
+              collector: lan
+              namespace: apps
+              pod: data-service-abc
+            exp_annotations:
+              summary: data-service collector lan has not succeeded for more than 90m
+              description: 'The netmon collector lan in data-service has no successful run within 90m (value = seconds since the last success; NaN = never succeeded although the pod has been up longer than 90m). Check GET /api/netmon/status (lastError, consecutiveFailures) and the data-service logs; runbook in DEPLOYMENT.md "data-service NM-1: Cloudflare keys, scrape and alerts".'
+  # cloudflare-requests last success 30 min ago: 15m catch-all unchanged.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="cloudflare-requests"}
+        values: '100200x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              threshold: 15m
+              collector: cloudflare-requests
+              namespace: apps
+              pod: data-service-abc
+            exp_annotations:
+              summary: data-service collector cloudflare-requests has not succeeded for more than 15m
+              description: 'The netmon collector cloudflare-requests in data-service has no successful run within 15m (value = seconds since the last success; NaN = never succeeded although the pod has been up longer than 15m). Check GET /api/netmon/status (lastError, consecutiveFailures) and the data-service logs; runbook in DEPLOYMENT.md "data-service NM-1: Cloudflare keys, scrape and alerts".'
+  # login-events last success 30 min ago: 15m catch-all unchanged.
+  - interval: 1m
+    input_series:
+      - series: netmon_collector_last_success_timestamp_seconds{namespace="apps", pod="data-service-abc", collector="login-events"}
+        values: '100200x1700'
+      - series: kube_pod_start_time{namespace="apps", pod="data-service-abc"}
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 1700m
+        alertname: NetmonCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              threshold: 15m
+              collector: login-events
+              namespace: apps
+              pod: data-service-abc
+            exp_annotations:
+              summary: data-service collector login-events has not succeeded for more than 15m
+              description: 'The netmon collector login-events in data-service has no successful run within 15m (value = seconds since the last success; NaN = never succeeded although the pod has been up longer than 15m). Check GET /api/netmon/status (lastError, consecutiveFailures) and the data-service logs; runbook in DEPLOYMENT.md "data-service NM-1: Cloudflare keys, scrape and alerts".'

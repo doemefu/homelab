@@ -65,7 +65,7 @@ defaultRules:
 #   1. age: time() - gauge > threshold (NaN > x is false);
 #   2. never succeeded: gauge != gauge (true only for NaN), but only once the Pod is
 #      older than the threshold — otherwise a fresh Pod would alert on a daily
-#      collector that simply has not reached its 05:00/03:30 UTC slot yet.
+#      collector that simply has not reached its daily slot yet.
 #      Pod age comes from kube-state-metrics' kube_pod_start_time (honorLabels, so it
 #      carries the Pod's namespace/pod labels for the on(namespace, pod) join), NOT from
 #      process_start_time_seconds: the JVM start time resets on every in-Pod container
@@ -94,14 +94,14 @@ additionalPrometheusRulesMap:
     groups:
       - name: homelab-netmon
         rules:
-          # Daily collectors (blocklists 05:00 UTC, retention 03:30 UTC): 24 h + DST/jitter slack, like PR #109.
+          # Daily collectors (blocklists 05:00 UTC, retention 03:30 UTC, webanalytics-rollup twice daily 01:12 and 07:30 Europe/Zurich, homelab#350): 24 h + DST/jitter slack, like PR #109.
           - alert: NetmonCollectorStale
             expr: >-
-              (time() - netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention"} > 26 * 3600)
+              (time() - netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention|webanalytics-rollup"} > 26 * 3600)
               or
               (
-                netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention"}
-                  != netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention"}
+                netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention|webanalytics-rollup"}
+                  != netmon_collector_last_success_timestamp_seconds{collector=~"blocklists|retention|webanalytics-rollup"}
                 and on(namespace, pod)
                 (time() - kube_pod_start_time{namespace="apps"} > 26 * 3600)
               )
@@ -166,11 +166,11 @@ additionalPrometheusRulesMap:
           # Catch-all: cloudflare-requests / cloudflare-firewall (every 5 min, 3 ×), login-events (every minute), any new collector.
           - alert: NetmonCollectorStale
             expr: >-
-              (time() - netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|egress|lan|reputation"} > 15 * 60)
+              (time() - netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|webanalytics-rollup|egress|lan|reputation"} > 15 * 60)
               or
               (
-                netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|egress|lan|reputation"}
-                  != netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|egress|lan|reputation"}
+                netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|webanalytics-rollup|egress|lan|reputation"}
+                  != netmon_collector_last_success_timestamp_seconds{collector!~"blocklists|retention|webanalytics-rollup|egress|lan|reputation"}
                 and on(namespace, pod)
                 (time() - kube_pod_start_time{namespace="apps"} > 15 * 60)
               )
