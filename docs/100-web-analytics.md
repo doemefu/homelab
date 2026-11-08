@@ -395,7 +395,8 @@ Batching check: one active visitor sends ≤ 8 requests/min at peak and 1 to 3 t
 | Order | one ordered pipeline for batches; [WA-5] forget waits for the in-flight batch before its synchronous delete (§5.4) |
 | Queue | 2 000 events; overflow dropped and counted |
 | Batches | ≤ 200 events **and** ≤ 48 KiB serialised (data-service caps at 200 events and 64 KiB; the margin covers envelope and encoding); a batch reaching either bound is closed and a new one started |
-| Flush | every 5 s or when a batch is full; one in flight; timeout 3 s |
+| Flush | every 5 s or when a batch is full; one in flight; forward request timeout 10 s (async queue, no user waits; paired with data-service `statement_timeout` 2 s, §6.2) |
+| Retry and `edgeDrops` | on a retry of a batch furchert-ch sends `edgeDrops` zeroed (only the first attempt carries them). A replay after a lost response can still double-count edge drops: accepted data-quality residual |
 | Circuit | open 60 s after 3 consecutive failures |
 | Age | events older than 60 min dropped (`expired`) |
 | Capped 429 [WA-5] | read `capScope`, `retryAt`; pause analytics events until `retryAt`; goal and enquiry keep flowing |
@@ -417,13 +418,17 @@ Same-origin `fetch` is covered by `connect-src 'self'` (Report-Only); no inline 
 
 | Item | Contract |
 |---|---|
-| Auth | Bearer; `SCOPE_analytics:write` **and** `sub ∈ webanalytics.api.write-clients` (`[furchert-ch]`); `ROLE_ADMIN` not accepted; own `SecurityFilterChain`, method-specific matchers |
+| Auth | Bearer; `SCOPE_analytics:write` **and** `sub ∈ webanalytics.api.write-clients` (`[furchert-ch]`); `ROLE_ADMIN` not accepted, and any token carrying a `ROLE_*` authority is rejected with 403 even with the right `sub` and scope (defence in depth; the `sub` allowlist remains the primary control); own `SecurityFilterChain`, method-specific matchers |
 | Headers | `Cache-Control: no-store`, `Pragma: no-cache` on every response |
 | Errors | problem+json per `060` §7.1; `detail` never echoes input |
 
 ### 6.2 `POST /api/webanalytics/events` (C13; WA-1)
 
-Body ≤ 64 KiB (Content-Length plus counted stream), ≤ 200 events, Jackson `StreamReadConstraints` (nesting ≤ 8, string ≤ 512, document ≤ 64 KiB), unknown properties fail, per-event validation, `statement_timeout` 5 s, one transaction per batch (`SET LOCAL synchronous_commit = off` allowed).
+Body ≤ 64 KiB (Content-Length plus counted stream), ≤ 200 events (more than 200 events in one request → **413**, not 400, so furchert-ch splits and retries), Jackson `StreamReadConstraints` (nesting ≤ 8, string ≤ 512, document ≤ 64 KiB), unknown properties fail, per-event validation, `statement_timeout` 2 s per statement, one transaction per batch; no `synchronous_commit = off`. Paired with the 10 s forward timeout in furchert-ch (§5.10), so a client timeout never hides a commit.
+
+Event JSON field names (exactly 28, all always present): `eventId`, `type`, `occurredAt`, `receivedAt`, `visitorId`, `pageviewId`, `seq`, `path`, `locale`, `landing`, `referrerDomain`, `utmSource`, `utmMedium`, `utmCampaign`, `country`, `deviceClass`, `browserFamily`, `osFamily`, `viewport`, `engagedMs`, `scrollMax`, `fits`, `sectionMask`, `formStarted`, `clickKind`, `clickTarget`, `clickArea`, `goal`.
+
+Shared validation fixtures are canonical in data-service at `src/test/resources/webanalytics/c13-fixtures.json` with relative time tokens `now±Nm`; furchert-ch (WA-2b) copies them and its test asserts that it uses the same file version (comment with the data-service commit).
 
 ```json
 { "events": [ { "eventId": "e1…", "type": "pageview", "occurredAt": "2026-11-08T15:00:00.000Z", "receivedAt": "2026-11-08T15:00:00.120Z",
@@ -447,7 +452,7 @@ Body ≤ 64 KiB (Content-Length plus counted stream), ≤ 200 events, Jackson `S
 | engagement fields | — | yes | engagement only, all non-null there |
 | `clickKind`, `clickTarget`, `clickArea` | — | yes | click only; `null` target for mailto/tel |
 | `goal` | string | yes | goal only: `contact_submit` |
-| `edgeDrops` | object | no | fixed reason keys; may accompany 0 events |
+| `edgeDrops` | object | no | fixed reason keys; values must be integers 0 to 1 000 000, otherwise 400; may accompany 0 events |
 
 An `enquiry` event carries only `eventId`, `type`, `occurredAt`, `receivedAt`; every other field is present and `null` (a non-null value rejects the event). It increments `daily_enquiries(day)` (Zurich day of `occurredAt`) with an in-memory 2 h dedupe of `eventId`; no row in `events`; it counts toward `webanalytics_enquiries_total`, not toward `webanalytics_events_accepted_total` or the response's `accepted`. Others: `INSERT … ON CONFLICT DO NOTHING`. Response 200: `{"accepted": 18, "duplicates": 1, "rejected": 1, "capped": false}`.
 
@@ -458,7 +463,7 @@ An `enquiry` event carries only `eventId`, `type`, `occurredAt`, `receivedAt`; e
 | Status | When | Built in |
 |---|---|---|
 | 200 | envelope valid | WA-1 |
-| 400 / 401 / 403 / 405 / 413 / 415 | schema, token, scope/`sub`, method, size, content type | WA-1 |
+| 400 / 401 / 403 / 405 / 413 / 415 | schema (incl. `edgeDrops` values outside 0 to 1 000 000), token, scope/`sub` or any `ROLE_*` authority, method, size or more than 200 events (413), content type | WA-1 |
 | 429 | cap would be exceeded: `{"accepted": 0, "duplicates": 0, "rejected": 0, "capped": true, "capScope": "hour" \| "day", "retryAt": "…Z"}`, all-or-nothing per batch | [WA-5] |
 
 ### 6.4 Caps [WA-5]
@@ -1061,7 +1066,7 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 - Verify in phase 1: Flyway schema handling; `ignore-migration-patterns` default for image rollback; `pg_database_size()` per DB and PVC usage recorded.
 - V6 creates schema, `events`, `daily_ingest_stats`, `daily_enquiries`; app starts on a V5 DB.
 - Write chain tests: wrong scope 403, foreign `sub` 403, `ROLE_ADMIN` user token 403, GET 405, `no-store` incl. 401/403; write token 403 on `/api/netmon/status`.
-- C13 with shared fixtures: size/depth/unknown property → 400/413; missing key → 400 (strict presence); per-event rejection; duplicates; `(pageview_id, seq)` reuse with a different `eventId` → reason `other`, same `eventId` → duplicate; time window; mailto/tel target rejected; path rule `^/([a-z0-9][a-z0-9-]{0,63}(/[a-z0-9][a-z0-9-]{0,63}){0,2})?$` ≤ 200 chars and `(other)`.
+- C13 with shared fixtures (canonical file `src/test/resources/webanalytics/c13-fixtures.json`, relative time tokens `now±Nm`): > 200 events → 413; `edgeDrops` outside 0 to 1 000 000 → 400; token with any `ROLE_*` authority → 403; size/depth/unknown property → 400/413; missing key → 400 (strict presence); per-event rejection; duplicates; `(pageview_id, seq)` reuse with a different `eventId` → reason `other`, same `eventId` → duplicate; time window; mailto/tel target rejected; path rule `^/([a-z0-9][a-z0-9-]{0,63}(/[a-z0-9][a-z0-9-]{0,63}){0,2})?$` ≤ 200 chars and `(other)`.
 - `daily_ingest_stats` columns, stages and format-only CHECKs; enquiries not counted there, not in `accepted`/`duplicates`; enquiry duplicate within 2 h ignored; invalid enquiry → `rejected`.
 - Enquiry: all non-core fields must be `null`; increments `daily_enquiries` with 2 h dedupe, no `events` row, counted in `webanalytics_enquiries_total` only (not in `accepted`).
 - Metrics accepted/duplicate/enquiries/rejected/edge-dropped with bounded labels; `INTERFACES.md`, `CHANGELOG.md`, `DEPLOYMENT.md` (rollback note).
@@ -1084,6 +1089,7 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 - Tracker §3.4 to §3.10 with unit tests (landing rule, engagement, scroll, sections, clicks, transport incl. `AbortController` per request and the Web Locks first-flush serialisation with fallback, singleton, payload hygiene); bundle budget test; `navigator.webdriver` off.
 - Registries and wiring (`TRACKED_PATHS`, `NAV_TARGETS`, `TRACK_IDS` ≤ 100 with source test, FAQ ids, `data-track-section`, `track` props); `about-contact`/`rowing-contact`; `contact-sources.test.ts` FROM_IDS regex `/^(automation|home|about|rowing)-[a-z-]+$/` and `CTA_FILES` gains the about and rowing pages; `CHANGELOG.md` notes the new «Quelle:» values.
 - `/api/v` basic safety tested: 405, 415, 403 (foreign/missing `Sec-Fetch-Site`+`Origin`), 8 KiB streamed cap incl. chunked, 21 events → 400, unknown key → 400, signed-in drop, `cv`/`consentDate` drop (and no `Set-Cookie` on such a request), canonicalisation (query and fragment stripping, UTM rules, referrer → host, `mailto:x@y` → type only, `/imprint`/`/privacy` dropped), `XX`/`T1` → null, kill switches; forwarded payload never contains IP or UA.
+- Copy of the C13 fixtures from data-service with a test asserting the same file version (comment with the data-service commit); forward timeout 10 s, `edgeDrops` zeroed on retries (test).
 - The collect route never mints `fa_vid` when the request carries `fa_forget` (test); nav click targets and paths are sent in the §6.2 locale-free form.
 - Cookie minted only when absent/stale with exact attributes and expiry; minimal forget expires it, is never rate-limited, works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in.
 - Goal per §5.9 (server-generated `eventId`; no goal without an existing `fa_vid`, while the enquiry still counts; the form's `analytics` flag follows §4.1; a client-posted goal is dropped); enquiry for every successful submission, server-generated `eventId`, serialised with every other field `null`, live with `ANALYTICS_UI_ENABLED = false` (test); note under the form unchanged.
@@ -1268,6 +1274,12 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 8 | Path rule: locale-free pattern, ≤ 200 chars, literal `(other)`; also for nav click targets | §6.2, §17 WA-1/WA-2b | data-service #53, furchert-ch #154 |
 | 9 | Same `(pageviewId, seq)` with a different `eventId` → reason `other`; same `eventId` → duplicate | §6.2, §17 WA-1 | data-service #53 |
 | 10 | Enquiry counting rules (not in `accepted`/`duplicates`, duplicate ignored, invalid → `rejected`) and strict key presence (missing key → 400) | §6.2, §17 WA-1 | data-service #53 |
+| 11 | Any token with a `ROLE_*` authority → 403 | §6.1, §17 WA-1 | data-service #53 |
+| 12 | `edgeDrops` values must be integers 0 to 1 000 000, otherwise 400 | §6.2, §6.3, §17 WA-1 | data-service #53 |
+| 13 | More than 200 events → 413 (client splits and retries); the 28 event field names listed and checked against the example | §6.2, §6.3, §17 WA-1 | data-service #53 |
+| 14 | Shared validation fixtures canonical in data-service (`c13-fixtures.json`, `now±Nm` tokens); furchert-ch copies them and asserts the file version | §6.2, §17 WA-1/WA-2b | data-service #53, furchert-ch #154 |
+| 15 | Paired timeouts: data-service `statement_timeout` 2 s, furchert-ch forward timeout 10 s, no `synchronous_commit = off` | §5.10, §6.2 | data-service #53, furchert-ch #154 |
+| 16 | Retries send `edgeDrops` zeroed; remaining replay double-count accepted as data-quality residual | §5.10 | furchert-ch #154 |
 
 ### Committed (2026-11-08, WA-0)
 
