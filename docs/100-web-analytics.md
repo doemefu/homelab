@@ -1211,7 +1211,7 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 | WA-3 | #350 (3a daily class) | #54 (3a), #55 (3b) | — | — |
 | WA-4 | — | — | — | #155 (4a), #156 (4b) |
 | WA-5 | #351 | #56 | #143 | #157 |
-| WA-6 | #352 (IngestSilent) | homelab-data-service#61 | — | #158 |
+| WA-6 | #352 (IngestSilent) | #61 | — | #158 |
 
 ---
 
