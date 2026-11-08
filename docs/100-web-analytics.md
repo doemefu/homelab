@@ -317,7 +317,7 @@ Strict schema (unknown keys → 400), depth ≤ 3, strings ≤ 128 chars before 
 | 9 | C2 envelope schema | 400 | WA-2b |
 | 10 | `cv`, `consentDate`; a request failing this step never reaches step 12, so it can never mint | 204, `consent` | WA-2b |
 | 11 | C7/C8 per-event validation and canonicalisation; invalid events dropped alone | `invalid` / `path` | WA-2b |
-| 12 | `fa_vid` read; mint when absent/malformed/stale; [WA-5] mint limit 5/h per key, over → request dropped (`mint_limited`) | — | WA-2b / [WA-5] |
+| 12 | `fa_vid` read; mint when absent/malformed/stale, **never when the request carries the `fa_forget` cookie** (a pending erasure; the event is processed without minting); [WA-5] mint limit 5/h per key, over → request dropped (`mint_limited`) | — | WA-2b / [WA-5] |
 | 13 | C10 enrichment (§5.6, §5.7) | — | WA-2b |
 | 14 | C12 enqueue | overflow counted, 204 | WA-2b |
 | 15 | C9 respond 204 empty, `Cache-Control: no-store` | | WA-2b |
@@ -442,7 +442,7 @@ Body ≤ 64 KiB (Content-Length plus counted stream), ≤ 200 events, Jackson `S
 | `occurredAt`, `receivedAt` | instant | no | `receivedAt` ∈ [now − 2 h, now + 1 min]; `receivedAt − 15 min ≤ occurredAt ≤ receivedAt` |
 | `visitorId` | uuid | yes | `null` only for enquiry |
 | `pageviewId`, `seq` | uuid, int | yes | non-null for pageview/engagement/click; `null` for goal/enquiry |
-| `path`, `locale` | string | yes | pattern ≤ 200 / `de`, `en`; `null` only for enquiry |
+| `path`, `locale` | string | yes | locale-free form `^/([a-z0-9][a-z0-9-]{0,63}(/[a-z0-9][a-z0-9-]{0,63}){0,2})?$`, ≤ 200 chars, or the literal `(other)`; `locale` `de`, `en`; both `null` only for enquiry. The same rule applies to nav click targets (`clickTarget` of kind `nav`), which furchert-ch must send in this form |
 | pageview context fields | — | yes | pageview only; `landing` and families non-null there |
 | engagement fields | — | yes | engagement only, all non-null there |
 | `clickKind`, `clickTarget`, `clickArea` | — | yes | click only; `null` target for mailto/tel |
@@ -450,6 +450,8 @@ Body ≤ 64 KiB (Content-Length plus counted stream), ≤ 200 events, Jackson `S
 | `edgeDrops` | object | no | fixed reason keys; may accompany 0 events |
 
 An `enquiry` event carries only `eventId`, `type`, `occurredAt`, `receivedAt`; every other field is present and `null` (a non-null value rejects the event). It increments `daily_enquiries(day)` (Zurich day of `occurredAt`) with an in-memory 2 h dedupe of `eventId`; no row in `events`; it counts toward `webanalytics_enquiries_total`, not toward `webanalytics_events_accepted_total` or the response's `accepted`. Others: `INSERT … ON CONFLICT DO NOTHING`. Response 200: `{"accepted": 18, "duplicates": 1, "rejected": 1, "capped": false}`.
+
+**Counting rules.** Enquiry events are not reflected in `accepted` or `duplicates`; an enquiry duplicate within the 2 h window is silently ignored; an invalid enquiry counts as `rejected`. **Strict presence:** every listed field must be present in each event; a missing JSON key is a 400 for the whole batch, `null` must be written explicitly. An event whose `(pageviewId, seq)` already exists with a **different** `eventId` is rejected with reason `other`; the same `eventId` again counts as a duplicate.
 
 ### 6.3 Statuses
 
@@ -506,7 +508,7 @@ Write scope. Deletes all `events` rows of that id, adds it to an in-memory tombs
 
 Shape CHECK per type; UNIQUE `(pageview_id, seq)`; indexes `(occurred_at)`, `(visitor_id, occurred_at)`, `(received_at)`; autovacuum scale factors 0.02 / insert 0.05 / analyze 0.02.
 
-**`daily_ingest_stats`**: PK `(day, stage, reason)`, upsert-increment at ingest, Zurich day of receipt, id-free, never touched by the rollup. **`daily_enquiries`**: PK `(day)`, `submissions`, increment-only, id-free, never touched by the rollup.
+**`daily_ingest_stats`**: columns `day` (Zurich day of receipt), `stage` ∈ {`accepted`, `duplicate`, `rejected`, `edge`}, `reason` (for `rejected` the §7.9 reason labels; for `edge` the nine `edgeDrops` keys; otherwise `''`) and `events` (counter); PK `(day, stage, reason)`; the CHECK constraints are format-only so WA-5 can add stages; upsert-increment at ingest, id-free, never touched by the rollup. Enquiries are not counted here. **`daily_enquiries`**: PK `(day)`, `submissions`, increment-only, id-free, never touched by the rollup.
 
 ### 7.3 Size (≈ 300 B per row)
 
@@ -1059,7 +1061,8 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 - Verify in phase 1: Flyway schema handling; `ignore-migration-patterns` default for image rollback; `pg_database_size()` per DB and PVC usage recorded.
 - V6 creates schema, `events`, `daily_ingest_stats`, `daily_enquiries`; app starts on a V5 DB.
 - Write chain tests: wrong scope 403, foreign `sub` 403, `ROLE_ADMIN` user token 403, GET 405, `no-store` incl. 401/403; write token 403 on `/api/netmon/status`.
-- C13 with shared fixtures: size/depth/unknown property → 400/413; per-event rejection; duplicates; `(pageview_id, seq)` reuse; time window; mailto/tel target rejected.
+- C13 with shared fixtures: size/depth/unknown property → 400/413; missing key → 400 (strict presence); per-event rejection; duplicates; `(pageview_id, seq)` reuse with a different `eventId` → reason `other`, same `eventId` → duplicate; time window; mailto/tel target rejected; path rule `^/([a-z0-9][a-z0-9-]{0,63}(/[a-z0-9][a-z0-9-]{0,63}){0,2})?$` ≤ 200 chars and `(other)`.
+- `daily_ingest_stats` columns, stages and format-only CHECKs; enquiries not counted there, not in `accepted`/`duplicates`; enquiry duplicate within 2 h ignored; invalid enquiry → `rejected`.
 - Enquiry: all non-core fields must be `null`; increments `daily_enquiries` with 2 h dedupe, no `events` row, counted in `webanalytics_enquiries_total` only (not in `accepted`).
 - Metrics accepted/duplicate/enquiries/rejected/edge-dropped with bounded labels; `INTERFACES.md`, `CHANGELOG.md`, `DEPLOYMENT.md` (rollback note).
 - Deferred to WA-5 (WA-5 data-service issue): daily/hourly/per-visitor caps with 429 `capScope`/`retryAt`; `DELETE /visitors/{id}` and tombstones; retention; capped/today/table-bytes gauges.
@@ -1081,6 +1084,7 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 - Tracker §3.4 to §3.10 with unit tests (landing rule, engagement, scroll, sections, clicks, transport incl. `AbortController` per request and the Web Locks first-flush serialisation with fallback, singleton, payload hygiene); bundle budget test; `navigator.webdriver` off.
 - Registries and wiring (`TRACKED_PATHS`, `NAV_TARGETS`, `TRACK_IDS` ≤ 100 with source test, FAQ ids, `data-track-section`, `track` props); `about-contact`/`rowing-contact`; `contact-sources.test.ts` FROM_IDS regex `/^(automation|home|about|rowing)-[a-z-]+$/` and `CTA_FILES` gains the about and rowing pages; `CHANGELOG.md` notes the new «Quelle:» values.
 - `/api/v` basic safety tested: 405, 415, 403 (foreign/missing `Sec-Fetch-Site`+`Origin`), 8 KiB streamed cap incl. chunked, 21 events → 400, unknown key → 400, signed-in drop, `cv`/`consentDate` drop (and no `Set-Cookie` on such a request), canonicalisation (query and fragment stripping, UTM rules, referrer → host, `mailto:x@y` → type only, `/imprint`/`/privacy` dropped), `XX`/`T1` → null, kill switches; forwarded payload never contains IP or UA.
+- The collect route never mints `fa_vid` when the request carries `fa_forget` (test); nav click targets and paths are sent in the §6.2 locale-free form.
 - Cookie minted only when absent/stale with exact attributes and expiry; minimal forget expires it, is never rate-limited, works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in.
 - Goal per §5.9 (server-generated `eventId`; no goal without an existing `fa_vid`, while the enquiry still counts; the form's `analytics` flag follows §4.1; a client-posted goal is dropped); enquiry for every successful submission, server-generated `eventId`, serialised with every other field `null`, live with `ANALYTICS_UI_ENABLED = false` (test); note under the form unchanged.
 - Collect completing after abort and forget does not re-set `fa_vid` in the browser (forget runs after the abort and clears again; test); landing pageview flushed immediately on start/Accept; the contact form waits for a pending first flush for at most 1 s, then submits without a goal (test).
@@ -1259,6 +1263,11 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 3 | Goal before `fa_vid`: landing pageview flushed immediately on start/Accept; the form waits at most 1 s for a pending first flush; otherwise no goal (enquiry still counts) | §3.9, §5.9, §17 WA-2b | furchert-ch #154 |
 | 4 | Test on the full serialized envelope: both limits hold, order preserved across splits | §17 WA-2b | furchert-ch #154 |
 | 5 | Cross-day test for first-known channel (earliest landing on an earlier day) | §17 WA-3a | data-service #54 |
+| 6 | Clarification of item 1: the only new server rule is that the collect route never mints `fa_vid` when the request carries `fa_forget` | §5.3 step 12, §17 WA-2b | furchert-ch #154 |
+| 7 | `daily_ingest_stats` columns, stages (`accepted`, `duplicate`, `rejected`, `edge`), reasons and format-only CHECKs; enquiries not counted | §7.2, §17 WA-1 | data-service #53 |
+| 8 | Path rule: locale-free pattern, ≤ 200 chars, literal `(other)`; also for nav click targets | §6.2, §17 WA-1/WA-2b | data-service #53, furchert-ch #154 |
+| 9 | Same `(pageviewId, seq)` with a different `eventId` → reason `other`; same `eventId` → duplicate | §6.2, §17 WA-1 | data-service #53 |
+| 10 | Enquiry counting rules (not in `accepted`/`duplicates`, duplicate ignored, invalid → `rejected`) and strict key presence (missing key → 400) | §6.2, §17 WA-1 | data-service #53 |
 
 ### Committed (2026-11-08, WA-0)
 
