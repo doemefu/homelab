@@ -2,8 +2,8 @@
 
 > Amended 2026-09-01 per ADR 0001 (parent `docs/adr/0001-schedules-ownership-and-data-plane.md`): schedules ownership -> device-service.
 > Amended 2026-09-23 per ADR 0002 ([`adr/0002-network-telemetry-ownership.md`](adr/0002-network-telemetry-ownership.md)): data-service = analytical data plane (sensor history + network telemetry), owns Postgres DB `data_service` (schema `netmon`); contract in [`060-network-monitoring.md`](060-network-monitoring.md).
-> Amended 2026-11-08 per the ADR 0002 amendment (homelab#349, WA-0): data-service also owns schema `webanalytics` in `data_service` (browser push write path, scopes `analytics:write` and `analytics:read`); contract in [`100-web-analytics.md`](100-web-analytics.md).
 > Amended 2026-09-28 per ADR 0003 ([`adr/0003-mcp-hub-authorization.md`](adr/0003-mcp-hub-authorization.md)): new service mcp-hub (read-only mail/calendar MCP endpoint, resource server for auth-service tokens); contract in [`080-mcp-hub.md`](080-mcp-hub.md).
+> Amended 2026-11-08 per the ADR 0002 amendment (homelab#349, WA-0): data-service also owns schema `webanalytics` in `data_service` (browser push write path, scopes `analytics:write` and `analytics:read`); contract in [`100-web-analytics.md`](100-web-analytics.md).
 
 This document describes the target architecture for the Terrarium IoT application after the migration from the legacy monolith.
 

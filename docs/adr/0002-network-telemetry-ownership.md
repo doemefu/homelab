@@ -95,6 +95,6 @@ Infrastructure signals remain PrometheusRules routed to the existing Discord rec
 
 ## Amendment 2026-11-08 (WA-0, homelab#349): browser push write path
 
-Web analytics (Epic `doemefu/homelab#348`, contract [`100-web-analytics.md`](../100-web-analytics.md)) extends decision 2: the same database `data_service` gets a second schema, `webanalytics`, with data-service as its single owner. Decisions 1 and 2 (one store, one owner) apply unchanged.
+Web analytics (Epic `doemefu/homelab#348`, contract [`100-web-analytics.md`](../100-web-analytics.md)) is covered by decisions 1 and 2 (analytical data plane; one store, one owner): the same database `data_service` gets a second schema, `webanalytics`, with data-service as its single owner. Decisions 1 and 2 apply unchanged.
 
 Decision 3 (data-service pulls from every producer) does not fit browser events: there is no producer endpoint to pull from. As a recorded exception, furchert-ch pushes events to data-service (`POST /api/webanalytics/events`) with a `client_credentials` token carrying scope `analytics:write`. Delivery is at-most-once; furchert-ch keeps only a bounded in-memory forward queue as transport, never as a store. Reads use scope `analytics:read`. Decision 4 is unchanged: furchert-ch reads only through data-service's REST API, server-side.
