@@ -691,7 +691,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 
 **`GET /pages/detail?path=…`**: `summary` (one pages item), `previous`/`next` (`[{path, count}]`, `null` until WA-3b; from WA-3b the top `limit` entries of §8.1 (default 5) including `(entrance)` and `(exit)`, plus `(other)` for the remainder), `clicks` (`[{kind, target, area, clicks, visits, convertingVisits}]`), `sections {reached [{section, pageviews}], deepestAtExit [{section, visits}]}` and `faqOpens [{faq, opens, visits}]` (only `/automation`), `daily [{day, pageviews, visitsViewed}]`.
 
-**`GET /clicks?kind=…`**: the remainder beyond `limit` is folded into a single item with `kind` `null` (it mixes kinds when no `kind` filter is set; with a `kind` filter it carries that kind), `target` `"(other)"`, and `path`, `area` and `pageVisits` `null`; a nav target `(other)` stays its own item; `items[]` with `kind`, `target` (`null` for mailto/tel), `path`, `area`, `clicks`, `visits`, `convertingVisits`, `pageVisits`.
+**`GET /clicks?kind=…`**: the remainder beyond `limit` is folded into a single item with `kind` `null` (it mixes kinds when no `kind` filter is set; with a `kind` filter it carries that kind), `target` `"(other)"`, and `path`, `area` and `pageVisits` `null`; its `clicks`, `visits` and `convertingVisits` are summed over the folded rows; a nav target `(other)` stays its own item; `items[]` with `kind`, `target` (`null` for mailto/tel), `path`, `area`, `clicks`, `visits`, `convertingVisits`, `pageVisits`.
 
 **`GET /sources`**: `channels [{channel, visits, newVisits, engagedVisits, offerVisits, convertingVisits}]` (all seven), `referrers [{domain, channel, visits, convertingVisits}]`, `campaigns [{source, medium, campaign, visits, convertingVisits}]`, `converters {byLandingChannel, byFirstChannel, byEntryPath}`.
 
@@ -1372,7 +1372,7 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 47 | The go-live date is set by a new data-service WA-6 PR, not by the furchert-ch go-live PR; §11 lists the env var and its binding test | §11, §12.3, §17 WA-6, issue map | homelab-data-service#61, data-service #55 |
 | 48 | `limit` default 5 for `/pages/detail` previous/next; `''` key values returned as `null` as a general rule | §8.1 | data-service #55 |
 | 49 | The first-ever-run exception is stated in the Selection and Final-vs-provisional rows | §7.5 | data-service #54 |
-| 50 | `/clicks` remainder item defined (`kind` `null` or the filtered kind, `target` `"(other)"`, `path`, `area`, `pageVisits` `null`) | §8.2 | data-service #55 |
+| 50 | `/clicks` remainder item defined (`kind` `null` or the filtered kind, `target` `"(other)"`, `path`, `area`, `pageVisits` `null`; counts summed; a nav `(other)` target stays its own item) | §8.2 | data-service #55 |
 | 51 | Small-cell rule (3) on the `/audience` dimension lists in WA-4b; `definitionFrom` also bounds `/audience` and previous/next | §8.5, §17 WA-4b | furchert-ch #156, data-service #55 |
 
 ### Committed (2026-11-08, WA-0)
