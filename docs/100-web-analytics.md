@@ -186,6 +186,7 @@ Order: `hero`, `so-arbeite-ich`, `beispiel`, `preise`, `daten`, `ueber-mich`, `f
 | Body | ≤ 7 680 bytes serialised; larger batches split |
 | In flight | one request at a time per tab |
 | First flush across tabs | the first flush after the tracker starts in a tab runs inside `navigator.locks.request('fa-first-flush', …)`, so first flushes of parallel tabs are serialised and only the first one can mint `fa_vid`; the next tab's request then carries the cookie. Without the Web Locks API (pre-2022 browsers) the flush runs unserialised and two tabs may mint two ids; the second `Set-Cookie` wins and the first id stays a one-request orphan. This is a documented data-quality limit (at most one extra visitor per browser, only at the moment of consent) |
+| Landing flush | on tracker start and right after Accept the landing pageview is flushed immediately (this mints `fa_vid` early), not on the usual batching delay; the contact form's submit relies on it (§5.9) |
 | Retry | network error or 5xx: re-queue, retry after 5 s, then 30 s, then drop; no retry on 4xx; 429 pauses flushing 60 s |
 | Queue | max 100 events in memory; never persisted |
 | Lifecycle | no `unload`/`beforeunload` listeners; listeners stay on `pagehide` |
@@ -241,9 +242,11 @@ Integer `ANALYTICS_CONSENT_VERSION` (start `1`) used by bar, `/api/v` and Server
 | Withdrawal (Allow → Decline) | store `denied`; `stop()`; drop the client queue; **abort every in-flight `/api/v` request via its `AbortController`**; only then set `fa_forget_pending` and `POST /api/v/forget` | as above | as above |
 | GPC/DNT auto-decline | — | — | client [WA-5]: store `denied` (`by: "signal"`), forget once |
 | Owner switch on | set `fa_optout`, abort in-flight requests, forget | as above | as above |
-| Forget failed (network error or 503) | `fa_forget_pending` stays; the next document load retries forget once | — | 503 sets `fa_forget` so the retry still knows the id (§5.4) |
+| Forget failed (network error, 429 or 503) | `fa_forget_pending` stays; the next document load (or, after a 429, `Retry-After`) retries forget once | — | 503 sets `fa_forget` so the retry still knows the id; 429 keeps `fa_vid` (§5.4) |
 
 **Race with an in-flight first collect.** Withdrawal writes `denied` before anything else, so no new flush starts; it aborts in-flight requests, so their responses are discarded by the browser; and forget runs strictly after the abort. A `Set-Cookie: fa_vid` from a collect response that the browser had already processed before the abort is cleared again by the forget response, which always arrives later. `/api/v` itself never mints when the envelope does not carry a current `cv` and a valid `consentDate` (§5.3 step 10 runs before step 12); the tracker only sends while the stored choice is `granted`, so a withdrawn or absent consent state never produces a request that could mint.
+
+**Residual risk (accepted, R13).** Aborting a browser request does not stop the server from finishing it, and a valid `cv`/`consentDate` does not prove that consent is still granted. An event from a collect that completes after abort and forget, or from a second tab's id minted without Web Locks (§3.9), can therefore end up under a pseudonymous id that the browser no longer holds. Such an orphan id is unlinkable to any person (never exposed, no join, aggregate-only analysis), expires with raw retention, and from WA-5 the tombstone rejects late events for an id that was erased. The forget response clears `fa_vid` again after the abort, so a late collect `Set-Cookie` never survives in the browser.
 
 Erasure reaches live data only (§13). Id-free aggregates for days outside the 2-day recompute window keep that visitor's counts.
 
@@ -323,10 +326,10 @@ All non-error outcomes are 204; error bodies empty. The only `Set-Cookie` header
 
 ### 5.4 `POST /api/v/forget`
 
-Steps 1 to 4 (body `{}`). **Never subject to the collect rate limits** (§5.8) and not affected by the signed-in drop or the kill switches (works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in). Never mints `fa_vid`. Every response, including 429 and 503, first clears the cookie: `Set-Cookie: fa_vid=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`.
+Steps 1 to 4 (body `{}`). **Never subject to the collect rate limits** (§5.8) and not affected by the signed-in drop or the kill switches (works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in). Never mints `fa_vid`. Every response except 429 first clears the cookie (a 429 keeps `fa_vid`, see the own-limit rule below): `Set-Cookie: fa_vid=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`.
 
 - **Early (WA-2b):** only expires the cookie; always 204.
-- **[WA-5] own limit:** 30 forget requests per key per minute (generous; a user clicks Decline a few times at most). Above it the response is still 204 with the cookie cleared; only the delete forwarding is skipped for that request (an erasure for the same id is already done or pending).
+- **[WA-5] own limit:** 30 forget requests per key per minute (generous; a user clicks Decline a few times at most). Above it the response is **429 with `Retry-After`** and **keeps `fa_vid`** (nothing is cleared, nothing is deleted): the limit is keyed by IP, so another visitor behind the same NAT may have used the budget, and this visitor's erasure is then neither done nor pending. Tracking is already stopped client-side by the stored `denied` state, and the tracker keeps `fa_forget_pending` and retries forget on the next document load or after `Retry-After`, like the 503 path. "Clears the cookie first" therefore applies to every response except 429.
 - **[WA-5] durable erasure:** the id is taken from `fa_vid`, else from `fa_forget`, never from the body. The handler purges that id's events from the forward queue, waits until a batch currently in flight has completed (so no event of that id can be sent afterwards), then calls `DELETE /api/webanalytics/visitors/{uuid}` **synchronously** with a bounded retry (3 attempts, 1 s apart, 3 s timeout each, ≤ 12 s in total) before answering:
   - data-service answered 204 → respond 204 and clear `fa_forget` (`Max-Age=0`);
   - data-service unreachable or 5xx after the retries → respond **503** and set `fa_forget=<uuid>` (§4.2), so the id survives the cleared `fa_vid`; the tracker keeps `fa_forget_pending` in `localStorage` and retries forget once on the next document load.
@@ -366,7 +369,7 @@ In-process sliding windows (contact limiter pattern; valid with `replicas: 1`; w
 | per key | `/api/v` | 20 requests / 60 s **and** 200 events / 10 min |
 | per key, `fa_vid` mints | `/api/v` | 5 / hour |
 | global | `/api/v` | 300 requests / 60 s **and** 2 000 events / 60 s |
-| per key | `/api/v/forget` | 30 requests / 60 s; over it the cookie is still cleared (§5.4) |
+| per key | `/api/v/forget` | 30 requests / 60 s; over it 429 with `Retry-After`, `fa_vid` kept, the tracker retries (§5.4) |
 | tracked keys | each limiter | 10 000, oldest evicted |
 
 Batching check: one active visitor sends ≤ 8 requests/min at peak and 1 to 3 typically, ~20 events per 10 min; the per-key limits admit 3 to 10 concurrent visitors behind one NAT. 20 events fit 8 KiB.
@@ -380,7 +383,9 @@ Batching check: one active visitor sends ≤ 8 requests/min at peak and 1 to 3 t
 | `goal` | `input.analytics === true` AND an **existing** well-formed current `fa_vid` AND no Auth.js session cookie AND both kill switches on. The Server Action never mints `fa_vid`: a submission without an existing cookie records no goal (the enquiry counter still counts it) | `{eventId: <server-generated>, type: "goal", goal: "contact_submit", visitorId, path: "/contact", locale, pageviewId: null, seq: null, occurredAt = receivedAt = now}` |
 | `enquiry` | every successful submission without session cookie; `ANALYTICS_COLLECT_ENABLED` on (independent of `ANALYTICS_UI_ENABLED`, §1.4) | `eventId` (server-generated), `type: "enquiry"`, `occurredAt`, `receivedAt`; every other field of the §6.2 event shape serialised as `null` |
 
-`eventId` for goal and enquiry is generated by furchert-ch with `crypto.randomUUID()` (UUID v4) when the event is created; it is the idempotency key for forward-queue retries. Nothing from the form is attached. A failure to enqueue never affects the form result. The note under the form stays unchanged.
+`eventId` for goal and enquiry is generated by furchert-ch with `crypto.randomUUID()` (UUID v4) when the event is created; it is the idempotency key for forward-queue retries. Nothing from the form is attached. A failure to enqueue never affects the form result.
+
+**Goal before the first flush (residual).** The landing pageview is flushed immediately on tracker start and Accept (§3.9), so `fa_vid` normally exists before the form is used. The form's submit waits for a still-pending first flush for at most 1 s before it calls the Server Action. If there is still no `fa_vid` after that, no goal is recorded and the enquiry counter still counts the submission. This rare loss is a documented residual and never delays or changes the form result beyond the 1 s bound. The note under the form stays unchanged.
 
 ### 5.10 Forward queue (C12; WA-2b unless marked)
 
@@ -1008,7 +1013,7 @@ Local-only specialist reports (not in this repo), summarised in this section. A 
 | R10 | Content blockers | accepted |
 | R11 | Erased visitor's events in flight | abort on withdrawal, queue purge, synchronous delete, tombstone |
 | R12 | WA-5 slips while value work is done | go-live depends on WA-5; flag stays off |
-| R13 | Two ids minted at consent in browsers without Web Locks | documented data-quality limit (§3.9) |
+| R13 | Two ids minted at consent in browsers without Web Locks; a collect completing after abort and forget leaves an orphan id | documented data-quality limit (§3.9); accepted residual risk (§4.4): orphan ids are unlinkable, expire with raw retention, tombstoned ids reject late events (WA-5) |
 
 **Owner questions:** all answered on 2026-11-08 (Q1 to Q7, O1; §1.2). None open.
 
@@ -1078,7 +1083,8 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 - `/api/v` basic safety tested: 405, 415, 403 (foreign/missing `Sec-Fetch-Site`+`Origin`), 8 KiB streamed cap incl. chunked, 21 events → 400, unknown key → 400, signed-in drop, `cv`/`consentDate` drop (and no `Set-Cookie` on such a request), canonicalisation (query and fragment stripping, UTM rules, referrer → host, `mailto:x@y` → type only, `/imprint`/`/privacy` dropped), `XX`/`T1` → null, kill switches; forwarded payload never contains IP or UA.
 - Cookie minted only when absent/stale with exact attributes and expiry; minimal forget expires it, is never rate-limited, works with `ANALYTICS_COLLECT_ENABLED=false` and while signed in.
 - Goal per §5.9 (server-generated `eventId`; no goal without an existing `fa_vid`, while the enquiry still counts; the form's `analytics` flag follows §4.1; a client-posted goal is dropped); enquiry for every successful submission, server-generated `eventId`, serialised with every other field `null`, live with `ANALYTICS_UI_ENABLED = false` (test); note under the form unchanged.
-- Forward queue: batches split at 200 events and 48 KiB; a 413 splits and retries without dropping valid events (test); order, retry, circuit, age and C17 logging tested; Q6 redirects with `src/redirects.test.ts`; endpoint-path pin test; `securityHeaders.test.ts` unchanged; `ANALYTICS_COLLECT_ENABLED: "true"` in `k8s/deployment.yaml`; `INTERFACES.md`, `DEPLOYMENT.md`, `.env.local.example`, `CHANGELOG.md`.
+- Collect completing after abort and forget does not re-set `fa_vid` in the browser (forget runs after the abort and clears again; test); landing pageview flushed immediately on start/Accept; the contact form waits for a pending first flush for at most 1 s, then submits without a goal (test).
+- Forward queue: test on the full serialized envelope that both limits (200 events, 48 KiB) hold and that event order is preserved across splits; batches split at 200 events and 48 KiB; a 413 splits and retries without dropping valid events (test); order, retry, circuit, age and C17 logging tested; Q6 redirects with `src/redirects.test.ts`; endpoint-path pin test; `securityHeaders.test.ts` unchanged; `ANALYTICS_COLLECT_ENABLED: "true"` in `k8s/deployment.yaml`; `INTERFACES.md`, `DEPLOYMENT.md`, `.env.local.example`, `CHANGELOG.md`.
 - Deferred to WA-5 (WA-5 furchert-ch issue): collect rate limits, forget's own limit, mint limit, bot UA list, 429 `retryAt` pause, forget queue purge and synchronous erasure with `fa_forget`.
 
 ### WA-3a (4.5 PD)
@@ -1094,6 +1100,7 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 - V7 creates the WA-3a tables (incl. `rollup_day.final`); information_schema test for id-free aggregates.
 - Rollup with two triggers, 01:12 and 07:30 Europe/Zurich, both through the same `CollectorRunner` lock (test: the two runs never overlap); first run on empty state, 2-day lookback, catch-up, version backfill within 30 days, idempotent (byte-identical), advisory lock, `rollup_day` for empty days; provisional/final rule tested with a fixed clock: the 01:12 run writes yesterday with `final = false`, the 07:30 run rewrites it with `final = true` (yesterday closes at 07:15), so after 07:30 `lastCompleteDay` = yesterday and before it the day before yesterday; provisional days are not served; a skipped 07:30 run is made good by the next 01:12 lookback; `/api/netmon/status` excludes `webanalytics-*` (test).
 - Data tests: `Σ daily_page.pageviews = Σ daily_visits.pageviews`; `Σ entries = Σ exits = visits`; `new + returning = visitors`; `max(daily) ≤ visitors_7d ≤ Σ daily`; **exact 7-day uniques: one visitor with visits on two different days of the window counts once in `visitors_7d` (and once in `visitors_28d`)**; DST cases (2026-10-25 23:30, 2026-03-29 00:30, midnight crossing); gap and referrer/UTM split; 6 h cut; 30-s merge; bot exclusion; engaged MAX; channels; first-channel from the visitor's earliest landing; new vs returning with an earlier event 300 days back; top-50 `(other)`; entry-locale filter counts a visit once.
+- Cross-day test for first-known channel: the earliest landing of a visitor is on an earlier day than the rollup day and still decides the channel.
 - Read chain and JSON contract tests for `/status` (incl. `provisionalDay`), `/overview`, `/pages`, `/pages/detail` (`previous`/`next` `null`), `/clicks`, `/sources`; filter echo; no raw-table reads (test); < 2 s for 365 days measured on the cluster; docs.
 - Deferred to WA-5 (WA-5 data-service issue): freeze guard.
 
@@ -1139,9 +1146,9 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 - Gauges `ingest_capped`, `events_today`, `raw_table_bytes`; `/status` `dailyCap`, `capped`, `rawRetentionStart`; docs.
 
 **furchert-ch: "WA-5: Abuse limits, durable forget erasure, GPC/DNT and final texts" (2.0 PD; after the data-service WA-5 rollout)**
-- Collect rate limits per key and global with `Retry-After`, IPv6 /64, mint limit 5/h, bot UA list (`bots.ts` test table), `Sec-Purpose: prefetch` drop; forget has its own limit (30/min per key) and is never blocked by the collect limits; over its limit it still clears the cookie (tests).
+- Collect rate limits per key and global with `Retry-After`, IPv6 /64, mint limit 5/h, bot UA list (`bots.ts` test table), `Sec-Purpose: prefetch` drop; forget has its own limit (30/min per key) and is never blocked by the collect limits; over its limit it answers 429 with `Retry-After` and keeps `fa_vid`; the tracker keeps `fa_forget_pending` and retries (tests incl. a NAT neighbour exhausting the limit).
 - Forward queue honours 429 `retryAt`; goal and enquiry keep flowing.
-- Durable forget (§5.4): purge queued events of the id, wait for the in-flight batch, synchronous `DELETE` with 3 attempts; 204 on success (clears `fa_forget`); 503 with `fa_forget` when data-service is unreachable; the tracker keeps `fa_forget_pending` and the next load's retry erases via `fa_forget` (race tests: queued batch, in-flight batch, data-service down then up).
+- Durable forget (§5.4): purge queued events of the id, wait for the in-flight batch, synchronous `DELETE` with 3 attempts; 204 on success (clears `fa_forget`); 503 with `fa_forget` when data-service is unreachable; the tracker keeps `fa_forget_pending` and the next load's retry erases via `fa_forget` (race tests: queued batch, in-flight batch, data-service down then up; two concurrent first collects without Web Locks then withdrawal: the cookie id is erased and the orphan id is documented as residual, §4.4).
 - GPC/DNT auto-decline stores `denied` (`by: "signal"`) and calls forget once; explicit Allow (`by: "user"`) overrides, also for the goal flag (tests).
 - `legal.ts` L1 to L7 (incl. `fa_forget` in L3) and the final bar copy prepared as a reviewed commit on the WA-6 go-live branch (never merged before the flip); owner sign-off of the copy recorded.
 
@@ -1242,6 +1249,16 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 7 | Explicit raw-history reads (new/returning, first-known channel, rolling uniques, monthly visitors) and their bound by raw retention (396 d > 365 d id lifetime) | §7.5, §17 WA-3a | data-service #54, #55 |
 | 8 | `consentedSubmits` counted by submission day via the new rollup table `daily_submits`, matching `daily_enquiries` | §7.5, §7.8, §8.2, §8.3, §17 WA-3b/WA-4b | data-service #55; furchert-ch #156 |
 | 9 | Exact uniques tests: one visitor on two days counts once in `visitors_7d`/`visitors_28d` (WA-3a) and in `repeat_offer_viewers_28d` and the audience figure (WA-3b) | §17 WA-3a/WA-3b | data-service #54, #55 |
+
+### Revision 3.3 (second CodeRabbit round on homelab PR #353, 2026-11-08)
+
+| # | Item | Sections changed | Affected WA issues |
+|---|---|---|---|
+| 1 | Withdrawal race accepted as documented residual risk: a collect completing after abort and forget, or a second tab's id minted without Web Locks, leaves an orphan pseudonymous id (unlinkable, expires with raw retention, tombstone rejects late events in WA-5); new tests | §4.4, §16 R13, §17 WA-2b/WA-5 | furchert-ch #154, #157 |
+| 2 | Forget over its own limit answers 429 with `Retry-After` and keeps `fa_vid`; the tracker retries via `fa_forget_pending`; "clears first" applies to every response except 429 | §4.4, §5.3, §5.4, §5.8, §17 WA-2b/WA-5 | furchert-ch #154, #157 |
+| 3 | Goal before `fa_vid`: landing pageview flushed immediately on start/Accept; the form waits at most 1 s for a pending first flush; otherwise no goal (enquiry still counts) | §3.9, §5.9, §17 WA-2b | furchert-ch #154 |
+| 4 | Test on the full serialized envelope: both limits hold, order preserved across splits | §17 WA-2b | furchert-ch #154 |
+| 5 | Cross-day test for first-known channel (earliest landing on an earlier day) | §17 WA-3a | data-service #54 |
 
 ### Committed (2026-11-08, WA-0)
 
