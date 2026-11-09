@@ -378,3 +378,124 @@ tests:
                 Prometheus has no successful scrape of the cert-manager controller for 15 minutes,
                 so the certificate alerts are blind. Check `kubectl -n platform get pods` and the
                 ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
+
+  # --- WorkloadScaledToZero (#362) ---
+  # A Deployment at spec 0 fires after 1 h (not at 59 min); a StatefulSet at spec 1 and a
+  # Deployment at 0 outside apps/platform/flux-system never fire.
+  - interval: 1m
+    input_series:
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="open-webui"}
+        values: 0x70
+      - series: kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}
+        values: 1x70
+      - series: kube_deployment_spec_replicas{namespace="monitoring", deployment="kube-prometheus-stack-grafana"}
+        values: 0x70
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: WorkloadScaledToZero
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: WorkloadScaledToZero
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              deployment: open-webui
+            exp_annotations:
+              summary: "apps/open-webui has been scaled to 0 for 1 hour"
+              description: >-
+                Deployment apps/open-webui has wanted 0 replicas for an hour. WorkloadUnavailable ignores a
+                deliberate scale to 0, so a forgotten scale-up after maintenance shows up only here. Scale it
+                back (`kubectl -n apps scale deployment/open-webui --replicas=1`) or re-run the owning
+                playbook. Expected during mcp-hub kill switch L3: silence it for the incident; runbook in
+                DEPLOYMENT.md "Platform alerting (#284)".
+
+  # --- PersistentVolumeClaimResizeStuck (#362) ---
+  # data-postgresql-0 requests 10Gi while its PV still has 5Gi (fires after 15 min, also carries a
+  # Resizing condition: one alert, not two); n8n-data matches its PV (silent); club-data has PV ==
+  # request but a Resizing condition (fires); influxdb2 requests 20Gi on a 10Gi PV without any
+  # condition (branch 1 alone fires); an unbound PV has no claim_ref (ignored).
+  # The PV series carry the KSM target's namespace="monitoring", as in the cluster (honorLabels).
+  - interval: 1m
+    input_series:
+      - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="data-postgresql-0"}
+        values: 10737418240x25
+      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-pg"}
+        values: 5368709120x25
+      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-pg", claim_namespace="apps",
+          name="data-postgresql-0"}
+        values: 1x25
+      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="data-postgresql-0",
+          type="Resizing", status="true"}
+        values: 1x25
+      - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="n8n-data"}
+        values: 5368709120x25
+      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-n8n"}
+        values: 5368709120x25
+      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-n8n", claim_namespace="apps", name="n8n-data"}
+        values: 1x25
+      - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="club-data"}
+        values: 1073741824x25
+      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-club"}
+        values: 1073741824x25
+      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-club", claim_namespace="apps",
+          name="club-data"}
+        values: 1x25
+      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="club-data", type="Resizing",
+          status="true"}
+        values: 1x25
+      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="club-data", type="Resizing",
+          status="false"}
+        values: 0x25
+      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-unbound"}
+        values: 1073741824x25
+      - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="influxdb2"}
+        values: 21474836480x25
+      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-influx"}
+        values: 10737418240x25
+      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-influx", claim_namespace="apps",
+          name="influxdb2"}
+        values: 1x25
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PersistentVolumeClaimResizeStuck
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: PersistentVolumeClaimResizeStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              persistentvolumeclaim: data-postgresql-0
+            exp_annotations:
+              summary: "PVC apps/data-postgresql-0 expansion has not finished"
+              description: >-
+                The PVC apps/data-postgresql-0 requests more than its volume provides, or a resize condition has
+                been set, for 15 minutes. Check `kubectl -n apps describe pvc data-postgresql-0` and the Longhorn
+                events. A Longhorn engine older than the newest iscsid on its node cannot rescan its frontend:
+                DEPLOYMENT.md "Stale engines after an iscsid restart (#362)" and "Growing the PostgreSQL volume"
+                ("If the expansion gets stuck"); runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              persistentvolumeclaim: club-data
+            exp_annotations:
+              summary: "PVC apps/club-data expansion has not finished"
+              description: >-
+                The PVC apps/club-data requests more than its volume provides, or a resize condition has
+                been set, for 15 minutes. Check `kubectl -n apps describe pvc club-data` and the Longhorn
+                events. A Longhorn engine older than the newest iscsid on its node cannot rescan its frontend:
+                DEPLOYMENT.md "Stale engines after an iscsid restart (#362)" and "Growing the PostgreSQL volume"
+                ("If the expansion gets stuck"); runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              persistentvolumeclaim: influxdb2
+            exp_annotations:
+              summary: "PVC apps/influxdb2 expansion has not finished"
+              description: >-
+                The PVC apps/influxdb2 requests more than its volume provides, or a resize condition has
+                been set, for 15 minutes. Check `kubectl -n apps describe pvc influxdb2` and the Longhorn
+                events. A Longhorn engine older than the newest iscsid on its node cannot rescan its frontend:
+                DEPLOYMENT.md "Stale engines after an iscsid restart (#362)" and "Growing the PostgreSQL volume"
+                ("If the expansion gets stuck"); runbook in DEPLOYMENT.md "Platform alerting (#284)".

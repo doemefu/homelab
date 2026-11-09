@@ -652,6 +652,63 @@ additionalPrometheusRulesMap:
                 the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
                 re-run the owning playbook) and whether the name changed in its repo; runbook in
                 DEPLOYMENT.md "Platform alerting (#284)".
+          # The counterpart of WorkloadUnavailable's `spec > 0` guard (#362): a workload scaled to 0 for
+          # maintenance (engine refresh, PVC expansion, restore) and never scaled back stays silent there.
+          # Deliberate zeros fire too, by design: mcp-hub kill switch L3 (silence the alert for the
+          # incident). No other workload in these namespaces is meant to sit at 0.
+          - alert: WorkloadScaledToZero
+            expr: >-
+              (max by (namespace, deployment) (kube_deployment_spec_replicas{namespace=~"apps|platform|flux-system"}) == 0)
+              or
+              (max by (namespace, statefulset) (kube_statefulset_replicas{namespace=~"apps|platform|flux-system"}) == 0)
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.namespace }}/{{ or $labels.deployment $labels.statefulset }} has been scaled to 0 for 1 hour"
+              description: >-
+                {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }}{{ else }}StatefulSet
+                {{ $labels.namespace }}/{{ $labels.statefulset }}{{ end }} has wanted 0 replicas for an hour.
+                WorkloadUnavailable ignores a deliberate scale to 0, so a forgotten scale-up after maintenance
+                shows up only here. Scale it back (`kubectl -n {{ $labels.namespace }} scale
+                {{ if $labels.deployment }}deployment/{{ $labels.deployment }}{{ else }}statefulset/{{ $labels.statefulset }}{{ end }}
+                --replicas=1`) or re-run the owning playbook. Expected during mcp-hub kill switch L3:
+                silence it for the incident; runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          # A PVC whose expansion does not finish (#359/#362: a stale Longhorn engine hung the frontend
+          # rescan for 18 min, nothing alerted). Branch 1: the PVC request exceeds the capacity of its bound
+          # PV (the PV grows only when the controller-side expansion succeeds); kube_persistentvolume_*
+          # is cluster-scoped, so the claim's namespace/name come from kube_persistentvolume_claim_ref.
+          # Branch 2: a resize condition stays true (kube_persistentvolumeclaim_status_condition is
+          # experimental in KSM v2.14; branch 1 alone still covers the Longhorn case).
+          - alert: PersistentVolumeClaimResizeStuck
+            expr: >-
+              (
+                max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_resource_requests_storage_bytes)
+                > on (namespace, persistentvolumeclaim)
+                max by (namespace, persistentvolumeclaim) (
+                  label_replace(label_replace(
+                    kube_persistentvolume_capacity_bytes
+                      * on (persistentvolume) group_left (claim_namespace, name) kube_persistentvolume_claim_ref,
+                    "namespace", "$1", "claim_namespace", "(.+)"),
+                  "persistentvolumeclaim", "$1", "name", "(.+)"))
+              )
+              or
+              (
+                max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_status_condition{
+                  type=~"Resizing|FileSystemResizePending|ControllerResizeError|NodeResizeError", status="true"}) > 0
+              )
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} expansion has not finished"
+              description: >-
+                The PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} requests more than its volume
+                provides, or a resize condition has been set, for 15 minutes. Check
+                `kubectl -n {{ $labels.namespace }} describe pvc {{ $labels.persistentvolumeclaim }}` and the Longhorn
+                events. A Longhorn engine older than the newest iscsid on its node cannot rescan its frontend:
+                DEPLOYMENT.md "Stale engines after an iscsid restart (#362)" and "Growing the PostgreSQL volume"
+                ("If the expansion gets stuck"); runbook in DEPLOYMENT.md "Platform alerting (#284)".
           # cert-manager metrics come from the ServiceMonitor monitoring/cert-manager (41_monitoring.yml,
           # honorLabels so `namespace` is the Certificate's). No Certificate exists today (public TLS
           # ends at Cloudflare), so these stay dormant until one does. `> 0` drops a never-issued
