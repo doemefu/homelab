@@ -1,0 +1,204 @@
+# promtool unit tests for the gauge rules WebAnalyticsIngestCapped and WebAnalyticsTableLarge in
+# additionalPrometheusRulesMap.homelab-webanalytics (docs/100-web-analytics.md §7.9, homelab#351 part 2).
+# Run: scripts/promtool-test-rules.sh (CI: `Test Prometheus Rules`). Samples and evaluations are 1 minute
+# apart. Absent-series cases cover the time before the first measurement (the gauge exists only after
+# data-service WA-5 and, for the table size, after its first successful measurement).
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # Capped: the gauge is 1 from minute 4 (first true evaluation), fires after the 5 minute `for` (silent at 8, firing at 9), resolves when it returns to 0 (retryAt).
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_ingest_capped{pod=\"data-service-a\"}"
+        values: "0x3 1x30 0x30"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is capped"
+              description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 34m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is capped"
+              description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 36m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts: []
+  # Capped: two pods (a rollout) both at 1 give exactly one alert (max).
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_ingest_capped{pod=\"data-service-a\"}"
+        values: "0x3 1x30 0x30"
+      - series: "webanalytics_ingest_capped{pod=\"data-service-b\"}"
+        values: "0x3 1x30 0x30"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is capped"
+              description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+  # Capped: the gauge at 0 never fires.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_ingest_capped{pod=\"data-service-a\"}"
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts: []
+  # Capped: a restarted pod whose old series ends with a stale marker (pod a: 1 for 11 minutes, then stale) while the new pod (b) reports 0 does not keep the alert: firing at 9, resolved at 12.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_ingest_capped{pod=\"data-service-a\"}"
+        values: "1x10 stale"
+      - series: "webanalytics_ingest_capped{pod=\"data-service-b\"}"
+        values: "_x11 0x50"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is capped"
+              description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 10m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is capped"
+              description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 12m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts: []
+  # Capped: an absent series (before data-service WA-5 or right after a restart) is silent.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_ingest_capped{pod=\"data-service-a\"}"
+        values: "_x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts: []
+  # TableLarge: exactly 3 GiB is not above the threshold: no alert.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_raw_table_bytes{pod=\"data-service-a\"}"
+        values: "3221225472x140"
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []
+  # TableLarge: 2.2 GB at the caps is below the threshold: no alert.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_raw_table_bytes{pod=\"data-service-a\"}"
+        values: "2200000000x140"
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []
+  # TableLarge: 3.5 GiB holds for the 1 h `for`: silent at 59, firing at 60, resolves after the drop below 3 GiB.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_raw_table_bytes{pod=\"data-service-a\"}"
+        values: "3758096384x90 2147483648x60"
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "The web analytics raw table is larger than 3 GiB"
+              description: "webanalytics.events is larger than 3 GiB (total relation size) for an hour, more than the about 2.0 to 2.2 GB expected at the ingest caps. Check retention (396 days, the retention job log of data-service), the caps and the volume headroom (DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\", homelab-data-service#57), and the data-service runbooks (purge a poisoned day)."
+      - eval_time: 90m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "The web analytics raw table is larger than 3 GiB"
+              description: "webanalytics.events is larger than 3 GiB (total relation size) for an hour, more than the about 2.0 to 2.2 GB expected at the ingest caps. Check retention (396 days, the retention job log of data-service), the caps and the volume headroom (DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\", homelab-data-service#57), and the data-service runbooks (purge a poisoned day)."
+      - eval_time: 92m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []
+  # TableLarge: two pods (one at 1 GiB, one at 4 GiB) give one alert (max).
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_raw_table_bytes{pod=\"data-service-a\"}"
+        values: "1073741824x80"
+      - series: "webanalytics_raw_table_bytes{pod=\"data-service-b\"}"
+        values: "4294967296x80"
+    alert_rule_test:
+      - eval_time: 61m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "The web analytics raw table is larger than 3 GiB"
+              description: "webanalytics.events is larger than 3 GiB (total relation size) for an hour, more than the about 2.0 to 2.2 GB expected at the ingest caps. Check retention (396 days, the retention job log of data-service), the caps and the volume headroom (DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\", homelab-data-service#57), and the data-service runbooks (purge a poisoned day)."
+  # TableLarge: the series is absent for the first 30 minutes (no measurement yet), then 4 GiB: silent at 89, firing at 90.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_raw_table_bytes{pod=\"data-service-a\"}"
+        values: "_x30 4294967296x80"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []
+      - eval_time: 89m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "The web analytics raw table is larger than 3 GiB"
+              description: "webanalytics.events is larger than 3 GiB (total relation size) for an hour, more than the about 2.0 to 2.2 GB expected at the ingest caps. Check retention (396 days, the retention job log of data-service), the caps and the volume headroom (DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\", homelab-data-service#57), and the data-service runbooks (purge a poisoned day)."
+  # TableLarge: a short spike above 3 GiB shorter than the hour does not fire.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_raw_table_bytes{pod=\"data-service-a\"}"
+        values: "2147483648x20 4294967296x20 2147483648x80"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: WebAnalyticsTableLarge
+        exp_alerts: []

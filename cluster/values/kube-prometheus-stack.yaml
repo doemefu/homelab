@@ -652,6 +652,68 @@ additionalPrometheusRulesMap:
                 the Flux Kustomization or playbook that deploys it (`flux get kustomizations`, or
                 re-run the owning playbook) and whether the name changed in its repo; runbook in
                 DEPLOYMENT.md "Platform alerting (#284)".
+          # The counterpart of WorkloadUnavailable's `spec > 0` guard (#362): a workload scaled to 0 for
+          # maintenance (engine refresh, PVC expansion, restore) and never scaled back stays silent there.
+          # Deliberate zeros fire too, by design, once they last over 1 h: mcp-hub kill switch L3 and
+          # club-mcp kill switch L3 or its decommission (silence the alert, or remove the object), and a
+          # `scripts/backup-app-data.sh --quiesce` run that scales open-webui and n8n to 0 for longer than
+          # an hour. No other workload in these namespaces is meant to sit at 0.
+          - alert: WorkloadScaledToZero
+            expr: >-
+              (max by (namespace, deployment) (kube_deployment_spec_replicas{namespace=~"apps|platform|flux-system"}) == 0)
+              or
+              (max by (namespace, statefulset) (kube_statefulset_replicas{namespace=~"apps|platform|flux-system"}) == 0)
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.namespace }}/{{ or $labels.deployment $labels.statefulset }} has been scaled to 0 for 1 hour"
+              description: >-
+                {{ if $labels.deployment }}Deployment {{ $labels.namespace }}/{{ $labels.deployment }}{{ else }}StatefulSet
+                {{ $labels.namespace }}/{{ $labels.statefulset }}{{ end }} has wanted 0 replicas for an hour.
+                WorkloadUnavailable ignores a deliberate scale to 0, so a forgotten scale-up after maintenance
+                shows up only here. Scale it back (`kubectl -n {{ $labels.namespace }} scale
+                {{ if $labels.deployment }}deployment/{{ $labels.deployment }}{{ else }}statefulset/{{ $labels.statefulset }}{{ end }}
+                --replicas=1`) or re-run the owning playbook. Expected during a kill switch L3 (mcp-hub,
+                club-mcp) or a decommission: silence it; runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          # A PVC whose expansion does not finish (#359/#362: a stale Longhorn engine hung the frontend
+          # rescan for 18 min, nothing alerted). Branch 1: the PVC request exceeds the capacity of the PV it
+          # is bound to now (the PV grows only when the controller-side expansion succeeds). The PV comes
+          # from the claim's spec.volumeName (kube_persistentvolumeclaim_info{volumename}), not from a PV's
+          # claimRef: a retained PV that still references a re-created claim of the same name must not mask
+          # the current PV. Both join sides are aggregated with max by first: during a KSM rollout two pods
+          # export the same series for a moment, which would make the join many-to-many and fail the rule.
+          # Branch 2: a resize condition stays true (kube_persistentvolumeclaim_status_condition, label
+          # `condition` per the KSM v2.14 source, experimental; branch 1 alone still covers the Longhorn case).
+          - alert: PersistentVolumeClaimResizeStuck
+            expr: >-
+              (
+                max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_resource_requests_storage_bytes)
+                > on (namespace, persistentvolumeclaim)
+                max by (namespace, persistentvolumeclaim) (
+                  max by (namespace, persistentvolumeclaim, persistentvolume) (
+                    label_replace(kube_persistentvolumeclaim_info{volumename!=""},
+                      "persistentvolume", "$1", "volumename", "(.+)"))
+                  * on (persistentvolume) group_left ()
+                  max by (persistentvolume) (kube_persistentvolume_capacity_bytes))
+              )
+              or
+              (
+                max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_status_condition{
+                  condition=~"Resizing|FileSystemResizePending|ControllerResizeError|NodeResizeError", status="true"}) > 0
+              )
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} expansion has not finished"
+              description: >-
+                The PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} requests more than its volume
+                provides, or a resize condition has been set, for 15 minutes. Check
+                `kubectl -n {{ $labels.namespace }} describe pvc {{ $labels.persistentvolumeclaim }}` and the Longhorn
+                events. A Longhorn engine older than the newest iscsid on its node cannot rescan its frontend:
+                DEPLOYMENT.md "Stale engines after an iscsid restart (#362)" and "Growing the PostgreSQL volume"
+                ("If the expansion gets stuck"); runbook in DEPLOYMENT.md "Platform alerting (#284)".
           # cert-manager metrics come from the ServiceMonitor monitoring/cert-manager (41_monitoring.yml,
           # honorLabels so `namespace` is the Certificate's). No Certificate exists today (public TLS
           # ends at Cloudflare), so these stay dormant until one does. `> 0` drops a never-issued
@@ -743,17 +805,18 @@ additionalPrometheusRulesMap:
   # Web analytics (Epic #348, WA-5, #351; docs/100-web-analytics.md §7.9). Metrics come from
   # data-service (job data-service, ServiceMonitor monitoring/data-service). The collect path is dark
   # until WA-6, so before go-live there is no traffic and none of these rules can fire.
-  # WebAnalyticsIngestSilent follows in WA-6 (#352); the gauge rules (IngestCapped, TableLarge) follow
-  # with data-service WA-5 (#56). The rules in this block use only counters.
+  # WebAnalyticsIngestSilent follows in WA-6 (#352). The gauge rules (IngestCapped, TableLarge, #351
+  # part 2) read the gauges exported by data-service WA-5 (#56). max() across pods: a rollout briefly
+  # runs two pods, and the gauges are per pod.
   # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts in
   # Discord unless a warning fires in the same namespace (InfoInhibitor joins on the namespace label).
-  # It stays visible in Prometheus/Alertmanager. All three alerts carry the static label
+  # It stays visible in Prometheus/Alertmanager. All five alerts carry the static label
   # namespace: apps, the namespace of the source series (data-service): sum() drops the label from the
   # aggregated alerts, and without it a namespace-less warning could release the info alert. With it,
-  # Spike and SecondLineRejects (warnings) release RejectRatioHigh (info) without releasing the other
-  # info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
+  # Spike, SecondLineRejects, IngestCapped and TableLarge (warnings) release RejectRatioHigh (info)
+  # without releasing the other info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
   # NetmonSeriesTruncated has no static label. Trade-off: any warning in namespace apps releases
-  # RejectRatioHigh, and Spike and SecondLineRejects release the other info alerts with namespace apps.
+  # RejectRatioHigh, and the four warnings release the other info alerts with namespace apps.
   homelab-webanalytics:
     groups:
       - name: homelab-webanalytics
@@ -806,6 +869,41 @@ additionalPrometheusRulesMap:
                 50 percent of rejects plus accepted events (reason erased excluded). furchert-ch should have
                 dropped these at the edge: check the deployed furchert-ch version against the data-service
                 contract (docs/100-web-analytics.md §6.2) and the reasons in webanalytics_events_rejected_total.
+          # The ingest caps (daily 10 000, hourly 2 500 accepted events, docs/100 §6.4) are reached: new
+          # analytics events are rejected with 429 until retryAt, goal and enquiry keep flowing. The gauge
+          # returns to 0 at retryAt without traffic, and the series is absent only before data-service WA-5.
+          - alert: WebAnalyticsIngestCapped
+            expr: max(webanalytics_ingest_capped) == 1
+            for: 5m
+            labels:
+              severity: warning
+              namespace: apps
+            annotations:
+              summary: "Web analytics ingest is capped"
+              description: >-
+                data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches
+                until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a
+                bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service
+                runbooks in its DEPLOYMENT.md ("Runbooks (canonical ...)": purge a poisoned day, adjust caps);
+                owner checks in DEPLOYMENT.md "Web analytics (WA-5): alerts, Cloudflare rules and owner checks".
+          # Total relation size (heap, indexes, TOAST) of webanalytics.events, measured every 15 minutes.
+          # About 2.0 to 2.2 GB is expected at the caps; 3 GiB is 30 percent of the 10 GiB volume after
+          # homelab#359 and signals growth beyond the cap-based expectation (docs/100 §7.9, homelab#351).
+          # The series is absent until the first successful measurement: no alert then.
+          - alert: WebAnalyticsTableLarge
+            expr: max(webanalytics_raw_table_bytes) > 3 * 1024 * 1024 * 1024
+            for: 1h
+            labels:
+              severity: warning
+              namespace: apps
+            annotations:
+              summary: "The web analytics raw table is larger than 3 GiB"
+              description: >-
+                webanalytics.events is larger than 3 GiB (total relation size) for an hour, more than the
+                about 2.0 to 2.2 GB expected at the ingest caps. Check retention (396 days, the retention
+                job log of data-service), the caps and the volume headroom (DEPLOYMENT.md "Web analytics
+                (WA-5): alerts, Cloudflare rules and owner checks", homelab-data-service#57), and the
+                data-service runbooks (purge a poisoned day).
           # Anything rejected by the second line is a contract mismatch or an attack that got past
           # furchert-ch's validation, except the by-design reasons erased and visitor_cap. The counters
           # are exported with 0 from startup, so the first reject shows as an increase; a restart

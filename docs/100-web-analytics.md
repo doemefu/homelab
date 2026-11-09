@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/100-web-analytics.md` forwards here (since homelab#349, WA-0). Relative `adr/` links resolve to `docs/adr/` in this repo. The specialist reports behind §15 are local-only and not part of this repo.
 
-**Status:** Accepted (rev 3.7, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.7 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
+**Status:** Accepted (rev 3.8, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.8 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
 **Epic:** `doemefu/homelab#348` · **Parent worklog:** `20261108-163648-web-analytics-epic-caea` (local-only)
 **Canonical location:** this file (`infrastructure/docs/100-web-analytics.md`). The parent workspace file `docs/100-web-analytics.md` is a forwarder (since `homelab#349`), following the `060` precedent.
 **ADR:** none new. [ADR 0002](adr/0002-network-telemetry-ownership.md) decisions 1 and 2 cover this (analytical data plane; one store, one owner); the push write path is a recorded exception to its decision 3 (§1.4); ADR 0002 carries the dated amendment of 2026-11-08 (WA-0).
@@ -528,7 +528,7 @@ Shape CHECK per type; UNIQUE `(pageview_id, seq)`; indexes `(occurred_at)`, `(vi
 
 ### 7.3 Size (≈ 300 B per row)
 
-Base (50 k events/month): ≈ 650 k rows, ≈ 200 MB at steady state. Worst case at the cap: ≈ 3.96 M rows, ≈ 1.2 GB of row data (≈ 24 % of the shared 5 Gi PVC); measured as `pg_total_relation_size` (heap, indexes and TOAST) the table is expected at about 2.0 to 2.2 GB (§7.9). Aggregates ≈ 40 to 50 MB/year. Until WA-5 there is no cap and no retention; the dark launch keeps volume at zero.
+Base (50 k events/month): ≈ 650 k rows, ≈ 200 MB at steady state. Worst case at the cap: ≈ 3.96 M rows, ≈ 1.2 GB of row data (≈ 12 % of the shared 10 GiB PVC, expanded from 5 GiB by homelab#359); measured as `pg_total_relation_size` (heap, indexes and TOAST) the table is expected at about 2.0 to 2.2 GB (§7.9). Aggregates ≈ 40 to 50 MB/year. Until WA-5 there is no cap and no retention; the dark launch keeps volume at zero.
 
 ### 7.4 No partitioning
 
@@ -633,17 +633,17 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 
 **Rollup staleness (homelab, WA-3a):** add `webanalytics-rollup` to the `NetmonCollectorStale` 26 h daily class regex and to the 15-min catch-all exclusion, with a promtool test; it must be live (playbook `41_monitoring.yml` run) before the collector is enabled (§7.5).
 
-**Delivery split (homelab#351):** the counter rules (`WebAnalyticsIngestSpike` with its recording rule, `WebAnalyticsRejectRatioHigh`, `WebAnalyticsSecondLineRejects`) ship first; the gauge rules (`WebAnalyticsIngestCapped`, `WebAnalyticsTableLarge`) follow once data-service WA-5 exports `webanalytics_ingest_capped` and `webanalytics_raw_table_bytes`. No separate presence alert rule is added: after the rules are applied, the owner checks (DEPLOYMENT.md) read the loaded expressions and count the series, and this section is the contract for the metric names. `info` alerts are normally visible only in Prometheus/Alertmanager (the chart's `InfoInhibitor`). The three counter alerts carry the static label `namespace: apps` (the namespace of the source series), so the warnings release the info alert. `WebAnalyticsSecondLineRejects` excludes `erased` and `visitor_cap` (by design); the ratio rule excludes only `erased`.
+**Delivery split (homelab#351):** the counter rules (`WebAnalyticsIngestSpike` with its recording rule, `WebAnalyticsRejectRatioHigh`, `WebAnalyticsSecondLineRejects`) shipped first (part 1); the gauge rules (`WebAnalyticsIngestCapped`, `WebAnalyticsTableLarge`) followed once data-service WA-5 exported `webanalytics_ingest_capped` and `webanalytics_raw_table_bytes` (part 2, verified on the live scrape 2026-11-09); both gauge rules use `max()` across pods and carry the static label `namespace: apps`. No separate presence alert rule is added: after the rules are applied, the owner checks (DEPLOYMENT.md) read the loaded expressions and count the series, and this section is the contract for the metric names. `info` alerts are normally visible only in Prometheus/Alertmanager (the chart's `InfoInhibitor`). The three counter alerts carry the static label `namespace: apps` (the namespace of the source series), so the warnings release the info alert. `WebAnalyticsSecondLineRejects` excludes `erased` and `visitor_cap` (by design); the ratio rule excludes only `erased`.
 
 **WebAnalytics rules** (key `homelab-webanalytics`, single `additionalPrometheusRulesMap`, promtool tests): five rules in WA-5, `WebAnalyticsIngestSilent` in WA-6 (go-live), because before go-live there is no traffic and the rule would fire.
 
 | Alert | Expression (sketch) | For | Severity | WA |
 |---|---|---|---|---|
-| `WebAnalyticsIngestCapped` | `max(webanalytics_ingest_capped) == 1` | 5m | warning | 5 |
+| `WebAnalyticsIngestCapped` | `max(webanalytics_ingest_capped) == 1` (the gauge returns to 0 at `retryAt` without traffic) | 5m | warning | 5 |
 | `WebAnalyticsIngestSpike` | `webanalytics:accepted:increase1h` (recording rule, `sum(increase(webanalytics_events_accepted_total[1h]))`) > 500 and > 3 × its 7-day average (`avg_over_time(…[7d] offset 1h)`, the current hour excluded) | 15m | warning | 5 |
 | `WebAnalyticsRejectRatioHigh` | rejects / (rejects + accepted) > 0.5 and rejects > 100/h; rejects exclude only `erased`, `visitor_cap` counts | 30m | info | 5 |
 | `WebAnalyticsSecondLineRejects` | `sum by (reason) (increase(webanalytics_events_rejected_total{reason!~"erased\|visitor_cap"}[1h])) > 0` | 0m | warning | 5 |
-| `WebAnalyticsTableLarge` | `webanalytics_raw_table_bytes > 1.5 GiB` (the threshold is re-checked on homelab#351 part 2 and homelab-data-service#57: the total relation size at the caps is about 2.0 to 2.2 GB, not the ≈ 1.2 GB of the row-data estimate) | 1h | warning | 5 |
+| `WebAnalyticsTableLarge` | `max(webanalytics_raw_table_bytes) > 3 GiB` (owner decision 2026-11-09: the shared volume is 10 GiB after homelab#359, the total relation size is expected at about 2.0 to 2.2 GB at the caps, so 3 GiB signals growth beyond the cap-based expectation; the gauge is absent until the first measurement and then the rule stays silent) | 1h | warning | 5 |
 | `WebAnalyticsIngestSilent` | no increase of `webanalytics_events_accepted_total` (enquiries not counted) for 7 days while data-service and furchert-ch are up | 1h | info | 6 |
 
 ---
@@ -1037,7 +1037,7 @@ Local-only specialist reports (not in this repo), summarised in this section. A 
 | R3 | Mac dumps keep raw ids indefinitely | owner accepted (Q2); privacy text claims nothing about backups |
 | R4 | Low consent rate | §8.6; coverage |
 | R5 | Forged events | WA-5 limits, caps, alerts; dark until WA-6 |
-| R6 | Shared 5 Gi PVC | WA-5 cap; ≈ 1.2 GB row data, ≈ 2.0–2.2 GB total relation size at the cap; threshold and PVC decision in homelab#351 part 2 and homelab-data-service#57; size alert |
+| R6 | Shared PostgreSQL PVC (10 GiB since homelab#359, was 5 GiB) | WA-5 cap; ≈ 1.2 GB row data, ≈ 2.0–2.2 GB total relation size at the cap; `WebAnalyticsTableLarge` at 3 GiB; egress snapshot volume in homelab-data-service#57 |
 | R7 | Lost snapshots, at-most-once loss | heartbeat; accepted |
 | R8 | CF baseline includes bots, prefetches | separate lines |
 | R9 | First 12 months almost everyone "new" | UI note |
@@ -1250,7 +1250,7 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 | F12 | IngestSilent after 7 days | §7.9 |
 | F13 | WA-3 and WA-4 split; re-estimate | §17 |
 | F14 | Erasure on live data only; no backup claim | §13, §10.2 |
-| F15 | ~300 B/row, ≈ 1.2 GB row data (≈ 2.0–2.2 GB total relation size) at cap, TableLarge 1.5 GiB (to be re-checked in homelab#351 part 2 and homelab-data-service#57) | §7.3, §7.9 |
+| F15 | ~300 B/row, ≈ 1.2 GB row data (≈ 2.0–2.2 GB total relation size) at cap, TableLarge 3 GiB (rev 3.8, 10 GiB volume) | §7.3, §7.9 |
 | F16 | Forget independent of kill switches | §5.4 |
 | F17 | End-to-end checklist right after the flip | §12.3, §17 WA-6 |
 | F18 | Visit cap 6 h | §3.1, §7.5 |
@@ -1419,6 +1419,14 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 72 | `secondLine` keeps the six validation reasons; `erased` and `visitor_cap` only in the metric and `daily_ingest_stats` (data-service #66 item 7) | §8.2 | data-service #56 |
 | 73 | `webanalytics_raw_table_bytes` = `pg_total_relation_size`, absent until the first measurement; `WebAnalyticsTableLarge` threshold to be re-checked (about 2.0 to 2.2 GB at the caps) (data-service #66 item 3) | §7.9 | data-service #56, homelab #351 |
 | 74 | Already in rev 3.6 (homelab #357): reject ratio excludes only `erased`, recording rule `webanalytics:accepted:increase1h`, info alerts via InfoInhibitor, WAF path set | none (see rows 52–55) | homelab #351 |
+
+### Revision 3.8 (WA-5 homelab part 2, homelab#351, 2026-11-09)
+
+| # | Item | Sections changed | Affected WA issues |
+|---|---|---|---|
+| 75 | Gauge rules shipped: `WebAnalyticsIngestCapped` (`max(...) == 1`, 5m) and `WebAnalyticsTableLarge` (`max(...) > 3 GiB`, 1h), both `namespace: apps`; metric names verified on the live scrape | §7.9 | homelab #351 |
+| 76 | `WebAnalyticsTableLarge` threshold 3 GiB (owner decision after the volume grew to 10 GiB, homelab#359); the gauge is absent until the first measurement | §7.9, §7.3, §16 R6, F15 | homelab #351 |
+| 77 | Runbooks live in data-service's DEPLOYMENT (canonical); homelab keeps the cluster-level steps and links | §12.4 (already), DEPLOYMENT | homelab #351 |
 
 ### Committed (2026-11-08, WA-0)
 
