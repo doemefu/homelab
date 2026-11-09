@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/100-web-analytics.md` forwards here (since homelab#349, WA-0). Relative `adr/` links resolve to `docs/adr/` in this repo. The specialist reports behind §15 are local-only and not part of this repo.
 
-**Status:** Accepted (rev 3.5, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.5 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
+**Status:** Accepted (rev 3.6, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.6 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
 **Epic:** `doemefu/homelab#348` · **Parent worklog:** `20261108-163648-web-analytics-epic-caea` (local-only)
 **Canonical location:** this file (`infrastructure/docs/100-web-analytics.md`). The parent workspace file `docs/100-web-analytics.md` is a forwarder (since `homelab#349`), following the `060` precedent.
 **ADR:** none new. [ADR 0002](adr/0002-network-telemetry-ownership.md) decisions 1 and 2 cover this (analytical data plane; one store, one owner); the push write path is a recorded exception to its decision 3 (§1.4); ADR 0002 carries the dated amendment of 2026-11-08 (WA-0).
@@ -626,13 +626,15 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 
 **Rollup staleness (homelab, WA-3a):** add `webanalytics-rollup` to the `NetmonCollectorStale` 26 h daily class regex and to the 15-min catch-all exclusion, with a promtool test; it must be live (playbook `41_monitoring.yml` run) before the collector is enabled (§7.5).
 
+**Delivery split (homelab#351):** the counter rules (`WebAnalyticsIngestSpike` with its recording rule, `WebAnalyticsRejectRatioHigh`, `WebAnalyticsSecondLineRejects`) ship first; the gauge rules (`WebAnalyticsIngestCapped`, `WebAnalyticsTableLarge`) follow once data-service WA-5 exports `webanalytics_ingest_capped` and `webanalytics_raw_table_bytes`. No separate presence alert rule is added: after the rules are applied, the owner checks (DEPLOYMENT.md) read the loaded expressions and count the series, and this section is the contract for the metric names. `info` alerts are normally visible only in Prometheus/Alertmanager (the chart's `InfoInhibitor`). `WebAnalyticsSecondLineRejects` excludes `erased` and `visitor_cap` (by design); the ratio rule excludes only `erased`.
+
 **WebAnalytics rules** (key `homelab-webanalytics`, single `additionalPrometheusRulesMap`, promtool tests): five rules in WA-5, `WebAnalyticsIngestSilent` in WA-6 (go-live), because before go-live there is no traffic and the rule would fire.
 
 | Alert | Expression (sketch) | For | Severity | WA |
 |---|---|---|---|---|
 | `WebAnalyticsIngestCapped` | `max(webanalytics_ingest_capped) == 1` | 5m | warning | 5 |
-| `WebAnalyticsIngestSpike` | hourly accepted > 3 × 7-day hourly average and > 500 | 15m | warning | 5 |
-| `WebAnalyticsRejectRatioHigh` | rejects / (rejects + accepted) > 0.5 and rejects > 100/h | 30m | info | 5 |
+| `WebAnalyticsIngestSpike` | `webanalytics:accepted:increase1h` (recording rule, `sum(increase(webanalytics_events_accepted_total[1h]))`) > 500 and > 3 × its 7-day average (`avg_over_time(…[7d] offset 1h)`, the current hour excluded) | 15m | warning | 5 |
+| `WebAnalyticsRejectRatioHigh` | rejects / (rejects + accepted) > 0.5 and rejects > 100/h; rejects exclude only `erased`, `visitor_cap` counts | 30m | info | 5 |
 | `WebAnalyticsSecondLineRejects` | `increase(webanalytics_events_rejected_total{reason!~"erased\|visitor_cap"}[1h]) > 0` | 0m | warning | 5 |
 | `WebAnalyticsTableLarge` | `webanalytics_raw_table_bytes > 1.5 GiB` (above the ≈ 1.2 GB steady state at the cap) | 1h | warning | 5 |
 | `WebAnalyticsIngestSilent` | no increase of `webanalytics_events_accepted_total` (enquiries not counted) for 7 days while data-service and furchert-ch are up | 1h | info | 6 |
@@ -896,9 +898,9 @@ All additive; **no backwards-incompatible change.** `/api/netmon/status` output 
 - **Erasure and backups (Q2 "So lassen"):** erasure on withdrawal and retention act on live data only; Longhorn snapshots, restic copies and the Mac app-data dumps are not edited and age out on their own rotation (the Mac dumps when the owner deletes them). The privacy text speaks only of erasure from the website's live data and never claims it reaches backups.
 - **Cookie visibility:** `Path=/` (needed by the Server Action); visible to Cloudflare, already a listed processor.
 - **Operating rules:** never match an enquiry's time to analytics; never paste raw analytics into AI tools.
-- **Cloudflare [WA-5 owner checks]:** Web Analytics/RUM beacon and Zaraz off; `/api/v` outside the auth rate-limit rule; optional WAF custom rule `(http.host eq "furchert.ch" and starts_with(http.request.uri.path, "/api/v") and (http.request.method ne "POST" or cf.client.bot))` → Block if `cf.client.bot` exists on Free.
+- **Cloudflare [WA-5 owner checks]:** Web Analytics/RUM beacon and Zaraz off; `/api/v` outside the auth rate-limit rule; optional WAF custom rule `(http.host eq "furchert.ch" and http.request.uri.path in {"/api/v" "/api/v/forget"} and (http.request.method ne "POST" or cf.client.bot))` → Block if `cf.client.bot` exists on Free (otherwise only the `http.request.method ne "POST"` part). Steps in DEPLOYMENT.md "Web analytics (WA-5): alerts, Cloudflare rules and owner checks".
 
-### 13.1 Record of processing (internal; finalised in WA-5)
+### 13.1 Record of processing (final, WA-5, 2026-11-09)
 
 | Item | Content |
 |---|---|
@@ -907,13 +909,15 @@ All additive; **no backwards-incompatible change.** `/api/netmon/status` output 
 | Legal basis | consent (CH FMG Art. 45c; EU ePrivacy Art. 5(3) opt-in) |
 | Data subjects | visitors who chose Allow |
 | Categories | pseudonymous visitor id; paths, engaged time, scroll, section reach; clicks (CTA ids, outbound host, mailto/tel type, nav target, locale switch); contact-success fact; referrer host; utm source/medium/campaign; country; device class; browser/OS family; viewport bucket; page locale. Separately a daily enquiry count (not personal) |
-| Recipients | none beyond the controller; Cloudflare transports |
-| Retention (internal) | raw 396 days, then id-free aggregates; cookie and choice 12 months fixed; `fa_forget` at most 30 days and only while an erasure is pending; backups per their own rotation |
+| Recipients | none beyond the controller; Cloudflare only as a processor (edge and transport, no analytics product enabled) |
+| Own storage and copies | cluster storage (PostgreSQL volume), Longhorn snapshots, restic copies and the operator's app-data dumps; all inside the controller's own infrastructure |
+| Retention (internal) | raw 396 days, then id-free aggregates; cookie and choice 12 months fixed; `fa_forget` at most 30 days and only while an erasure is pending; copies per their own rotation (§13) |
+| Review trigger | re-assess this record on any new data field, any second recipient, a retention change or a change of the legal basis |
 | TOMs | §5.3, §6, ADMIN-only dashboard, aggregate-only reads, cluster-internal API, identifier-free logs |
 
-### 13.2 DPIA threshold note (finalised in WA-5)
+### 13.2 DPIA threshold note (final, WA-5, 2026-11-09)
 
-No DPIA: no sensitive data, no high-risk profiling, first party, no third-party recipients, not large-scale systematic monitoring. CH: DSG Art. 22 not met. GDPR Art. 3(2)(b) not assessed by a lawyer (Q5).
+No DPIA: no sensitive data, no high-risk profiling, first party, no third-party recipients, not large-scale systematic monitoring. CH: DSG Art. 22 not met. GDPR Art. 3(2)(b) not assessed by a lawyer (Q5). Re-check together with the record (§13.1 review trigger).
 
 ---
 
@@ -1374,6 +1378,15 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 49 | The first-ever-run exception is stated in the Selection and Final-vs-provisional rows | §7.5 | data-service #54 |
 | 50 | `/clicks` remainder item defined (`kind` `null` or the filtered kind, `target` `"(other)"`, `path`, `area`, `pageVisits` `null`; counts summed; a nav `(other)` target stays its own item) | §8.2 | data-service #55 |
 | 51 | Small-cell rule (3) on the `/audience` dimension lists in WA-4b; `definitionFrom` also bounds `/audience` and previous/next | §8.5, §17 WA-4b | furchert-ch #156, data-service #55 |
+
+### Revision 3.6 (WA-5 homelab part 1, homelab#351, 2026-11-09)
+
+| # | Item | Sections changed | Affected WA issues |
+|---|---|---|---|
+| 52 | Counter rules shipped first: `WebAnalyticsIngestSpike` with the recording rule `webanalytics:accepted:increase1h` (current hour excluded from the baseline), `WebAnalyticsRejectRatioHigh`, `WebAnalyticsSecondLineRejects`; gauge rules follow with data-service WA-5; no presence rule | §7.9 | homelab #351 |
+| 53 | Reject ratio excludes only `erased` (`visitor_cap` counts); second-line rejects exclude both | §7.9 | homelab #351 |
+| 54 | Record of processing and DPIA note final (Cloudflare only as processor, own storage and copies row, review trigger) | §13.1, §13.2 | homelab #351 |
+| 55 | WAF custom rule uses the exact path set `{"/api/v" "/api/v/forget"}` | §13 | homelab #351 |
 
 ### Committed (2026-11-08, WA-0)
 

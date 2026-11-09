@@ -2190,6 +2190,99 @@ curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name
 
 **`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system`, `kubectl -n monitoring get servicemonitor data-service` and the NetworkPolicy `kubectl -n apps get networkpolicy data-service`: its Prometheus selector must still match the Prometheus pod labels ("data-service NetworkPolicy (#127)"). The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
 
+### Web analytics (WA-5): alerts, Cloudflare rules and owner checks
+
+Web analytics (Epic #348, spec `docs/100-web-analytics.md`) stores events in schema `webanalytics` of the `data_service` database and is dark until WA-6. This section holds the operator side of WA-5 (homelab#351): the alert rules, the Cloudflare settings and the owner checks. Procedures that need the data-service WA-5 code (purge a day, change caps, disable ingest, reset the rollup mark) follow with data-service#56 and link its own docs.
+
+#### Alerts (`homelab-webanalytics`)
+
+Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml`. Spec §7.9 is the contract for the metric names.
+
+| Alert | Fires when | For | Severity | First checks |
+|-------|------------|-----|----------|--------------|
+| `WebAnalyticsIngestSpike` | accepted events in the last hour > 500 **and** > 3 × the 7-day average of the hourly count (recording rule `webanalytics:accepted:increase1h`, current hour excluded) | 15m | warning | compare `webanalytics_edge_dropped_total` and `webanalytics_events_rejected_total`; Cloudflare analytics for a bot burst on `/api/v`; the cap state in `GET /api/webanalytics/status` |
+| `WebAnalyticsRejectRatioHigh` | rejects (all reasons except `erased`) > 100/h **and** > 50 % of rejects plus accepted | 30m | info | version mismatch between furchert-ch and data-service (spec §6.2), reasons in `webanalytics_events_rejected_total` |
+| `WebAnalyticsSecondLineRejects` | any increase of `webanalytics_events_rejected_total` in the last hour for a reason other than `erased` and `visitor_cap` | 0m | warning | the `reason` label; contract mismatch or an attack that passed furchert-ch's validation; data-service logs (class only) |
+
+`info` alerts are normally visible only in Prometheus and Alertmanager, because the chart's `InfoInhibitor` suppresses them in Discord unless a warning fires in the same namespace. `WebAnalyticsIngestCapped` and `WebAnalyticsTableLarge` (gauges) follow with data-service WA-5; `WebAnalyticsIngestSilent` follows in WA-6 (#352), because before go-live there is no traffic and it would fire.
+
+**Rollout.** Merge, then run `ansible-playbook infra/playbooks/41_monitoring.yml --check --diff` from an up-to-date checkout of `main`. Stop if the diff shows anything except the new PrometheusRule; then run the playbook, and a second run must show no change. Afterwards (all read-only):
+
+```bash
+# the PrometheusRule carries the alerts and the recording rule
+kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-webanalytics -o yaml \
+  | grep -oE '(alert|record): [A-Za-z:0-9]+'
+# Prometheus itself loaded the group (a failed reload would keep the old rules): port-forward, then
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 19090:9090 &
+curl -s http://localhost:19090/api/v1/rules | python3 -c 'import sys,json; g=[x for x in json.load(sys.stdin)["data"]["groups"] if x["name"]=="homelab-webanalytics"]; print([r["name"] for r in g[0]["rules"]])'
+# the metrics exist (counters are exported with 0 from startup)
+curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_accepted_total)'
+curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_rejected_total)'
+kill %1
+```
+
+Rules and metric names are compared with the data-service actuator scrape before the gauge rules are added.
+
+#### Cloudflare rules for web analytics (owner, dashboard)
+
+Cloudflare is a processor here (edge and transport) and no analytics product is enabled for the zone.
+
+1. **Web Analytics / RUM and Zaraz off.** Dashboard `furchert.ch` → Web Analytics (no site enabled, no automatic beacon) and Zaraz (no tool configured). Record the result in homelab#351.
+2. **`/api/v` outside the auth rate-limit rule.** The Free-plan rule `auth-service: token and login` (see "Cloudflare rules (owner, dashboard; recreate from these settings)" above) matches only `(http.request.uri.path eq "/oauth2/token" or http.request.uri.path eq "/login")`. Check that the expression contains no prefix match such as `starts_with(... "/api")`, so the collect route `/api/v` and `/api/v/forget` are not counted by it. furchert-ch limits `/api/v` itself (spec §5.8).
+3. **Optional WAF custom rule** (only the first time the owner wants edge filtering of the collect route; one custom-rule slot, keep the slot reserved for the mcp-hub incident rule free if the plan only has one left, see "L1 — Cloudflare block"): name `web analytics: collect route`, expression
+   `(http.host eq "furchert.ch" and http.request.uri.path in {"/api/v" "/api/v/forget"} and (http.request.method ne "POST" or cf.client.bot))`, action **Block**. If `cf.client.bot` is not available on the zone's plan, use `(http.host eq "furchert.ch" and http.request.uri.path in {"/api/v" "/api/v/forget"} and http.request.method ne "POST")`. Undo: disable or delete the rule; the collect route works without it.
+
+#### Backups, NetworkPolicy and restore test
+
+- **Backups (Q2, spec §13):** the nightly dumps, Longhorn snapshots and the Mac app-data dumps are unchanged. They contain the pseudonymous visitor ids of `webanalytics.events`. Erasure and retention act on live data only; copies age out on their own rotation (the Mac dumps when the owner deletes them).
+- **NetworkPolicy:** unchanged. The collect path is furchert-ch → data-service `POST /api/webanalytics/events` on the existing policy (`apps/data-service`, TCP 8082 from the furchert-ch pods).
+- **Restore test of `data_service` (owner step, schema `webanalytics` only; not run unattended).** The Longhorn volume of the shared PostgreSQL is already close to full at block level (data-service#57), so the test restores one schema, streams the dump over stdin (no copy in `/tmp`) and drops the scratch database at the end.
+
+```bash
+RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>   # a run made by scripts/backup-app-data.sh
+WORK=$(mktemp -d)
+PSQL="kubectl -n apps exec -i postgresql-0 -c postgresql -- psql -U postgres -t -A"
+COUNTS="SELECT table_name || '=' || (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_schema='webanalytics' AND table_type='BASE TABLE' ORDER BY table_name;"
+
+# 0) Free space first: abort when the data directory is above 70 %
+DATADIR=$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SHOW data_directory;")
+kubectl -n apps exec postgresql-0 -c postgresql -- df -h "$DATADIR"
+
+# 1) Live counts, taken right before the backup run (outside 01:12 and 07:30), then run the backup
+$PSQL -d data_service -c "$COUNTS" > "$WORK/counts-live.txt"
+#    scripts/backup-app-data.sh (see "App-data backups to the operator's Mac (#64)")
+
+# 2) The dump contains the schema
+pg_restore -l "$RUN/pg-data_service.dump" | grep -E 'SCHEMA - webanalytics'
+
+# 3) Restore only that schema next to the live database, streamed over stdin
+kubectl -n apps exec postgresql-0 -c postgresql -- createdb -U postgres restore_test
+$PSQL -d restore_test -c "CREATE SCHEMA IF NOT EXISTS webanalytics;"   # only if step 2 found no SCHEMA entry
+kubectl -n apps exec -i postgresql-0 -c postgresql -- pg_restore -U postgres -d restore_test --no-owner -n webanalytics < "$RUN/pg-data_service.dump"
+
+# 4) Counts must match for every table, and at least one non-empty table (for example rollup_day or
+#    daily_enquiries) must be among them, because events can still be empty before go-live
+$PSQL -d restore_test -c "$COUNTS" > "$WORK/counts-restored.txt"
+diff "$WORK/counts-live.txt" "$WORK/counts-restored.txt" && echo "counts match"
+grep -vE '=0$' "$WORK/counts-live.txt" | head -3
+
+# 5) Cleanup, mandatory
+kubectl -n apps exec postgresql-0 -c postgresql -- dropdb -U postgres restore_test
+rm -rf "$WORK"
+```
+
+If events were written between the count snapshot and the dump, the `events` count can differ by the rows of that window; rerun outside traffic or compare the aggregate tables only and record the reason.
+
+#### Owner checks (record each result in homelab#351)
+
+| Check | Where | Pass when |
+|-------|-------|-----------|
+| Cloudflare Web Analytics/RUM and Zaraz off | dashboard `furchert.ch` | no site enabled, no Zaraz tool |
+| `cf.client.bot` available | WAF custom rule editor (field list) | field accepted, else the fallback rule above |
+| `/api/v` outside the auth rate-limit rule | Security → WAF → Rate limiting rules | expression matches only `/oauth2/token` and `/login` |
+| n8n schedules versus the rollup runs | n8n UI → workflows → schedule triggers | no job fires in the minutes around 01:12 and 07:30 Europe/Zurich, or an overlap is recorded as harmless (the run takes seconds) |
+| PVC usage versus the expansion threshold | `kubectl -n apps exec postgresql-0 -c postgresql -- df -h "$DATADIR"` and Longhorn UI (block level) for `data-postgresql-0` | usage and the threshold from homelab-data-service#57 are recorded; analytics at its cap adds about 1.2 GB (spec §7.3), the filesystem was 48 % and the Longhorn block level about 85 % on 2026-11-08 |
+
 ### NM-4: login-event secrets (auth-service → data-service)
 
 NM-4 (#134) adds the secrets for the login-event pipeline: auth-service records form logins in an outbox, and data-service pulls them with its own client (`data-service`, scope `login-events:read`). Contract: `docs/060-network-monitoring.md` §7.6, §9.
