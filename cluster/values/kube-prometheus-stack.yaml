@@ -805,18 +805,19 @@ additionalPrometheusRulesMap:
   # Web analytics (Epic #348, WA-5, #351; docs/100-web-analytics.md §7.9). Metrics come from
   # data-service (job data-service, ServiceMonitor monitoring/data-service). The collect path is dark
   # until WA-6, so before go-live there is no traffic and none of these rules can fire.
-  # WebAnalyticsIngestSilent follows in WA-6 (#352). The gauge rules (IngestCapped, TableLarge, #351
+  # WebAnalyticsIngestSilent (WA-6, #352) is gated by the latch recording rule below and watches the
+  # accepted counter through it. The gauge rules (IngestCapped, TableLarge, #351
   # part 2) read the gauges exported by data-service WA-5 (#56). max() across pods: a rollout briefly
   # runs two pods, and the gauges are per pod.
   # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts in
   # Discord unless a warning fires in the same namespace (InfoInhibitor joins on the namespace label).
-  # It stays visible in Prometheus/Alertmanager. All five alerts carry the static label
+  # It stays visible in Prometheus/Alertmanager. All six alerts carry the static label
   # namespace: apps, the namespace of the source series (data-service): sum() drops the label from the
   # aggregated alerts, and without it a namespace-less warning could release the info alert. With it,
-  # Spike, SecondLineRejects, IngestCapped and TableLarge (warnings) release RejectRatioHigh (info)
-  # without releasing the other info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
+  # Spike, SecondLineRejects, IngestCapped and TableLarge (warnings) release RejectRatioHigh and
+  # IngestSilent (info) without releasing the other info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
   # NetmonSeriesTruncated has no static label. Trade-off: any warning in namespace apps releases
-  # RejectRatioHigh, and the four warnings release the other info alerts with namespace apps.
+  # RejectRatioHigh and IngestSilent, and the four warnings release the other info alerts with namespace apps.
   homelab-webanalytics:
     groups:
       - name: homelab-webanalytics
@@ -825,6 +826,25 @@ additionalPrometheusRulesMap:
           # survives a gap in the raw counters. sum() drops the labels of every scrape target.
           - record: webanalytics:accepted:increase1h
             expr: sum(increase(webanalytics_events_accepted_total[1h]))
+          # Latch: the Unix time of the last hour in which analytics events were accepted (the previous
+          # value is carried forward for up to one day between evaluations, so it persists as long as
+          # Prometheus keeps evaluating). The series does not exist while the feature is dark, which keeps
+          # WebAnalyticsIngestSilent inert until the first events (go-live checklist). A Prometheus outage
+          # longer than one day loses the latch; it is rebuilt by the next accepted event.
+          - record: webanalytics:accepted:last_seen_timestamp
+            expr: >-
+              vector(time()) and on() (webanalytics:accepted:increase1h > 0)
+              or
+              last_over_time(webanalytics:accepted:last_seen_timestamp[1d])
+          # Second latch: the average accepted events per day of the 7 days up to the last busy hour, frozen
+          # while no events arrive (recorded only in hours with events, carried forward otherwise). The fast
+          # path of WebAnalyticsIngestSilent reads this frozen baseline, because a live 7-day average shrinks
+          # during the silence and would end the alert after a few days.
+          - record: webanalytics:accepted:baseline_per_day
+            expr: >-
+              avg_over_time(webanalytics:accepted:increase1h[7d]) * 24 and on() (webanalytics:accepted:increase1h > 0)
+              or
+              last_over_time(webanalytics:accepted:baseline_per_day[1d])
           # Baseline = average of the recorded hourly increase over the previous 7 days, excluding the
           # current hour (offset 1h), so a burst does not raise its own baseline. With fewer than 7 days
           # of history the average covers only the days that exist; after a quiet week the baseline is 0
@@ -904,6 +924,47 @@ additionalPrometheusRulesMap:
                 job log of data-service), the caps and the volume headroom (DEPLOYMENT.md "Web analytics
                 (WA-5): alerts, Cloudflare rules and owner checks", homelab-data-service#57), and the
                 data-service runbooks (purge a poisoned day).
+          # Silent ingest after go-live (info; Alertmanager/Prometheus only because of the InfoInhibitor,
+          # unless a warning fires in namespace apps): no analytics event was accepted for 7 days, or for
+          # 24 hours when the week before the silence averaged at least 50 accepted events per day (frozen
+          # baseline; exactly 50 per day never counts as busy and below 50 the 7 day rule applies; the site is
+          # normally busy enough that a quiet day is an outage). The latch lags the last event by up to one
+          # hour (the hourly increase), so the thresholds count from about the last event plus one hour. It
+          # keeps firing until events return. Both
+          # deployments must be available at evaluation time (kube-state-metrics), a per-moment check: an
+          # outage that already ended does not suppress the alert, a running outage does. Enquiries are not
+          # counted (the latch reads the accepted counter only). Planned stops (kill switch, caps 0) make
+          # it fire after the same delay: silence it for the duration.
+          - alert: WebAnalyticsIngestSilent
+            expr: >-
+              (
+                time() - webanalytics:accepted:last_seen_timestamp > 7 * 86400
+                or
+                (
+                  time() - webanalytics:accepted:last_seen_timestamp > 86400
+                  and on()
+                  webanalytics:accepted:baseline_per_day >= 50
+                )
+              )
+              and on()
+              sum(kube_deployment_status_replicas_available{namespace="apps", deployment="data-service"}) > 0
+              and on()
+              sum(kube_deployment_status_replicas_available{namespace="apps", deployment="furchert-ch"}) > 0
+            for: 1h
+            labels:
+              severity: info
+              namespace: apps
+            annotations:
+              summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
+              description: >-
+                data-service has accepted no analytics event (last event {{ $value | humanizeDuration }} ago)
+                for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although
+                data-service and furchert-ch are up. Check
+                the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and
+                bundle), the forward queue and token, and data-service (GET /api/webanalytics/status,
+                caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it:
+                silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in
+                DEPLOYMENT.md "Web analytics (WA-5): alerts, Cloudflare rules and owner checks".
           # Anything rejected by the second line is a contract mismatch or an attack that got past
           # furchert-ch's validation, except the by-design reasons erased and visitor_cap. The counters
           # are exported with 0 from startup, so the first reject shows as an increase; a restart
