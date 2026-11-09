@@ -428,56 +428,62 @@ tests:
                 it; runbook in DEPLOYMENT.md "Platform alerting (#284)".
 
   # --- PersistentVolumeClaimResizeStuck (#362) ---
-  # data-postgresql-0 requests 10Gi while its PV still has 5Gi (fires after 15 min, also carries a
-  # Resizing condition: one alert, not two); n8n-data matches its PV (silent); club-data has PV ==
-  # request but a Resizing condition (fires); influxdb2 requests 20Gi on a 10Gi PV without any
-  # condition (branch 1 alone fires); an unbound PV has no claim_ref (ignored).
-  # The PV series carry the KSM target's namespace="monitoring", as in the cluster (honorLabels).
+  # data-postgresql-0 requests 10Gi while its current PV pvc-pg still has 5Gi and has no condition: branch 1
+  # must fire after 15 min although a retained 20Gi PV pvc-pg-old whose claimRef still names the claim
+  # exists (the join follows the claim's volumename, not claimRef). A second KSM pod (instance ksm-2,
+  # rollout) duplicates the PVC/PV series without breaking the join. n8n-data matches its PV and has only
+  # a status="false" condition (silent); club-data has PV == request but a Resizing condition (branch 2
+  # fires); influxdb2 requests 20Gi on a 10Gi PV and has FileSystemResizePending (both branches: one alert).
+  # Cluster-scoped PV series carry the KSM target's namespace="monitoring", as in the cluster (honorLabels).
   - interval: 1m
     input_series:
-      - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="data-postgresql-0"}
+      - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps",
+          persistentvolumeclaim="data-postgresql-0"}
         values: 10737418240x25
+      - series: kube_persistentvolumeclaim_info{namespace="apps", persistentvolumeclaim="data-postgresql-0",
+          volumename="pvc-pg", storageclass="longhorn", volumemode="Filesystem"}
+        values: 1x25
+      - series: kube_persistentvolumeclaim_info{namespace="apps", instance="ksm-2",
+          persistentvolumeclaim="data-postgresql-0", volumename="pvc-pg", storageclass="longhorn", volumemode="Filesystem"}
+        values: 1x25
       - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-pg"}
         values: 5368709120x25
-      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-pg", claim_namespace="apps",
-          name="data-postgresql-0"}
-        values: 1x25
-      # a second KSM pod (rollout) exports the same PV series with another instance label
       - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", instance="ksm-2", persistentvolume="pvc-pg"}
         values: 5368709120x25
-      - series: kube_persistentvolume_claim_ref{namespace="monitoring", instance="ksm-2", persistentvolume="pvc-pg",
+      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-pg-old"}
+        values: 21474836480x25
+      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-pg-old",
           claim_namespace="apps", name="data-postgresql-0"}
-        values: 1x25
-      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="data-postgresql-0",
-          type="Resizing", status="true"}
         values: 1x25
       - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="n8n-data"}
         values: 5368709120x25
+      - series: kube_persistentvolumeclaim_info{namespace="apps", persistentvolumeclaim="n8n-data", volumename="pvc-n8n",
+          storageclass="longhorn", volumemode="Filesystem"}
+        values: 1x25
       - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-n8n"}
         values: 5368709120x25
-      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-n8n", claim_namespace="apps", name="n8n-data"}
+      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="n8n-data",
+          condition="Resizing", status="false"}
         values: 1x25
       - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="club-data"}
         values: 1073741824x25
+      - series: kube_persistentvolumeclaim_info{namespace="apps", persistentvolumeclaim="club-data", volumename="pvc-club",
+          storageclass="longhorn", volumemode="Filesystem"}
+        values: 1x25
       - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-club"}
         values: 1073741824x25
-      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-club", claim_namespace="apps",
-          name="club-data"}
+      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="club-data",
+          condition="Resizing", status="true"}
         values: 1x25
-      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="club-data", type="Resizing",
-          status="true"}
-        values: 1x25
-      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="club-data", type="Resizing",
-          status="false"}
-        values: 0x25
-      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-unbound"}
-        values: 1073741824x25
       - series: kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="apps", persistentvolumeclaim="influxdb2"}
         values: 21474836480x25
+      - series: kube_persistentvolumeclaim_info{namespace="apps", persistentvolumeclaim="influxdb2", volumename="pvc-influx",
+          storageclass="longhorn", volumemode="Filesystem"}
+        values: 1x25
       - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", persistentvolume="pvc-influx"}
         values: 10737418240x25
-      - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-influx", claim_namespace="apps",
-          name="influxdb2"}
+      - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="influxdb2",
+          condition="FileSystemResizePending", status="true"}
         values: 1x25
     alert_rule_test:
       - eval_time: 14m

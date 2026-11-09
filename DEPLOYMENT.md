@@ -1523,10 +1523,11 @@ Design notes:
   Expected short firings: a Recreate-strategy upgrade with a slow image pull (open-webui ≈ 7 min,
   n8n) and a node reboot that evicts a single-replica pod with an RWO volume.
 - **WorkloadScaledToZero / PersistentVolumeClaimResizeStuck (#362)** come from kube-state-metrics only.
-  The resize rule joins the cluster-scoped `kube_persistentvolume_capacity_bytes` to the claim through
-  `kube_persistentvolume_claim_ref` (the PV capacity grows only when the controller-side expansion
-  succeeds); its condition branch uses `kube_persistentvolumeclaim_status_condition`, experimental in
-  KSM v2.14. During the #359 expansion a stale Longhorn engine hung the frontend rescan for 18 minutes
+  The resize rule joins each claim's current PV (`kube_persistentvolumeclaim_info{volumename}`, not a
+  PV's claimRef, so a retained PV of a re-created claim cannot mask it) to the cluster-scoped
+  `kube_persistentvolume_capacity_bytes` (the PV capacity grows only when the controller-side expansion
+  succeeds); its condition branch uses `kube_persistentvolumeclaim_status_condition{condition=…}`,
+  experimental in KSM v2.14. During the #359 expansion a stale Longhorn engine hung the frontend rescan for 18 minutes
   and no alert fired.
 - **The #125 key move** also put the long-ignored KSM/node-exporter `resources` into effect (they
   had none before); KSM's memory limit is 256Mi because custom-resource-state caches every CRD.

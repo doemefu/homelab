@@ -677,30 +677,30 @@ additionalPrometheusRulesMap:
                 --replicas=1`) or re-run the owning playbook. Expected during a kill switch L3 (mcp-hub,
                 club-mcp) or a decommission: silence it; runbook in DEPLOYMENT.md "Platform alerting (#284)".
           # A PVC whose expansion does not finish (#359/#362: a stale Longhorn engine hung the frontend
-          # rescan for 18 min, nothing alerted). Branch 1: the PVC request exceeds the capacity of its bound
-          # PV (the PV grows only when the controller-side expansion succeeds); kube_persistentvolume_*
-          # is cluster-scoped, so the claim's namespace/name come from kube_persistentvolume_claim_ref.
-          # Both join sides are aggregated with max by first: during a KSM rollout two pods export the
-          # same series for a moment, which would make the join many-to-many and fail the rule.
-          # Branch 2: a resize condition stays true (kube_persistentvolumeclaim_status_condition is
-          # experimental in KSM v2.14; branch 1 alone still covers the Longhorn case).
+          # rescan for 18 min, nothing alerted). Branch 1: the PVC request exceeds the capacity of the PV it
+          # is bound to now (the PV grows only when the controller-side expansion succeeds). The PV comes
+          # from the claim's spec.volumeName (kube_persistentvolumeclaim_info{volumename}), not from a PV's
+          # claimRef: a retained PV that still references a re-created claim of the same name must not mask
+          # the current PV. Both join sides are aggregated with max by first: during a KSM rollout two pods
+          # export the same series for a moment, which would make the join many-to-many and fail the rule.
+          # Branch 2: a resize condition stays true (kube_persistentvolumeclaim_status_condition, label
+          # `condition` per the KSM v2.14 source, experimental; branch 1 alone still covers the Longhorn case).
           - alert: PersistentVolumeClaimResizeStuck
             expr: >-
               (
                 max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_resource_requests_storage_bytes)
                 > on (namespace, persistentvolumeclaim)
                 max by (namespace, persistentvolumeclaim) (
-                  label_replace(label_replace(
-                    max by (persistentvolume) (kube_persistentvolume_capacity_bytes)
-                      * on (persistentvolume) group_left (claim_namespace, name)
-                    max by (persistentvolume, claim_namespace, name) (kube_persistentvolume_claim_ref),
-                    "namespace", "$1", "claim_namespace", "(.+)"),
-                  "persistentvolumeclaim", "$1", "name", "(.+)"))
+                  max by (namespace, persistentvolumeclaim, persistentvolume) (
+                    label_replace(kube_persistentvolumeclaim_info{volumename!=""},
+                      "persistentvolume", "$1", "volumename", "(.+)"))
+                  * on (persistentvolume) group_left ()
+                  max by (persistentvolume) (kube_persistentvolume_capacity_bytes))
               )
               or
               (
                 max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_status_condition{
-                  type=~"Resizing|FileSystemResizePending|ControllerResizeError|NodeResizeError", status="true"}) > 0
+                  condition=~"Resizing|FileSystemResizePending|ControllerResizeError|NodeResizeError", status="true"}) > 0
               )
             for: 15m
             labels:
