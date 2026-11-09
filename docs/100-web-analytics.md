@@ -659,7 +659,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 | Source | aggregates only (repository test); `/status.ingest` from memory; no visitor id in any response |
 | Range | `from`, `to` (Zurich dates, inclusive); default `to` = `lastCompleteDay`, `from` = `to − 27 d`; span ≤ 366 d; `to` clamped to `lastCompleteDay` (provisional days are never served, §7.5); invalid → 400 `invalid_window` |
 | Range echo | every endpoint that takes a range returns `"range": {"from", "to", "days", "lastCompleteDay", "previous": {"from", "to"} \| null}`; the empty state (before any final rollup) is `{"from": null, "to": null, "days": 0, "lastCompleteDay": null, "previous": null}` |
-| Compare | `compare=previous` (default) or `none` (`previous` is then `null`); after the `definitionFrom` clamp (§8.5) on `/funnels`, `/paths`, `/audience` and the `/pages/detail` previous/next lists, and after the `/coverage` window clamp, the previous range can be shorter than the current one |
+| Compare | `compare=previous` (default) or `none` (`previous` is then `null`); after the `definitionFrom` clamp (§8.5) on `/funnels`, `/paths`, `/audience` and the `/pages/detail` previous/next lists, the previous range can be shorter than the current one |
 | Edge cases | `to < from` after clamping → 200 with the empty range (`from`, `to` and `previous` null, `days` 0, `lastCompleteDay` keeps its known value); `/clicks` `kind` is optional (missing = all kinds); a whole calendar month takes precedence and uses the month basis, whose `previous` is the previous calendar month; `/status` `lastWindowEnd` is `start(D + 1)` Europe/Zurich as an instant (ISO-8601 UTC) |
 | Filters | `locale=de\|en` (entry locale), `device=desktop\|mobile\|tablet`; echoed as `"filters": {"applied": {…}, "ignored": [...]}` |
 | Numbers | counts only; rates, intervals, medians in furchert-ch; daily series |
@@ -1405,7 +1405,7 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 58 | Coverage chart on one axis, enquiry coverage as "x of n", funnels with rate deltas only (n ≥ 30, equal spans), `byPage` registry paths only (owner Q5, WA-4b) | §8.2, §17 WA-4b | furchert-ch #156 |
 | 59 | `definitionFrom` = first final version-2 day after the newest day below version 2 (data-service #62) | §8.5 | data-service #55 |
 | 60 | `fa_forget` holds up to four ids (dedup, oldest dropped) (furchert-ch #172 D2) | §4.2, §5.4 | furchert-ch #157 |
-| 61 | Forget guard errors 408/413 set `fa_forget`; global erase bound 4 concurrent / 120 per minute (429, no cookie change); bounded server-side retry (5 min for 24 h, at most 1 000 ids, in memory); queue-side erased-id set (2 h, at most 10 000) (furchert-ch #172 D3, D4, D5, D7) | §5.4, §4.2 | furchert-ch #157 |
+| 61 | Forget guard errors 408/413 set `fa_forget`; global erase bound 4 concurrent / 120 per minute (429, no cookie change); bounded server-side retry (5 min for 24 h, at most 1 000 ids, in memory); queue-side erased-id set (2 h, at most 10 000) (furchert-ch #172 D3, D4, D5, D7) | §5.4, §4.2, §5.8 | furchert-ch #157 |
 | 62 | Collect 429 honours `Retry-After` (1 to 600 s); capped 429 pauses until `retryAt` (clamped now + 1 s … now + 25 h) with priority-only batches (furchert-ch #172 D1, D6) | §3.9, §5.10 | furchert-ch #157 |
 | 63 | An explicit user Decline after a signal decline rewrites `by: "user"` (WA-5 plan) | §4.1 | furchert-ch #157 |
 | 64 | Two-lane forward queue (priority lane for goal and enquiry; batches removed by identity) (furchert-ch #172 D6) | §5.10 | furchert-ch #157 |
