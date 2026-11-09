@@ -3433,6 +3433,140 @@ kubectl -n apps delete pod -l app=club-mcp
 
 Decommission: `scale --replicas=0`, delete the club-mcp route from `cf_ingress_body` and re-run 40, remove the CNAME, delete the `claude-club-mcp` client authorizations, then remove the manifests. **Remove the `claude-club-mcp` client before any auth-service rollback** to a release that does not know it, exactly as for the hub.
 
+### Growing the PostgreSQL volume (data-postgresql-0, homelab#359)
+
+Owner decision 2026-11-09 (homelab-data-service#57): the shared PostgreSQL volume `data-postgresql-0` (namespace `apps`) grows from 5 GiB to 10 GiB before the web analytics go-live (Epic #348). All steps here change the live cluster and are the owner's (or the main session's with an explicit go).
+
+**Facts.** PostgreSQL is a raw StatefulSet `postgresql` applied by `infra/playbooks/50_apps_infra.yml` (not a Helm release). Its `volumeClaimTemplates` are immutable, and a StatefulSet never resizes existing PVCs, so the size is changed in two parts: the PVC is patched (Longhorn expands the attached volume online, no pod restart expected), then the StatefulSet object is re-created from its live state with the new template size and the pod is adopted. The pod template is not touched, so the pod is not restarted. Longhorn cannot shrink a volume: the expansion is one-way. Replication is 2.
+
+**Window.** Between 09:00 and 00:30 Europe/Zurich: after the mba morning reboots (06:10 and 07:40) and the replica rebuilds that follow, and clear of the 02:00 snapshot and 03:00 backup. A full run of playbook 50 from `main` fails at the StatefulSet task (Forbidden, immutable field) between the merge of the size change and step S below: do not run it in that gap.
+
+**Shell.** Paste each block into a `bash` subshell (type `bash` first): the blocks use shell functions and `exit`. They contain no unquoted brackets or globs, so they are safe in zsh too.
+
+#### P. Prechecks (read-only)
+
+```bash
+kc() { kubectl --request-timeout=20s "$@"; }
+WORK=$(mktemp -d)
+echo "scratch directory: $WORK"
+
+# P1: the StorageClass allows expansion (must print true)
+kc get sc longhorn -o jsonpath='{.allowVolumeExpansion}{"\n"}'
+
+# P2: the Longhorn volume is attached and healthy, size 5368709120
+VOL=$(kc -n apps get pvc data-postgresql-0 -o jsonpath='{.spec.volumeName}')
+echo "volume: $VOL"
+kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.state} {.status.robustness} {.spec.size}{"\n"}'
+
+# P3: replica nodes and their headroom (the expansion adds 5 GiB per replica)
+kc -n longhorn-system get replicas.longhorn.io -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeID,VOLUME:.spec.volumeName | grep "$VOL"
+kc -n longhorn-system get nodes.longhorn.io -o json | python3 -c 'import sys,json
+for n in json.load(sys.stdin)["items"]:
+    for name, d in n["status"].get("diskStatus", {}).items():
+        gib = 2**30
+        print(n["metadata"]["name"], name, "max %.1f avail %.1f scheduled %.1f reserved %.1f GiB" % (d["storageMaximum"]/gib, d["storageAvailable"]/gib, d["storageScheduled"]/gib, d.get("storageReserved", 0)/gib))'
+```
+
+Stop rule P3: both replica nodes must keep `scheduled + 5` within the schedulable maximum (maximum minus reserved, times the over-provisioning percentage, default 100) and `available − 5` above the minimal-available percentage (default 25) of the maximum. Reading on 2026-11-09 11:20: mba1 max 456.5 / avail 347.5 / scheduled 47.0 / reserved 137.0 GiB, mba2 max 109.6 / avail 44.7 / scheduled 5.0 / reserved 32.9 GiB; both pass (mba2: 39.7 > 27.4 and 10 ≤ 76.7). Re-read the numbers right before the expansion, and stop if a replica sits on an SD-card node close to its DiskPressure threshold.
+
+```bash
+# P4: usage for the record (filesystem, database sizes)
+kc -n apps exec postgresql-0 -c postgresql -- df -h /var/lib/postgresql/data
+kc -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SELECT datname, pg_size_pretty(pg_database_size(datname)) FROM pg_database ORDER BY pg_database_size(datname) DESC;"
+
+# P5: the StatefulSet and the pod belong together; record the pod uid
+kc -n apps get sts postgresql -o jsonpath='{.status.currentRevision} {.status.updateRevision} collision={.status.collisionCount}{"\n"}'
+kc -n apps get pod postgresql-0 -L controller-revision-hash
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
+kc -n apps get sts postgresql -o jsonpath='template annotations: {.spec.template.metadata.annotations}{"\n"}'
+```
+
+P5 reading: `collisionCount` empty or 0, the template annotations empty, and the pod's `controller-revision-hash` equal to the StatefulSet's `updateRevision`. `currentRevision` differing from `updateRevision` is harmless as long as the pod carries the `updateRevision`. Eyeball `kc -n apps get sts postgresql -o yaml` against the StatefulSet task in `50_apps_infra.yml` (image digests, resources). Write down the pod uid.
+
+```bash
+# P6: drift check BEFORE the size change is merged (from a checkout of the PR branch or main with the tag).
+# Expect: the StatefulSet task is ok, changed=0
+ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset -e postgresql_storage_size=5Gi --check --diff
+```
+
+After the size change is merged, the same command without `-e` is expected to fail with Forbidden (immutable field): that is the reason for step S.
+
+#### B. Backup first
+
+1. `scripts/backup-app-data.sh` (see "App-data backups to the operator's Mac (#64)"), started after 03:45 and finished with "Backup complete". restic does not hold PostgreSQL data; the Mac dump is the off-cluster copy (the `mcp_hub` database is excluded from it by design).
+2. **Mandatory manual Longhorn snapshot** (it is the only pre-change copy of `mcp_hub`). In the Longhorn UI (`kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80`, then `http://localhost:8080`): Volume `pvc-…` of `data-postgresql-0` → Take Snapshot, name `pre-expand-359`. Check:
+
+```bash
+kc -n longhorn-system get snapshots.longhorn.io -o json | python3 -c 'import sys,json
+for s in json.load(sys.stdin)["items"]:
+    if s["spec"].get("volume") == "'"$VOL"'":
+        print(s["metadata"]["name"], s.get("status", {}).get("readyToUse"))'
+```
+
+The snapshot is deleted a few days after step V (UI → Snapshots → Delete) so that it does not hold blocks for good.
+
+#### E. Expand (online)
+
+```bash
+# P2 again right before the patch: robustness must be healthy
+kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.state} {.status.robustness}{"\n"}'
+
+# 9: patch the PVC
+kc -n apps patch pvc data-postgresql-0 --type merge -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+
+# 10: watch until the capacity shows 10Gi (a FileSystemResizePending condition may appear briefly)
+kc -n apps get pvc data-postgresql-0 -w
+
+# 11: verify the filesystem, the database and the pod
+kc -n apps get pvc data-postgresql-0 -o jsonpath='{.status.capacity.storage}{"\n"}'
+kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.spec.size} {.status.robustness}{"\n"}'
+kc -n apps exec postgresql-0 -c postgresql -- df -h /var/lib/postgresql/data
+kc -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SELECT pg_size_pretty(pg_database_size('data_service'));"
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
+```
+
+Stop rule E: **do not start step S unless step 10 shows `10Gi` capacity** and the filesystem shows about 9.8G; the pod uid and restart count are unchanged.
+
+**If the expansion gets stuck** (the PVC stays at `5Gi` capacity with a resize condition, or Longhorn reports an expansion error): `kc -n apps describe pvc data-postgresql-0` and the Longhorn UI event log name the cause (usually disk space or a rebuilding replica); fix that and wait, Longhorn retries. A PVC request cannot be lowered again, so there is no revert; nothing else has changed and the database is unaffected. If Longhorn refuses an online expansion altogether, fallback in a quiet hour: `kc -n apps scale sts postgresql --replicas=0`, wait for the volume to detach, expand, `scale ... --replicas=1` (about 1 to 3 minutes without a database for every app).
+
+#### Merge, then S: align the StatefulSet with git
+
+Merge the PR (size `10Gi` in the playbook) only after P, B and E. Then do S right away, because a full run of playbook 50 fails at the StatefulSet task until S is done.
+
+```bash
+# 12: save the live object (no secret values in a StatefulSet)
+kc -n apps get sts postgresql -o yaml > "$WORK/sts-before.yaml"
+
+# 13: re-create the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. Keep the window between delete and create short.
+kc -n apps get sts postgresql -o json | python3 -c 'import sys,json
+o = json.load(sys.stdin)
+o["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] = "10Gi"
+for k in ("uid", "resourceVersion", "creationTimestamp", "generation", "managedFields"):
+    o["metadata"].pop(k, None)
+o["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
+o.pop("status", None)
+json.dump(o, sys.stdout)' > "$WORK/sts-new.json"
+kc -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json"
+
+# 14: verify adoption: same uid, same restart count, template 10Gi, StatefulSet ready
+kc -n apps get sts postgresql -o jsonpath='{.status.readyReplicas}/{.spec.replicas} {.spec.volumeClaimTemplates[0].spec.resources.requests.storage}{"\n"}'
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount} owner={.metadata.ownerReferences[0].kind}{"\n"}'
+kc -n apps get sts postgresql -o jsonpath='{.status.currentRevision} {.status.updateRevision}{"\n"}'
+
+# 15: drift check against git: the tagged run is expected to report no change
+ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset --check --diff
+```
+
+If the pod was rolled anyway (the uid changed), PostgreSQL restarts from the same volume within a minute or two; check that all apps reconnect.
+
+**If step 13 fails after the orphan delete:** the pod keeps running (orphaned); fix the cause and run `kc -n apps create -f "$WORK/sts-new.json"` again, or the tagged playbook run (`ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset`). While the StatefulSet is missing nobody restarts a crashed pod, so do not leave this state.
+
+#### V. Verify and record
+
+`kc -n apps get pods`, data-service `/actuator/health`, the PostgreSQL panels in Grafana, no new alerts. Record the sizes, the P3 headroom and the timeline in homelab#359 and homelab-data-service#57, delete the `pre-expand-359` snapshot a few days later, and update the spec wording (docs/100-web-analytics.md §7.3 and R6 still say "5 Gi").
+
+**Residual risks.** (1) If an mba node is lost for a long time, Longhorn rebuilds the second replica, possibly onto an SD-card node (raspi5 or raspi4) with little headroom; node or disk tags for Longhorn are a separate issue. (2) Block-level usage is larger than the filesystem usage because the 7 daily snapshots keep their blocks and trim never touches valid snapshots; the size reduction work is homelab-data-service#57. (3) Follow-up (checkbox on homelab#359): a PVC filesystem alert keyed on `kubelet_volume_stats_*`, not on the Longhorn actual size.
+
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 
 All 8 platform images (the 5 in this runbook, plus postgres-exporter, mosquitto, and
