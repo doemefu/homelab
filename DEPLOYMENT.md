@@ -3519,10 +3519,17 @@ A plain `kubectl delete pod` is **not** enough: the volume stays attached on the
 
 ```bash
 kc -n longhorn-system get snapshots.longhorn.io -o json | python3 -c 'import sys,json
+ok = False
 for s in json.load(sys.stdin)["items"]:
     if s["spec"].get("volume") == "'"$VOL"'":
-        print(s["metadata"]["name"], s.get("status", {}).get("readyToUse"))'
+        print(s["metadata"]["name"], s.get("status", {}).get("readyToUse"))
+        if s["metadata"]["name"] == "pre-expand-359" and s.get("status", {}).get("readyToUse") is True:
+            ok = True
+print("pre-expand-359 ready" if ok else "STOP: pre-expand-359 is missing or not ready")
+sys.exit(0 if ok else 1)'
 ```
+
+Stop before the PVC patch unless this prints `pre-expand-359 ready` (an older ready snapshot does not count; it is the only pre-change copy of `mcp_hub`).
 
 The snapshot is deleted a few days after step V (UI → Snapshots → Delete) so that it does not hold blocks for good.
 
@@ -3546,7 +3553,7 @@ kc -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SELECT 
 kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
 ```
 
-Stop rule E: **do not start step S unless step 10 shows `10Gi` capacity** and the filesystem shows about 9.8G; the pod uid and restart count are unchanged.
+Stop rule E: **do not start step S unless step 10 shows `10Gi` capacity** and the filesystem shows about 9.8G; the pod uid and restart count are unchanged. After the offline fallback (scale to 0 replaces the pod) or a recovery, take the replacement pod's uid and restart count after verifying it as the new baseline; step S compares against the uid recorded at step 12.
 
 **If the expansion gets stuck** (the PVC stays at `5Gi` capacity with a resize condition, or Longhorn reports an expansion error): `kc -n apps describe pvc data-postgresql-0` and the Longhorn UI event log name the cause. A PVC request cannot be lowered again, so there is no revert; nothing else has changed and the data is unaffected.
 
@@ -3567,6 +3574,7 @@ kc -n apps get sts postgresql -o jsonpath='replicas={.spec.replicas} ready={.sta
 kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
 
 # 13: re-create the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. It copies spec.replicas too: it must be 1 (see step 12). Keep the window between delete and create short.
+set -o pipefail
 kc -n apps get sts postgresql -o json | python3 -c 'import sys,json
 o = json.load(sys.stdin)
 o["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] = "10Gi"
@@ -3574,7 +3582,8 @@ for k in ("uid", "resourceVersion", "creationTimestamp", "generation", "managedF
     o["metadata"].pop(k, None)
 o["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
 o.pop("status", None)
-json.dump(o, sys.stdout)' > "$WORK/sts-new.json"
+json.dump(o, sys.stdout)' > "$WORK/sts-new.json" || { echo "could not build the manifest: stop, nothing was deleted"; exit 1; }
+[ -s "$WORK/sts-new.json" ] || { echo "empty manifest: stop, nothing was deleted"; exit 1; }
 kc -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json"
 
 # 14: verify adoption: same uid and restart count as recorded at step 12 (not as in P5), template 10Gi, StatefulSet ready
