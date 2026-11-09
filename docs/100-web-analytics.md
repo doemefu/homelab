@@ -626,7 +626,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 
 **Rollup staleness (homelab, WA-3a):** add `webanalytics-rollup` to the `NetmonCollectorStale` 26 h daily class regex and to the 15-min catch-all exclusion, with a promtool test; it must be live (playbook `41_monitoring.yml` run) before the collector is enabled (§7.5).
 
-**Delivery split (homelab#351):** the counter rules (`WebAnalyticsIngestSpike` with its recording rule, `WebAnalyticsRejectRatioHigh`, `WebAnalyticsSecondLineRejects`) ship first; the gauge rules (`WebAnalyticsIngestCapped`, `WebAnalyticsTableLarge`) follow once data-service WA-5 exports `webanalytics_ingest_capped` and `webanalytics_raw_table_bytes`. No separate presence alert rule is added: after the rules are applied, the owner checks (DEPLOYMENT.md) read the loaded expressions and count the series, and this section is the contract for the metric names. `info` alerts are normally visible only in Prometheus/Alertmanager (the chart's `InfoInhibitor`). `WebAnalyticsSecondLineRejects` excludes `erased` and `visitor_cap` (by design); the ratio rule excludes only `erased`.
+**Delivery split (homelab#351):** the counter rules (`WebAnalyticsIngestSpike` with its recording rule, `WebAnalyticsRejectRatioHigh`, `WebAnalyticsSecondLineRejects`) ship first; the gauge rules (`WebAnalyticsIngestCapped`, `WebAnalyticsTableLarge`) follow once data-service WA-5 exports `webanalytics_ingest_capped` and `webanalytics_raw_table_bytes`. No separate presence alert rule is added: after the rules are applied, the owner checks (DEPLOYMENT.md) read the loaded expressions and count the series, and this section is the contract for the metric names. `info` alerts are normally visible only in Prometheus/Alertmanager (the chart's `InfoInhibitor`). The three counter alerts carry the static label `namespace: apps` (the namespace of the source series), so the warnings release the info alert. `WebAnalyticsSecondLineRejects` excludes `erased` and `visitor_cap` (by design); the ratio rule excludes only `erased`.
 
 **WebAnalytics rules** (key `homelab-webanalytics`, single `additionalPrometheusRulesMap`, promtool tests): five rules in WA-5, `WebAnalyticsIngestSilent` in WA-6 (go-live), because before go-live there is no traffic and the rule would fire.
 
@@ -635,7 +635,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 | `WebAnalyticsIngestCapped` | `max(webanalytics_ingest_capped) == 1` | 5m | warning | 5 |
 | `WebAnalyticsIngestSpike` | `webanalytics:accepted:increase1h` (recording rule, `sum(increase(webanalytics_events_accepted_total[1h]))`) > 500 and > 3 × its 7-day average (`avg_over_time(…[7d] offset 1h)`, the current hour excluded) | 15m | warning | 5 |
 | `WebAnalyticsRejectRatioHigh` | rejects / (rejects + accepted) > 0.5 and rejects > 100/h; rejects exclude only `erased`, `visitor_cap` counts | 30m | info | 5 |
-| `WebAnalyticsSecondLineRejects` | `increase(webanalytics_events_rejected_total{reason!~"erased\|visitor_cap"}[1h]) > 0` | 0m | warning | 5 |
+| `WebAnalyticsSecondLineRejects` | `sum by (reason) (increase(webanalytics_events_rejected_total{reason!~"erased\|visitor_cap"}[1h])) > 0` | 0m | warning | 5 |
 | `WebAnalyticsTableLarge` | `webanalytics_raw_table_bytes > 1.5 GiB` (above the ≈ 1.2 GB steady state at the cap) | 1h | warning | 5 |
 | `WebAnalyticsIngestSilent` | no increase of `webanalytics_events_accepted_total` (enquiries not counted) for 7 days while data-service and furchert-ch are up | 1h | info | 6 |
 

@@ -24,7 +24,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: "warning"
-              namespace: "monitoring"
+              namespace: "apps"
             exp_annotations:
               summary: "Web analytics ingest is more than 3x the 7-day hourly average"
               description: "data-service accepted more than 500 analytics events in the last hour, more than three times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."

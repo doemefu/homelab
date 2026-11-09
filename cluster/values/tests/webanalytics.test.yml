@@ -20,7 +20,7 @@ tests:
         exp_samples:
           - labels: webanalytics:accepted:increase1h
             value: 60
-  # Spike: 7 days at 60/h, then 840/h. Pending from about +34 min, fires after the 15 min `for`; not before.
+  # Spike: 7 days at 60/h, then 840/h. Pending from +34 min, fires after the 15 min `for`: silent at +48, firing at +50 (2 minute evaluation).
   - interval: 1m
     input_series:
       - series: "webanalytics_events_accepted_total"
@@ -32,12 +32,24 @@ tests:
       - eval_time: 10110m
         alertname: WebAnalyticsIngestSpike
         exp_alerts: []
+      - eval_time: 10128m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts: []
+      - eval_time: 10130m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is more than 3x the 7-day hourly average"
+              description: "data-service accepted more than 500 analytics events in the last hour, more than three times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
       - eval_time: 10160m
         alertname: WebAnalyticsIngestSpike
         exp_alerts:
           - exp_labels:
               severity: "warning"
-              namespace: "monitoring"
+              namespace: "apps"
             exp_annotations:
               summary: "Web analytics ingest is more than 3x the 7-day hourly average"
               description: "data-service accepted more than 500 analytics events in the last hour, more than three times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
@@ -73,7 +85,52 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: "warning"
-              namespace: "monitoring"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is more than 3x the 7-day hourly average"
+              description: "data-service accepted more than 500 analytics events in the last hour, more than three times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+  # Spike multiplier: baseline 300/h, burst 840/h is over 500 but under 3x the baseline (900): no alert.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_events_accepted_total"
+        values: "0 5+5x10079 50414+14x119"
+    alert_rule_test:
+      - eval_time: 10140m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts: []
+      - eval_time: 10180m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts: []
+  # Spike multiplier: baseline 300/h, burst 960/h is over 3x the baseline: fires (pins the multiplier).
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_events_accepted_total"
+        values: "0 5+5x10079 50416+16x119"
+    alert_rule_test:
+      - eval_time: 10140m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts: []
+      - eval_time: 10180m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is more than 3x the 7-day hourly average"
+              description: "data-service accepted more than 500 analytics events in the last hour, more than three times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+  # Spike reset: the counter resets to 0 right at the burst start (pod restart) and then runs at 840/h: increase() must still see the burst (a delta() would not).
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_events_accepted_total"
+        values: "0+1x10080 0 14+14x89"
+    alert_rule_test:
+      - eval_time: 10160m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
             exp_annotations:
               summary: "Web analytics ingest is more than 3x the 7-day hourly average"
               description: "data-service accepted more than 500 analytics events in the last hour, more than three times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
@@ -86,7 +143,7 @@ tests:
       - eval_time: 9980m
         alertname: WebAnalyticsIngestSpike
         exp_alerts: []
-  # RejectRatio: 120 rejects/h vs 60 accepted/h (ratio 0.67, over 100/h): pending from about 50 min, fires after 30 min; not at 60.
+  # RejectRatio: 120 rejects/h vs 60 accepted/h (ratio 0.67, over 100/h): pending from 52 min, fires after 30 min: silent at 80, firing at 82 (2 minute evaluation).
   - interval: 1m
     input_series:
       - series: "webanalytics_events_rejected_total{reason=\"shape\"}"
@@ -97,12 +154,24 @@ tests:
       - eval_time: 60m
         alertname: WebAnalyticsRejectRatioHigh
         exp_alerts: []
+      - eval_time: 80m
+        alertname: WebAnalyticsRejectRatioHigh
+        exp_alerts: []
+      - eval_time: 82m
+        alertname: WebAnalyticsRejectRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: "info"
+              namespace: "apps"
+            exp_annotations:
+              summary: "More than half of the web analytics events are rejected"
+              description: "More than 100 events per hour were rejected by data-service and the rejects are more than 50 percent of rejects plus accepted events (reason erased excluded). furchert-ch should have dropped these at the edge: check the deployed furchert-ch version against the data-service contract (docs/100-web-analytics.md §6.2) and the reasons in webanalytics_events_rejected_total."
       - eval_time: 120m
         alertname: WebAnalyticsRejectRatioHigh
         exp_alerts:
           - exp_labels:
               severity: "info"
-              namespace: "monitoring"
+              namespace: "apps"
             exp_annotations:
               summary: "More than half of the web analytics events are rejected"
               description: "More than 100 events per hour were rejected by data-service and the rejects are more than 50 percent of rejects plus accepted events (reason erased excluded). furchert-ch should have dropped these at the edge: check the deployed furchert-ch version against the data-service contract (docs/100-web-analytics.md §6.2) and the reasons in webanalytics_events_rejected_total."
@@ -152,7 +221,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: "info"
-              namespace: "monitoring"
+              namespace: "apps"
             exp_annotations:
               summary: "More than half of the web analytics events are rejected"
               description: "More than 100 events per hour were rejected by data-service and the rejects are more than 50 percent of rejects plus accepted events (reason erased excluded). furchert-ch should have dropped these at the edge: check the deployed furchert-ch version against the data-service contract (docs/100-web-analytics.md §6.2) and the reasons in webanalytics_events_rejected_total."
@@ -167,6 +236,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: "warning"
+              namespace: "apps"
               reason: "shape"
             exp_annotations:
               summary: "data-service rejected web analytics events (reason shape)"
@@ -176,6 +246,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: "warning"
+              namespace: "apps"
               reason: "shape"
             exp_annotations:
               summary: "data-service rejected web analytics events (reason shape)"
@@ -183,6 +254,24 @@ tests:
       - eval_time: 120m
         alertname: WebAnalyticsSecondLineRejects
         exp_alerts: []
+  # SecondLine: two pods of one reason (a rollout) stepping together give exactly one alert (sum by reason).
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_events_rejected_total{reason=\"shape\", pod=\"a\"}"
+        values: "0x30 1x120"
+      - series: "webanalytics_events_rejected_total{reason=\"shape\", pod=\"b\"}"
+        values: "0x30 1x120"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: WebAnalyticsSecondLineRejects
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+              reason: "shape"
+            exp_annotations:
+              summary: "data-service rejected web analytics events (reason shape)"
+              description: "data-service rejected events with reason shape in the last hour although furchert-ch validates every event first. Check that furchert-ch and data-service run matching contract versions (docs/100-web-analytics.md §6.2) and the data-service logs (class only, never event contents)."
   # SecondLine: the by-design reasons erased and visitor_cap never fire.
   - interval: 1m
     input_series:

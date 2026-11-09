@@ -745,12 +745,14 @@ additionalPrometheusRulesMap:
   # until WA-6, so before go-live there is no traffic and none of these rules can fire.
   # WebAnalyticsIngestSilent follows in WA-6 (#352); the gauge rules (IngestCapped, TableLarge) follow
   # with data-service WA-5 (#56). The rules in this block use only counters.
-  # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts
-  # in Discord unless a warning fires in the same namespace (monitoring). It stays visible in
-  # Prometheus/Alertmanager.
-  # The two aggregated alerts (Spike, RejectRatioHigh) use sum() and lose the namespace of their source
-  # series, so they carry the static label namespace: monitoring (like the other info rules in this
-  # file); otherwise a namespace-less warning could release the info alert from its inhibition.
+  # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts in
+  # Discord unless a warning fires in the same namespace (InfoInhibitor joins on the namespace label).
+  # It stays visible in Prometheus/Alertmanager. All three alerts carry the static label
+  # namespace: apps, the namespace of the source series (data-service): sum() drops the label from the
+  # aggregated alerts, and without it a namespace-less warning could release the info alert. With it,
+  # Spike and SecondLineRejects (warnings) release RejectRatioHigh (info) without releasing the other
+  # info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
+  # NetmonSeriesTruncated has no static label.
   homelab-webanalytics:
     groups:
       - name: homelab-webanalytics
@@ -771,7 +773,7 @@ additionalPrometheusRulesMap:
             for: 15m
             labels:
               severity: warning
-              namespace: monitoring
+              namespace: apps
             annotations:
               summary: "Web analytics ingest is more than 3x the 7-day hourly average"
               description: >-
@@ -795,7 +797,7 @@ additionalPrometheusRulesMap:
             for: 30m
             labels:
               severity: info
-              namespace: monitoring
+              namespace: apps
             annotations:
               summary: "More than half of the web analytics events are rejected"
               description: >-
@@ -806,12 +808,14 @@ additionalPrometheusRulesMap:
           # Anything rejected by the second line is a contract mismatch or an attack that got past
           # furchert-ch's validation, except the by-design reasons erased and visitor_cap. The counters
           # are exported with 0 from startup, so the first reject shows as an increase; a restart
-          # (counter reset) or a new series does not.
+          # (counter reset) or a new series does not. sum by (reason) merges the pods of one reason into
+          # one alert (a rollout briefly runs two pods).
           - alert: WebAnalyticsSecondLineRejects
-            expr: increase(webanalytics_events_rejected_total{reason!~"erased|visitor_cap"}[1h]) > 0
+            expr: sum by (reason) (increase(webanalytics_events_rejected_total{reason!~"erased|visitor_cap"}[1h])) > 0
             for: 0m
             labels:
               severity: warning
+              namespace: apps
             annotations:
               summary: "data-service rejected web analytics events (reason {{ $labels.reason }})"
               description: >-
