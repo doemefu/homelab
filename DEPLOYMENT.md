@@ -758,12 +758,21 @@ leave an iSCSI session behind. Normal I/O keeps working. Triggers: needrestart a
 restarted `iscsid` weekly on raspi5 until the `longhorn_prereqs` override, see Prevention), an `open-iscsi`
 package upgrade, a manual `systemctl restart iscsid`. A k3s restart alone does not change the `iscsid` pid,
 and the age of the instance-manager pod is not a usable signal (new engines start under old instance
-managers). Upstream: longhorn/longhorn#10544 and #13334, fixed in Longhorn 1.11.3, 1.12.1 and 1.13.0;
-nothing for 1.7.x. Incident: homelab#359 (about 6 minutes without PostgreSQL).
+managers). Upstream: longhorn/longhorn#10544 and longhorn/longhorn#13334, fixed in Longhorn 1.11.3+ (1.11.x),
+1.12.1+ or 1.13.0+; nothing for 1.7.x. Incident: homelab#359 (about 6 minutes without PostgreSQL).
 
-**Check (read-only, all nodes).** Compares every engine process with the newest `iscsid` process on its
-node. Run from the Mac on the LAN; off the LAN, set `SSH_CFG=(-F "$HOME/.ssh/homelab-offlan.conf")` first
-(see "Off-LAN kubectl / Ansible Access").
+**Shell.** Paste the blocks below into a `bash` subshell (type `bash` first; they use arrays, functions and
+here-strings). Set the access mode once per subshell:
+
+```bash
+SSH_CFG=()                                     # on the LAN
+kc() { kubectl --request-timeout=20s "$@"; }   # on the LAN (default KUBECONFIG)
+# off the LAN instead (see "Off-LAN kubectl / Ansible Access"; the tunnel forward must be open):
+# SSH_CFG=(-F "$HOME/.ssh/homelab-offlan.conf")
+# kc() { kubectl --kubeconfig "$HOME/.kube/config" --context tunnel --request-timeout=20s "$@"; }
+```
+
+**Check (read-only, all nodes).** Compares every engine process with the newest `iscsid` process on its node.
 
 ```bash
 for ip in 192.168.1.61 192.168.1.163 192.168.1.66 192.168.1.16; do
@@ -789,7 +798,7 @@ done <<< "$psout"
 EOF
 done
 # map the volume names to PVCs
-kubectl get pv -o custom-columns=PV:.metadata.name,NS:.spec.claimRef.namespace,PVC:.spec.claimRef.name
+kc get pv -o custom-columns=PV:.metadata.name,NS:.spec.claimRef.namespace,PVC:.spec.claimRef.name
 ```
 
 Reading: `ok` everywhere = nothing to do. `STALE` = refresh that volume's engine (below) before any PVC
@@ -805,57 +814,82 @@ no `iscsid` restart. Normal operation continues.
 **Refresh one stale engine (MUTATION, owner).** Scale the workload to 0 so that the volume really detaches,
 then back to 1: the next attach starts a fresh engine. A plain pod delete is not enough (the volume can stay
 attached on the same node with the same engine). One workload at a time, the next one only after the
-previous one is verified. Window: not 01:30–03:30 or 04:30–05:30 (snapshots, restic, metrics trim), no
-playbook running, all volumes `healthy` (`kubectl -n longhorn-system get volumes.longhorn.io`).
+previous one is verified. Window: not 01:30–03:30 or 04:30–05:30 (snapshots, restic, metrics trim) and not
+06:00–09:00 (unattended upgrades, and the replica rebuilds after the scheduled mba morning reboots once
+homelab#367 is live); no playbook running;
+all volumes `healthy` (`kc -n longhorn-system get volumes.longhorn.io`).
 
-| Workload | Scale | What sets the replicas back | PVC |
-|---|---|---|---|
-| open-webui | `-n apps deploy/open-webui` | playbook 54 | `open-webui-data` |
-| n8n | `-n apps deploy/n8n` (check that no execution is running: Recreate kills it) | playbook 52 | `n8n-data` |
-| influxdb2 | `-n apps sts/influxdb2` | Helm via playbook 50 | `influxdb2` |
-| mosquitto | `-n apps deploy/mosquitto` | playbook 50 | `mosquitto-data` |
-| postgresql | `-n apps sts/postgresql` (every DB client restarts; see "Growing the PostgreSQL volume", P7m) | playbook 50 | `data-postgresql-0` |
-| grafana | `-n monitoring deploy/kube-prometheus-stack-grafana` | Helm via playbook 41 | Grafana PVC |
-| prometheus | the Prometheus object, not the StatefulSet (the operator reverts a direct scale): `kubectl -n monitoring patch prometheus kube-prometheus-stack-prometheus --type merge -p '{"spec":{"replicas":0}}'`, later `1` | operator, playbook 41 | Prometheus PVC |
-| Home Assistant | its controller in `homeassistant` (`kubectl -n homeassistant get deploy,sts`) | playbook 51 | HA config PVC |
-| a Flux-managed app with a PVC (none today) | `flux suspend kustomization apps` first, `flux resume kustomization apps` after | Flux (10 min) | – |
+| Workload | `NS` / `W` | `SEL` (pod selector) | `PVC` | What sets the replicas back |
+|---|---|---|---|---|
+| open-webui | `apps` / `deploy/open-webui` | `app=open-webui` | `open-webui-data` | playbook 54 |
+| n8n (check that no execution is running: Recreate kills it) | `apps` / `deploy/n8n` | `app=n8n` | `n8n-data` | playbook 52 |
+| influxdb2 | `apps` / `sts/influxdb2` | `app.kubernetes.io/instance=influxdb2` | `influxdb2` | Helm via playbook 50 |
+| mosquitto | `apps` / `deploy/mosquitto` | `app=mosquitto` | `mosquitto-data` | playbook 50 |
+| postgresql (every DB client restarts; see "Growing the PostgreSQL volume", P7m) | `apps` / `sts/postgresql` | `app=postgresql` | `data-postgresql-0` | playbook 50 |
+| grafana | `monitoring` / `deploy/kube-prometheus-stack-grafana` | `app.kubernetes.io/name=grafana` | `kube-prometheus-stack-grafana` | Helm via playbook 41 |
+| prometheus: scale the Prometheus object, not the StatefulSet (the operator reverts a direct scale): `kc -n monitoring patch prometheus kube-prometheus-stack-prometheus --type merge -p '{"spec":{"replicas":0}}'` instead of the scale lines, later `1` | `monitoring` / `sts/prometheus-kube-prometheus-stack-prometheus` (status only) | `prometheus=kube-prometheus-stack-prometheus` | `prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0` | operator, playbook 41 |
+| a Flux-managed app with a PVC (none today) | – | – | – | Flux (10 min): `flux suspend kustomization apps` first, `flux resume kustomization apps` after |
+
+Home Assistant has no Longhorn volume (no Longhorn PV for it in the PV list of 2026-11-09), so it has no engine.
 
 ```bash
 NS=apps; W=deploy/open-webui; SEL=app=open-webui; PVC=open-webui-data   # one row of the table
-VOL=$(kubectl -n $NS get pvc $PVC -o jsonpath='{.spec.volumeName}')
-OLD=$(kubectl -n longhorn-system get volumes.longhorn.io $VOL -o jsonpath='{.status.currentNodeID}')
-OLD_IP=$(kubectl get node $OLD -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-IM=$(kubectl -n longhorn-system get engines.longhorn.io -l longhornvolume=$VOL -o jsonpath='{.items[0].status.instanceManagerName}')
+VOL=$(kc -n "$NS" get pvc "$PVC" -o jsonpath='{.spec.volumeName}')
+OLD=$(kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.currentNodeID}')
+OLD_IP=$(kc get node "$OLD" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+IM=$(kc -n longhorn-system get engines.longhorn.io -l longhornvolume="$VOL" -o jsonpath='{.items[0].status.instanceManagerName}')
 echo "$VOL on $OLD ($OLD_IP), instance manager $IM"
-kubectl -n $NS scale $W --replicas=0
-kubectl -n $NS wait --for=delete pod -l $SEL --timeout=180s || true
-for _ in $(seq 60); do s=$(kubectl -n longhorn-system get volumes.longhorn.io $VOL -o jsonpath='{.status.state}'); echo "$s"; [ "$s" = detached ] && break; sleep 5; done
-# the stale engine could not log out: remove its iSCSI session on the old node BEFORE the scale-up
-ssh "${SSH_CFG[@]}" ansible@$OLD_IP "sudo -n iscsiadm -m session 2>/dev/null | grep -F $VOL || echo 'no leftover session'"
-ssh "${SSH_CFG[@]}" ansible@$OLD_IP "sudo -n iscsiadm -m node -T iqn.2019-10.io.longhorn:$VOL -u 2>/dev/null || true; sudo -n iscsiadm -m node -T iqn.2019-10.io.longhorn:$VOL -o delete 2>/dev/null || true"
-kubectl -n $NS scale $W --replicas=1
-kubectl -n $NS rollout status $W --timeout=15m
+kc -n "$NS" scale "$W" --replicas=0
+kc -n "$NS" wait --for=delete pod -l "$SEL" --timeout=180s || true
+s=unknown
+for i in $(seq 60); do
+  s=$(kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.state}'); echo "$i: $s"
+  [ "$s" = detached ] && break; sleep 5
+done
+if [ "$s" = detached ]; then
+  # the stale engine could not log out: remove its iSCSI session on the old node BEFORE the scale-up
+  ssh "${SSH_CFG[@]}" "ansible@$OLD_IP" "sudo -n iscsiadm -m session 2>/dev/null | grep -F $VOL || echo 'no leftover session'"
+  ssh "${SSH_CFG[@]}" "ansible@$OLD_IP" "sudo -n iscsiadm -m node -T iqn.2019-10.io.longhorn:$VOL -u 2>/dev/null || true; sudo -n iscsiadm -m node -T iqn.2019-10.io.longhorn:$VOL -o delete 2>/dev/null || true"
+  kc -n "$NS" scale "$W" --replicas=1
+  kc -n "$NS" rollout status "$W" --timeout=15m
+else
+  echo "STOP: $VOL is still '$s' after 5 minutes; the workload stays at 0. Follow the stop rule below."
+fi
 ```
 
 Verify: the pod is Ready with 0 restarts, the volume is `attached`/`healthy`, the check above prints `ok` for
-it, the app answers (n8n needs about 4 minutes), and `kubectl -n $NS get $W` shows 1 replica again. No alert
-reports a workload left at 0 replicas within the hour (`WorkloadUnavailable` ignores spec 0 on purpose).
-Expected downtime: 1 to 3 minutes; open-webui up to about 7 minutes when it lands on a node without its image.
+it, the app answers (n8n needs about 4 minutes), and `kc -n "$NS" get "$W"` shows 1 replica again
+(`WorkloadScaledToZero` reports a workload left at 0 after an hour; `WorkloadUnavailable` ignores spec 0 on
+purpose). Expected downtime: 1 to 3 minutes; open-webui up to about 7 minutes when it lands on a node without
+its image.
 
-Stop rule: the volume is not `detached` after 5 minutes → `kubectl -n longhorn-system get volumeattachments.longhorn.io $VOL -o yaml`
-(attachment tickets) and `kubectl -n longhorn-system logs $IM --since=10m | grep -F $VOL`. A snapshot or backup
-ticket: wait. A stuck engine: the last resort is deleting the instance-manager pod `$IM`, which restarts
-**every engine and every replica process on that node** (all workloads with volumes there restart, replicas
-rebuild); follow the "Stale engine" recovery steps in "Growing the PostgreSQL volume" → "If the expansion
-gets stuck". A graceful reboot of the node also refreshes `iscsid` and every engine on it at once and is the gentler
+Stop rule (the block printed `STOP`): `kc -n longhorn-system get volumeattachments.longhorn.io "$VOL" -o yaml`
+(attachment tickets) and `kc -n longhorn-system logs "$IM" --since=10m | grep -F "$VOL"`. A snapshot or backup
+ticket: wait until it is gone, then run the `if` part again by hand. A stuck engine: the last resort is
+deleting the instance-manager pod `$IM`, which restarts **every engine and every replica process on that
+node** (all workloads with volumes there restart, replicas rebuild); follow the "Stale engine" recovery steps
+in "Growing the PostgreSQL volume" → "If the expansion gets stuck", then the session cleanup and the scale-up.
+A graceful reboot of the node also refreshes `iscsid` and every engine on it at once and is the gentler
 option when several volumes on one node are stale (owner go).
 
 **Prevention.** `infra/roles/longhorn_prereqs` writes `/etc/needrestart/conf.d/50-longhorn-iscsid.conf`
 (`longhorn_prereqs_needrestart_skip_iscsid`, default `true`), so needrestart lists `iscsid` under
-"Service restarts being deferred" instead of restarting it; apply with
-`ansible-playbook infra/playbooks/20_k3s.yml --tags longhorn-needrestart`. It does not cover an upgrade of the
-`open-iscsi` package itself: after one, run the check above. The structural fix is Longhorn 1.11.3 or later;
-remove the override after that upgrade.
+"Service restarts being deferred" instead of restarting it. Apply from an up-to-date main checkout, `--check`
+first (with this tag only the needrestart tasks run, so `--diff` shows just the snippet):
+
+```bash
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/20_k3s.yml --tags longhorn-needrestart --check --diff   # off the LAN; on the LAN drop ANSIBLE_SSH_ARGS
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/20_k3s.yml --tags longhorn-needrestart
+# verify on each node (read-only); expect: (?^:^iscsid) => 0
+sudo perl -e 'do "/etc/needrestart/needrestart.conf"; print map {"$_ => $nrconf{override_rc}{$_}\n"} grep {/iscsid/} keys %{$nrconf{override_rc}}'
+```
+
+It does not cover an upgrade of the `open-iscsi` package itself: after one, run the check above. The deferred
+libraries in `iscsid` are picked up by the next reboot (the Pis need an occasional graceful reboot). The
+structural fix is Longhorn 1.11.3+ (1.11.x), 1.12.1+ or 1.13.0+; remove the override after that upgrade
+(`longhorn_prereqs_needrestart_skip_iscsid: false`, apply, then delete the option).
 
 ---
 
