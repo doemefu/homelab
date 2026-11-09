@@ -244,7 +244,7 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 
 - UNIQUE `(window_start, node, src_ip, outcome)`
 
-**`netmon.egress_flow_snapshots`** (NM-2). Source: coroot metrics via Prometheus. Granularity is 1 h. Write mode: replace per `window_start`. Retention: 30 d.
+**`netmon.egress_flow_snapshots`** (NM-2). Source: coroot metrics via Prometheus. Granularity is 1 h. Write mode: replace per `window_start`. Retention: 8 d, and only for UTC days that already have `egress_flow_daily` rows (amended 2026-11-09, data-service#57: was 30 d; older days are served from `egress_flow_daily`).
 
 | Column | Type | Null | Notes |
 |---|---|---|---|
@@ -262,10 +262,27 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | destination_scope | text | no | `pod` (10.42.0.0/16), `service` (10.43.0.0/16), `lan` (192.168.1.0/24), `loopback`, or `external`. The CIDRs come from config. |
 | fqdn | text | yes | From `ip_to_fqdn`; for name-only destinations, the name from `destination` |
 | bytes_sent, bytes_received, connects, failed_connects | bigint | no | `increase()` over the window, rounded |
-| is_new | boolean | no | True if `(workload_key, destination_host, destination_port)` does not occur in the previous 30 d. `workload_key` = `<ns>/<workload>/<container>` (the §6.4 `<W>` format), else the raw `container_id`; a bare `coalesce(workload, container_id)` would merge equal owner names across namespaces (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
+| is_new | boolean | no | True if `(workload_key, destination_host, destination_port)` occurs neither in the hourly rows of the same UTC day before this window nor in the `egress_flow_daily` rows of the previous 30 UTC days (amended 2026-11-09, data-service#57: was "in the previous 30 d" of hourly rows). `workload_key` = `<ns>/<workload>/<container>` (the §6.4 `<W>` format), else the raw `container_id`; a bare `coalesce(workload, container_id)` would merge equal owner names across namespaces (amended 2026-09-24, NM-2: data-service#22, homelab#118) |
 
 - UNIQUE `(window_start, node, container_id, destination, actual_destination)`
 - Indexes (as shipped in data-service `V4__netmon_egress.sql`): `(window_start)`, `(workload, window_start)`, `(destination_ip)`, and `(workload_key, destination_host, destination_port, window_start)` for `is_new` and the read API (amended 2026-09-24, NM-2: data-service#22, homelab#118)
+
+**`netmon.egress_flow_daily`** (data-service#57). Derived from `egress_flow_snapshots`: one row per UTC day (`(window_start AT TIME ZONE 'UTC')::date`) and `(workload_key, destination_host, destination_port, destination_scope, node)`. Write mode: data-service recomputes a day from its hourly rows whenever the collector replaces one of that day's windows (in the same transaction), and an idempotent per-day repair at the start of each collector run fills days that have hourly rows but no daily rows and recomputes days whose hourly rows changed after the daily rows (all retained days once after startup, then the last 3 days); while a day of the previous 30 days still lacks daily rows, the collector does not collect new windows. Retention: 32 d.
+
+| Column | Type | Null | Notes |
+|---|---|---|---|
+| day | date | no | UTC day of the hourly windows |
+| node, workload_key, destination_host, destination_port, destination_scope | text, text, text, integer, text | no | Key; as in `egress_flow_snapshots` |
+| namespace, workload, container | text | yes | As in `egress_flow_snapshots` (they depend only on `workload_key`) |
+| fqdn, fqdn_window | text, timestamptz | yes | The newest non-null `fqdn` of the day and the `window_start` it came from |
+| bytes_sent, bytes_received, connects, failed_connects | bigint | no | Sums of the day's hourly rows |
+| first_window | timestamptz | no | Earliest `window_start` of the day |
+| is_new | boolean | no | True if any of the day's hourly rows is new |
+| hourly_rows | integer | no | Number of hourly rows aggregated (≥ 1) |
+| computed_at | timestamptz | no | When the day was last recomputed |
+
+- PK `(day, workload_key, destination_host, destination_port, destination_scope, node)`; index `(workload_key, destination_host, destination_port, day)` for `is_new`.
+- The `(destination_ip)` index of `egress_flow_snapshots` stays (out of scope of data-service#57).
 
 **`netmon.login_events`** (NM-4). Source: the auth-service outbox. Write mode: upsert, do nothing on `event_id`. Retention: 180 d.
 
@@ -292,14 +309,15 @@ auth-service and device-service share `homelabdb`/`homelab`. data-service delibe
 | `V3__netmon_lan.sql` | NM-3 | `lan_connection_snapshots`, `ufw_block_snapshots`, `ssh_auth_snapshots` |
 | `V4__netmon_egress.sql` | NM-2 | `egress_flow_snapshots` |
 | `V5__netmon_login_events.sql` | NM-4 | `login_events`; `partial` added to the `collector_state.last_error_code` CHECK |
+| `V9__netmon_egress_daily.sql` | data-service#57 | `egress_flow_daily` (DDL only; data-service fills it per day) |
 
 The NM-1 tables moved out of `V1` (an earlier draft bundled them in): the Cloudflare field probe (§4.2) that fixes their NOT NULL columns runs only in NM-1's own Phase 1, after `V1` is already merged and immutable, and the `CLOUDFLARE_API_TOKEN` this needs may not exist at NM-0 time. **Rule:** the version number is the next free number at PR time; migrations are never merged out of order (`outOfOrder=false`), and a migration is never edited after it is merged to main. Flyway settings are `table=flyway_schema_history_data`, `default-schema=public` and `schemas=public,netmon`. Use `ddl-auto=validate` if JPA is used (§12 Q5).
 
 ### 3.5 Retention job contract
 
 - **Schedule:** `@Scheduled(cron = "0 30 3 * * *", zone = "UTC")`, daily. It runs outside the Longhorn 02:00 and restic 03:00 local-time windows.
-- **Per-table defaults:** each table has a property `netmon.retention.<table>-days`, with the defaults in 3.3. Values below 1 are rejected at startup.
-- **Mechanics:** `DELETE … WHERE <time column> < now() - <days>` in batches of 5 000 rows (`ctid IN (SELECT … LIMIT 5000)`) until 0 rows are deleted. The time columns are `window_start`, `occurred_at`, `fetched_at`, or `last_seen` for `ip_enrichment`. Each table logs `[retention] <table> deleted=<n>` and nothing else.
+- **Per-table defaults:** each table has a property `netmon.retention.<table>-days`, with the defaults in 3.3. Values below 1 are rejected at startup; `egress_flow_snapshots` below 2 and `egress_flow_daily` below the raw retention + 2 are rejected too. `egress_flow_snapshots` 8 d (only days that have `egress_flow_daily` rows), `egress_flow_daily` 32 d on `day` (at least the raw retention + 2 d) (amended 2026-11-09, data-service#57). The first change ships with `NETMON_RETENTION_EGRESSFLOWSNAPSHOTSDAYS=30` until the daily rows are verified in production.
+- **Mechanics:** `DELETE … WHERE <time column> < now() - <days>` in batches of 5 000 rows (`ctid IN (SELECT … LIMIT 5000)`) until 0 rows are deleted. The time columns are `window_start`, `occurred_at`, `fetched_at`, `day` for `egress_flow_daily`, or `last_seen` for `ip_enrichment`. Each table logs `[retention] <table> deleted=<n>` and nothing else.
 - **`blocklist_snapshots` exception.** Its deletion additionally excludes any row still referenced by `blocklist_entries.snapshot_id`, since the current entries for a list can point at a snapshot older than 30 d when the list has been `unchanged` for a while: `DELETE FROM netmon.blocklist_snapshots s WHERE s.fetched_at < now() - interval '30 days' AND NOT EXISTS (SELECT 1 FROM netmon.blocklist_entries e WHERE e.snapshot_id = s.id)`. Without this, the plain age-based delete would eventually hit the `blocklist_entries.snapshot_id` FK and fail the job daily.
 - **State:** the job updates `collector_state('retention')`. It never truncates, and there is no manual deletion path in the API.
 
@@ -840,6 +858,7 @@ Top-N lists take `limit` with a default of 10 and a maximum of 50.
 - For name-only destinations `destinationIp` carries the name (as does `fqdn`). This is a documented deviation from the field name; furchert-ch renders non-IP text as is (amended 2026-09-24, NM-2: data-service#22, homelab#118).
 - `node` is the most frequent node for the row.
 - Items are ordered by `bytesSent + bytesReceived` descending.
+- A window that starts at or after `now − 8 d` (the raw retention; one hour of grace for windows derived from a slightly earlier clock, such as furchert-ch's `now − 30 d`) reads the hourly rows only, exactly as before. The dashboard's 24 h and 7 d ranges are such windows, and during the staging override (30 d) every window that ends at about now, i.e. every dashboard range. An older window is read from `egress_flow_daily` for every whole UTC day inside it up to the raw cut-off (`start of the current UTC day − 7 d`), and from the hourly rows from the cut-off on. A partial first day (and a partial last day before the cut-off) is therefore left out: the older part of such a window starts at the next whole UTC day. Every field keeps its meaning: `node` = the node with the most hourly rows (ties broken by name), `fqdn` = the newest non-null, `firstSeenInWindow` = the earliest hourly window (never more than the overlapping hour before `from`), `isNew` = any of them new (amended 2026-11-09, data-service#57).
 
 **`GET /lan/connections?from&to&node&dport`** (NM-3)
 

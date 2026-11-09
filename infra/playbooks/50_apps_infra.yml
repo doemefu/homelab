@@ -14,6 +14,11 @@
   vars:
     kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/homelab.yaml"
     apps_namespace: apps
+    # Size of the PostgreSQL volume (volumeClaimTemplates). 5Gi until 2026-11-09, then expanded in place to
+    # 10Gi (homelab#359, web analytics capacity). volumeClaimTemplates are immutable: never change this
+    # value on a live cluster without the runbook DEPLOYMENT.md "Growing the PostgreSQL volume"; the
+    # drift check before the expansion runs with -e postgresql_storage_size=5Gi.
+    postgresql_storage_size: 10Gi
 
   pre_tasks:
     - name: Check that helm_binary is Helm 3 (#36)
@@ -87,7 +92,11 @@
       no_log: true
       delegate_to: localhost
 
+    # No `--save-config` annotation is needed after the live-object re-create of the volume expansion
+    # (runbook step S) while this task uses a strategic-merge patch; revisit if it switches to apply or
+    # server-side apply.
     - name: PostgreSQL StatefulSet anlegen
+      tags: [postgresql-statefulset]
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition:
@@ -181,7 +190,7 @@
                   storageClassName: longhorn
                   resources:
                     requests:
-                      storage: 5Gi
+                      storage: "{{ postgresql_storage_size }}"
       delegate_to: localhost
 
     - name: PostgreSQL Service anlegen
