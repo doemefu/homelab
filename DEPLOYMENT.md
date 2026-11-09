@@ -3441,7 +3441,7 @@ Owner decision 2026-11-09 (homelab-data-service#57): the shared PostgreSQL volum
 
 **Window.** Between 09:00 and 00:30 Europe/Zurich: after the mba morning reboots (06:10 and 07:40) and the replica rebuilds that follow, and clear of the 02:00 snapshot and 03:00 backup. A full run of playbook 50 from `main` fails at the StatefulSet task (Forbidden, immutable field) between the merge of the size change and step S below: do not run it in that gap.
 
-**Shell.** Paste each block into a `bash` subshell (type `bash` first): the blocks use shell functions and `exit`. They contain no unquoted brackets or globs, so they are safe in zsh too.
+**Shell.** Paste each block into a `bash` subshell (type `bash` first): the blocks use shell functions and `exit`. Brackets appear only as the `[ ... ]` test command or inside quotes, and there are no unquoted globs, so the blocks are safe in zsh too. Off the LAN, use the `tunnel` kubectl context or the one-shot SSH forward from "Off-LAN kubectl / Ansible Access" for `kc`, and the off-LAN SSH config (`-F ~/.ssh/homelab-offlan.conf`) for the node commands.
 
 #### P. Prechecks (read-only)
 
@@ -3477,7 +3477,7 @@ kc -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SELECT 
 # P5: the StatefulSet and the pod belong together; record the pod uid
 kc -n apps get sts postgresql -o jsonpath='{.status.currentRevision} {.status.updateRevision} collision={.status.collisionCount}{"\n"}'
 kc -n apps get pod postgresql-0 -L controller-revision-hash
-kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount}{"\n"}'
 kc -n apps get sts postgresql -o jsonpath='template annotations: {.spec.template.metadata.annotations}{"\n"}'
 ```
 
@@ -3491,17 +3491,35 @@ ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset
 
 After the size change is merged, the same command without `-e` is expected to fail with Forbidden (immutable field): that is the reason for step S.
 
-**P7: engine age versus the last k3s restart (homelab#362).** A Longhorn engine that was started before the last restart of k3s on its node keeps a host process id for `nsenter` that no longer exists. Its iSCSI frontend then cannot be refreshed, and an expansion fails at the very end (see "If the expansion gets stuck"). Check before every expansion or detach of a volume:
+**P7: engine start versus the newest `iscsid` on its node (read-only, homelab#362).** Each Longhorn engine caches the host process id of `iscsid` when its frontend starts (go-iscsi-helper, `NewNamespaceExecutor("iscsid", "/host/proc")`). If `iscsid` restarts afterwards on that node (for example through unattended upgrades and needrestart), the engine is **stale**: it fails every frontend refresh with `nsenter: cannot open /host/proc/<pid>/ns/mnt`, and an expansion hangs at the very end (see "If the expansion gets stuck"). A k3s restart alone does not change the `iscsid` pid, and the age of the instance-manager pod is not a usable signal. Upstream: longhorn/longhorn#10544, fixed in Longhorn 1.13.0 and backported to 1.11.3 and 1.12.1 (nothing for 1.7.x). Check right before the expansion:
 
 ```bash
 ENG_NODE=$(kc -n longhorn-system get engines.longhorn.io -l longhornvolume="$VOL" -o jsonpath='{.items[0].spec.nodeID}')
-IM=$(kc -n longhorn-system get engines.longhorn.io -l longhornvolume="$VOL" -o jsonpath='{.items[0].status.instanceManagerName}')
-echo "engine node: $ENG_NODE, instance manager pod: $IM"
-kc -n longhorn-system get pod "$IM" -o jsonpath='instance manager started: {.status.startTime}{"\n"}'
-ssh "$ENG_NODE" 'systemctl show k3s k3s-agent -p Id -p ActiveEnterTimestamp'
+NODE_IP=$(kc get node "$ENG_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+echo "engine node: $ENG_NODE ($NODE_IP)"
+nodesh() { ssh "ansible@$NODE_IP" "bash -s -- $1"; }
+# off the LAN instead: nodesh() { ssh -F ~/.ssh/homelab-offlan.conf "$ENG_NODE" "bash -s -- $1"; }
+nodesh "$VOL" <<'REMOTE'
+vol=$1
+now=$(date +%s); newest=0
+for p in $(pgrep -x iscsid); do
+  s=$(( now - $(ps -o etimes= -p "$p") ))
+  [ "$s" -gt "$newest" ] && newest=$s
+done
+[ "$newest" -gt 0 ] || { echo "iscsid is not running"; exit 0; }
+echo "newest iscsid started $(date -d @"$newest" -Is)"
+ps -eo pid=,etimes=,args= | while read -r pid et args; do
+  case " $args " in *" controller $vol "*) ;; *) continue ;; esac
+  st=$(( now - et ))
+  [ "$st" -lt "$newest" ] && v=STALE || v=ok
+  echo "$vol engine pid $pid started $(date -d @"$st" -Is) $v"
+done
+REMOTE
 ```
 
-P7 reading: the engine runs inside the instance-manager pod. If the pod started **before** the `ActiveEnterTimestamp` of the node's k3s unit (`k3s` on a control-plane node, `k3s-agent` on a worker; the other unit does not exist), the engine is stale: refresh it first, in the window, with the workload scaled down so that the volume really detaches:
+P7 reading: `ok` = the engine started after the newest `iscsid`: continue. `STALE` = the engine started before it: refresh the engine first (sub-step P7m). No engine line at all = the engine process was not found on that node: stop and look (`ps -eo pid,lstart,args | grep '[c]ontroller pvc-'` on the node, check the exact arguments).
+
+**P7m: refresh a stale engine (MUTATION, only if P7 printed STALE; P itself is read-only).** Scale the workload to 0 so that the volume really detaches, then back to 1; the next attach starts a fresh engine. The outage is the same as the offline fallback: about 1 to 3 minutes without a database for every app. A plain `kubectl delete pod` is not enough: the volume stays attached on the same node with the same engine.
 
 ```bash
 kc -n apps scale sts postgresql --replicas=0
@@ -3510,7 +3528,7 @@ kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.state
 kc -n apps scale sts postgresql --replicas=1
 ```
 
-A plain `kubectl delete pod` is **not** enough: the volume stays attached on the same node and keeps the same engine. The scale-down costs the same 1 to 3 minutes without a database as the offline fallback; only then continue with B and E.
+Afterwards run P7 again (it must print `ok`) and P2.
 
 #### B. Backup first
 
@@ -3550,15 +3568,19 @@ kc -n apps get pvc data-postgresql-0 -o jsonpath='{.status.capacity.storage}{"\n
 kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.spec.size} {.status.robustness}{"\n"}'
 kc -n apps exec postgresql-0 -c postgresql -- df -h /var/lib/postgresql/data
 kc -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SELECT pg_size_pretty(pg_database_size('data_service'));"
-kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount}{"\n"}'
 ```
 
 Stop rule E: **do not start step S unless step 10 shows `10Gi` capacity** and the filesystem shows about 9.8G; the pod uid and restart count are unchanged. After the offline fallback (scale to 0 replaces the pod) or a recovery, take the replacement pod's uid and restart count after verifying it as the new baseline; step S compares against the uid recorded at step 12.
 
-**If the expansion gets stuck** (the PVC stays at `5Gi` capacity with a resize condition, or Longhorn reports an expansion error): `kc -n apps describe pvc data-postgresql-0` and the Longhorn UI event log name the cause. A PVC request cannot be lowered again, so there is no revert; nothing else has changed and the data is unaffected.
+**If the expansion gets stuck** (the PVC stays at `5Gi` capacity with a resize condition, or Longhorn reports an expansion error): `kc -n apps describe pvc data-postgresql-0` and the Longhorn UI event log name the cause. A PVC request cannot go back to `5Gi` (Kubernetes only allows lowering a request to a value above the current capacity, `RecoverVolumeExpansionFailure`), so there is no revert; nothing else has changed and the data is unaffected.
 
 - **Disk space or a rebuilding replica:** fix that and wait, Longhorn retries.
-- **Stale engine (homelab#362).** Symptom: the PVC stays `Resizing`, the engine log or the Longhorn event shows `Failed to expand the frontend … nsenter: cannot open /host/proc/<pid>/ns/mnt: No such file or directory`, the replicas and the backend already show the new size, and the Longhorn attachment ticket `volume-expansion-controller` keeps the volume attached. A pod that is scaled down or restarted then cannot attach again (`volume attachment is being deleted`). Cause: the engine is older than the last k3s restart on its node (precheck P7). Recovery: delete the **instance-manager pod on that node** (`kc -n longhorn-system get pods -o wide | grep instance-manager` to find it, then `kc -n longhorn-system delete pod <instance-manager pod on the engine node>`). All engines on that node restart with fresh processes and the workloads of those volumes restart by themselves; the stuck expansion then completes and the volume attaches. Afterwards restart the DB clients that crash-loop: `kc -n apps delete pod -l app=<name>` for auth-service, data-service, device-service and the others that lost their connection. Expect about 6 minutes without the database in the worst case (observed on 2026-11-09).
+- **Stale engine (homelab#362).** Symptom: the PVC stays `Resizing`, the Longhorn event or the engine log shows `Failed to expand the frontend … nsenter: cannot open /host/proc/<pid>/ns/mnt: No such file or directory`, the replicas and the backend already show the new size, and the Longhorn attachment ticket `volume-expansion-controller` may keep the volume attached. A pod that is scaled down or restarted then cannot attach again (`volume attachment is being deleted`). Cause: the engine started before the newest `iscsid` on its node (precheck P7; the trigger is an `iscsid` restart, for example by unattended upgrades; upstream longhorn/longhorn#10544). Recovery is to delete the **instance-manager pod on that node**, which is costly:
+  1. List what runs on that node first: `kc -n longhorn-system get engines.longhorn.io,replicas.longhorn.io -o custom-columns=KIND:.kind,NAME:.metadata.name,NODE:.spec.nodeID,VOLUME:.spec.volumeName | grep "$ENG_NODE"` (the instance-manager pod deletion kills **all engines and all replica processes** on the node).
+  2. Every affected volume needs a healthy replica on another node, and no other node may be down or rebuilding. Expect replica rebuilds afterwards.
+  3. `kc -n longhorn-system get pods -o wide | grep instance-manager` finds the pod on the engine node; delete it with `kc -n longhorn-system delete pod <that pod>`. Workload pods restart through Longhorn's "delete workload pod when volume detaches unexpectedly" (only controller-managed pods); the stuck expansion then completes and the volume attaches.
+  4. Restart DB clients that crash-loop: `kc -n apps delete pod -l app=<name>` (auth-service, data-service, device-service, others that lost their connection). Worst case observed on 2026-11-09: about 6 minutes without the database.
 - **Longhorn refuses an online expansion altogether:** fallback in a quiet hour: `kc -n apps scale sts postgresql --replicas=0`, wait for the volume to detach, expand, `scale ... --replicas=1` (about 1 to 3 minutes without a database for every app).
 
 If the pod or the replicas were scaled or restarted during E (recovery), the StatefulSet template is unchanged and the live-object re-create of step S stays valid, but the pod has a new uid: take the current uid right before step 12, not the one from P5.
@@ -3568,15 +3590,23 @@ If the pod or the replicas were scaled or restarted during E (recovery), the Sta
 Merge the PR (size `10Gi` in the playbook) only after P, B and E. Then do S right away, because a full run of playbook 50 fails at the StatefulSet task until S is done.
 
 ```bash
-# 12: save the live object (no secret values in a StatefulSet) and record the CURRENT pod uid (a recovery during E changes it)
-kc -n apps get sts postgresql -o yaml > "$WORK/sts-before.yaml"
-kc -n apps get sts postgresql -o jsonpath='replicas={.spec.replicas} ready={.status.readyReplicas}{"\n"}'
-kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
-
-# 13: re-create the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. It copies spec.replicas too: it must be 1 (see step 12). Keep the window between delete and create short.
+kc() { kubectl --request-timeout=20s "$@"; }
+WORK=$(mktemp -d)
 set -o pipefail
+echo "scratch directory: $WORK"
+
+# 12: save the live object (no secret values in a StatefulSet) and record the CURRENT pod facts (a recovery during E changes the uid)
+kc -n apps get sts postgresql -o yaml > "$WORK/sts-before.yaml"
+kc -n apps get sts postgresql -o jsonpath='replicas={.spec.replicas} ready={.status.readyReplicas} currentRevision={.status.currentRevision} updateRevision={.status.updateRevision}{"\n"}'
+kc -n apps get pod postgresql-0 -L controller-revision-hash
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount}{"\n"}'
+# Stop here unless the pod's controller-revision-hash equals the StatefulSet's updateRevision (a pod on another revision would be rolled after the re-create).
+
+# 13: re-create the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. It copies spec.replicas too, which must be 1 (the guard stops otherwise). Keep the window between delete and create short.
 kc -n apps get sts postgresql -o json | python3 -c 'import sys,json
 o = json.load(sys.stdin)
+if o["spec"].get("replicas") != 1:
+    sys.exit("replicas is not 1: stop")
 o["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] = "10Gi"
 for k in ("uid", "resourceVersion", "creationTimestamp", "generation", "managedFields"):
     o["metadata"].pop(k, None)
@@ -3584,20 +3614,23 @@ o["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-con
 o.pop("status", None)
 json.dump(o, sys.stdout)' > "$WORK/sts-new.json" || { echo "could not build the manifest: stop, nothing was deleted"; exit 1; }
 [ -s "$WORK/sts-new.json" ] || { echo "empty manifest: stop, nothing was deleted"; exit 1; }
-kc -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json"
+# the delete runs without the 20 s request timeout of kc
+kubectl -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json"
 
 # 14: verify adoption: same uid and restart count as recorded at step 12 (not as in P5), template 10Gi, StatefulSet ready
 kc -n apps get sts postgresql -o jsonpath='{.status.readyReplicas}/{.spec.replicas} {.spec.volumeClaimTemplates[0].spec.resources.requests.storage}{"\n"}'
-kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[0].restartCount} owner={.metadata.ownerReferences[0].kind}{"\n"}'
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount} owner={.metadata.ownerReferences[0].kind}{"\n"}'
 kc -n apps get sts postgresql -o jsonpath='{.status.currentRevision} {.status.updateRevision}{"\n"}'
 
-# 15: drift check against git: the tagged run is expected to report no change
+# 15: drift check against git
 ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset --check --diff
 ```
 
+Step 15 reading: the first check may show a diff only in `metadata.managedFields` (the field owner is now `kubectl-create`); that is not drift. Any diff under `spec` is drift: stop and compare with `$WORK/sts-before.yaml`. Optionally run the tagged task once for real (`ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset`); a second `--check --diff` must then be clean. No `--save-config` is needed while the task uses a strategic-merge patch; revisit this if the task ever switches to apply or server-side apply.
+
 If the pod was rolled anyway (the uid changed), PostgreSQL restarts from the same volume within a minute or two; check that all apps reconnect.
 
-**If step 13 fails after the orphan delete:** the pod keeps running (orphaned); fix the cause and run `kc -n apps create -f "$WORK/sts-new.json"` again, or the tagged playbook run (`ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset`). While the StatefulSet is missing nobody restarts a crashed pod, so do not leave this state.
+**If step 13 fails after the orphan delete:** the pod keeps running (orphaned). If the delete itself timed out, check `kc -n apps get sts postgresql`: while it still exists wait; once it is `NotFound`, run `kc -n apps create -f "$WORK/sts-new.json"` (or the tagged playbook run, `ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset`). While the StatefulSet is missing nobody restarts a crashed pod, so do not leave this state.
 
 #### V. Verify and record
 

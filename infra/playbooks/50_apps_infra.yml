@@ -92,6 +92,9 @@
       no_log: true
       delegate_to: localhost
 
+    # No `--save-config` annotation is needed after the live-object re-create of the volume expansion
+    # (runbook step S) while this task uses a strategic-merge patch; revisit if it switches to apply or
+    # server-side apply.
     - name: PostgreSQL StatefulSet anlegen
       tags: [postgresql-statefulset]
       kubernetes.core.k8s:
