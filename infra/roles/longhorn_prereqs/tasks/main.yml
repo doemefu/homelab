@@ -58,3 +58,38 @@
   failed_when: false
   register: longhorn_prereqs_multipathd_status
   when: "'off' not in ([ansible_facts['proc_cmdline']['multipath'] | default([])] | flatten)"
+
+# needrestart (Ubuntu 24.04, restart mode "a" in apt/unattended-upgrades runs) evaluates every
+# /etc/needrestart/conf.d/*.conf; a service matching an override_rc entry with 0 is skipped and only
+# reported under "Service restarts being deferred" (needrestart 3.6). See the default above (#362).
+- name: Ensure the needrestart conf.d directory exists
+  ansible.builtin.file:
+    path: /etc/needrestart/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: longhorn_prereqs_needrestart_skip_iscsid | bool
+  tags: [longhorn-needrestart]
+
+- name: Keep needrestart from restarting iscsid
+  ansible.builtin.copy:
+    dest: /etc/needrestart/conf.d/50-longhorn-iscsid.conf
+    content: |
+      # Managed by Ansible (role longhorn_prereqs, homelab#362). Running Longhorn engines cache the
+      # iscsid pid: needrestart lists iscsid but never restarts it. Restart iscsid only on a node
+      # without attached Longhorn volumes.
+      $nrconf{override_rc}{qr(^iscsid)} = 0;
+    owner: root
+    group: root
+    mode: "0644"
+    validate: perl -c %s
+  when: longhorn_prereqs_needrestart_skip_iscsid | bool
+  tags: [longhorn-needrestart]
+
+- name: Remove the needrestart iscsid override when disabled
+  ansible.builtin.file:
+    path: /etc/needrestart/conf.d/50-longhorn-iscsid.conf
+    state: absent
+  when: not (longhorn_prereqs_needrestart_skip_iscsid | bool)
+  tags: [longhorn-needrestart]

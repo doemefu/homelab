@@ -3,3 +3,11 @@ longhorn_prereqs_packages:
   - open-iscsi
   - nfs-common
   - util-linux
+
+# Running Longhorn engines cache the pid of the host's iscsid when they start. After an iscsid restart
+# they can no longer rescan or log out their iSCSI frontend: online expansions hang and detaches fail
+# (homelab#362, longhorn/longhorn#10544). unattended-upgrades + needrestart restarted iscsid weekly.
+# true: needrestart lists iscsid but never restarts it. Rollback: set false and re-run the
+# `longhorn-needrestart` tag, which deletes the snippet. Remove the option (false, apply, then delete it)
+# once Longhorn 1.11.3+ (1.11.x), 1.12.1+ or 1.13.0+ is live; those retry with a fresh pid.
+longhorn_prereqs_needrestart_skip_iscsid: true
