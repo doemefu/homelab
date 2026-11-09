@@ -1497,6 +1497,8 @@ All `severity: warning`, routed to Discord through the single route.
 | `FluxResourceMetricsMissing` | kube-state-metrics is up but exports no `gotk_resource_info` for a Flux kind in use | 30m |
 | `WorkloadUnavailable` | a Deployment or StatefulSet in `apps`, `platform` or `flux-system` has 0 available/ready replicas while `spec.replicas > 0` | 5m |
 | `WorkloadMissing` | one of the named workloads (list in INTERFACES.md §9) no longer exists | 15m |
+| `WorkloadScaledToZero` | a Deployment or StatefulSet in `apps`, `platform` or `flux-system` has wanted 0 replicas for an hour (forgotten scale-up after maintenance). Deliberate zeros longer than 1 h fire it by design: kill switch L3 of mcp-hub or club-mcp, a club-mcp decommission before the manifests are removed, a long `backup-app-data.sh --quiesce` run (open-webui, n8n): silence it | 1h |
+| `PersistentVolumeClaimResizeStuck` | a PVC requests more than its bound PV provides, or a resize condition (`Resizing`, `FileSystemResizePending`, `*ResizeError`) stays true; Longhorn: "Stale engines after an iscsid restart (#362)" | 15m |
 | `CertManagerCertificateExpiringSoon` | an issued Certificate expires in less than 14 days | 1h |
 | `CertManagerCertificateNotReady` | a Certificate is `Ready=False/Unknown` | 15m |
 | `CertManagerDown` | no successful scrape of the cert-manager controller | 15m |
@@ -1520,6 +1522,13 @@ Design notes:
   `41_monitoring.yml` mutes the chart alert for the same object, so one outage gives one message.
   Expected short firings: a Recreate-strategy upgrade with a slow image pull (open-webui ≈ 7 min,
   n8n) and a node reboot that evicts a single-replica pod with an RWO volume.
+- **WorkloadScaledToZero / PersistentVolumeClaimResizeStuck (#362)** come from kube-state-metrics only.
+  The resize rule joins each claim's current PV (`kube_persistentvolumeclaim_info{volumename}`, not a
+  PV's claimRef, so a retained PV of a re-created claim cannot mask it) to the cluster-scoped
+  `kube_persistentvolume_capacity_bytes` (the PV capacity grows only when the controller-side expansion
+  succeeds); its condition branch uses `kube_persistentvolumeclaim_status_condition{condition=…}`,
+  experimental in KSM v2.14. During the #359 expansion a stale Longhorn engine hung the frontend rescan for 18 minutes
+  and no alert fired.
 - **The #125 key move** also put the long-ignored KSM/node-exporter `resources` into effect (they
   had none before); KSM's memory limit is 256Mi because custom-resource-state caches every CRD.
   Prometheus' memory limit went from 1Gi to 1536Mi in the same change (RSS peaked at 1009 Mi).
@@ -1589,7 +1598,8 @@ scraped by the ServiceMonitor `monitoring/mcp-hub` (`41_monitoring.yml`; Service
   job. The `equal` lists are empty on purpose: the absent() branch of `McpHubDown` carries only
   `job="mcp-hub"`. `KubePodCrashLooping` / `KubePodNotReady` (pod-level) are not muted.
 - **Planned stop with replicas left at 1:** silence `WorkloadUnavailable`, `McpHubDown` and
-  `TargetDown` for the hub. A scale to 0 (kill switch L3) needs no silence.
+  `TargetDown` for the hub. A scale to 0 (kill switch L3) needs no silence for the first hour; if it
+  lasts longer, silence `WorkloadScaledToZero` for `apps/mcp-hub`.
 - **Rollout (owner):** playbook 41 after merge, from an up-to-date main checkout. It upgrades the
   release (rules) before it applies the ServiceMonitor; if the run aborts in between,
   `McpHubDown` fires after 10 min (a true signal). Verify: `up{job="mcp-hub"} == 1`,
