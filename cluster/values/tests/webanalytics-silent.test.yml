@@ -76,29 +76,29 @@ tests:
       - eval_time: 29460m
         alertname: WebAnalyticsIngestSilent
         exp_alerts: []
-  # Slow baseline (10 events per day) then silence: no fast path; the 7 day rule goes pending at 21d1h, silent at 21d1h45m, firing at 21d2h, and it keeps firing after 30 days of silence (the latch holds).
+  # Slow baseline (12 events per day for 8 days) then silence: no fast path; the 7 day rule is pending at 21645m (15d0h45m), silent at 21690m, firing at 21705m, and it keeps firing after 21 days of silence (the latch holds; 43200m is 30 days after the start).
   - interval: 15m
     input_series:
       - series: "webanalytics_events_accepted_total"
-        values: "0 0.1041667+0.1041667x1343 140x2879"
+        values: "0 0.125+0.125x767 96x2199"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
         values: "1x4600"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
         values: "1x4600"
     promql_expr_test:
       - expr: "ALERTS{alertname=\"WebAnalyticsIngestSilent\", alertstate=\"pending\"}"
-        eval_time: 30300m
+        eval_time: 21645m
         exp_samples:
           - labels: "ALERTS{alertname=\"WebAnalyticsIngestSilent\", alertstate=\"pending\", severity=\"info\", namespace=\"apps\"}"
             value: 1
     alert_rule_test:
-      - eval_time: 28800m
+      - eval_time: 20160m
         alertname: WebAnalyticsIngestSilent
         exp_alerts: []
-      - eval_time: 30345m
+      - eval_time: 21690m
         alertname: WebAnalyticsIngestSilent
         exp_alerts: []
-      - eval_time: 30360m
+      - eval_time: 21705m
         alertname: WebAnalyticsIngestSilent
         exp_alerts:
           - exp_labels:
@@ -106,7 +106,7 @@ tests:
               namespace: "apps"
             exp_annotations:
               summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
-              description: "data-service has accepted no analytics event for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+              description: "data-service has accepted no analytics event (last event 7d 1h 15m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
       - eval_time: 43200m
         alertname: WebAnalyticsIngestSilent
         exp_alerts:
@@ -115,21 +115,12 @@ tests:
               namespace: "apps"
             exp_annotations:
               summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
-              description: "data-service has accepted no analytics event for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
-      - eval_time: 62640m
-        alertname: WebAnalyticsIngestSilent
-        exp_alerts:
-          - exp_labels:
-              severity: "info"
-              namespace: "apps"
-            exp_annotations:
-              summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
-              description: "data-service has accepted no analytics event for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
-  # Busy baseline (96 events per day for 14 days) then silence: the 24 hour fast path is silent at 15d1h30m and firing at 15d1h45m.
+              description: "data-service has accepted no analytics event (last event 21d 23h 30m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+  # Busy baseline (96 events per day for 14 days) then silence: the 24 hour fast path is silent at 15d1h30m and firing at 15d1h45m, and it keeps firing after 6 days of silence (the baseline is frozen in its own latch, a live 7 day average would shrink).
   - interval: 15m
     input_series:
       - series: "webanalytics_events_accepted_total"
-        values: "0 1+1x1343 1344x1919"
+        values: "0 1+1x1343 1344x767"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
         values: "1x4600"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
@@ -149,7 +140,7 @@ tests:
               namespace: "apps"
             exp_annotations:
               summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
-              description: "data-service has accepted no analytics event for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+              description: "data-service has accepted no analytics event (last event 1d 1h 15m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
       - eval_time: 25920m
         alertname: WebAnalyticsIngestSilent
         exp_alerts:
@@ -158,12 +149,71 @@ tests:
               namespace: "apps"
             exp_annotations:
               summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
-              description: "data-service has accepted no analytics event for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+              description: "data-service has accepted no analytics event (last event 3d 23h 30m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 28800m
+        alertname: WebAnalyticsIngestSilent
+        exp_alerts:
+          - exp_labels:
+              severity: "info"
+              namespace: "apps"
+            exp_annotations:
+              summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
+              description: "data-service has accepted no analytics event (last event 5d 23h 30m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+  # Near the threshold: 54 events per day (0.5625 per 15 minutes, exact in binary floating point) still counts as busy: the fast path fires at 15d1h45m and still fires on day 17 (3 days of silence).
+  - interval: 15m
+    input_series:
+      - series: "webanalytics_events_accepted_total"
+        values: "0 0.5625+0.5625x1343 756x767"
+      - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
+        values: "1x4600"
+      - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
+        values: "1x4600"
+    alert_rule_test:
+      - eval_time: 21690m
+        alertname: WebAnalyticsIngestSilent
+        exp_alerts: []
+      - eval_time: 21705m
+        alertname: WebAnalyticsIngestSilent
+        exp_alerts:
+          - exp_labels:
+              severity: "info"
+              namespace: "apps"
+            exp_annotations:
+              summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
+              description: "data-service has accepted no analytics event (last event 1d 1h 15m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 24480m
+        alertname: WebAnalyticsIngestSilent
+        exp_alerts:
+          - exp_labels:
+              severity: "info"
+              namespace: "apps"
+            exp_annotations:
+              summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
+              description: "data-service has accepted no analytics event (last event 2d 23h 30m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+  # Below the threshold: 48 events per day (0.5 per 15 minutes) is not busy (exactly 50 per day never triggers either): no fast path, silent on days 16, 18 and 20.
+  - interval: 15m
+    input_series:
+      - series: "webanalytics_events_accepted_total"
+        values: "0 0.5+0.5x1343 672x767"
+      - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
+        values: "1x4600"
+      - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
+        values: "1x4600"
+    alert_rule_test:
+      - eval_time: 23040m
+        alertname: WebAnalyticsIngestSilent
+        exp_alerts: []
+      - eval_time: 25920m
+        alertname: WebAnalyticsIngestSilent
+        exp_alerts: []
+      - eval_time: 28800m
+        alertname: WebAnalyticsIngestSilent
+        exp_alerts: []
   # Enquiries do not count: the accepted counter is silent after a busy baseline while webanalytics_enquiries_total keeps increasing: fires as without them.
   - interval: 15m
     input_series:
       - series: "webanalytics_events_accepted_total"
-        values: "0 1+1x1343 1344x1919"
+        values: "0 1+1x1343 1344x767"
       - series: "webanalytics_enquiries_total"
         values: "0 0.05+0.05x3263"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
@@ -182,7 +232,7 @@ tests:
               namespace: "apps"
             exp_annotations:
               summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
-              description: "data-service has accepted no analytics event for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+              description: "data-service has accepted no analytics event (last event 1d 1h 15m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
   # Pod replacement: the old series ends with a stale marker, the new series starts from 0 with one overlapping hour while traffic continues: no silent gap, no alert.
   - interval: 15m
     input_series:
@@ -207,7 +257,7 @@ tests:
       - eval_time: 34560m
         alertname: WebAnalyticsIngestSilent
         exp_alerts: []
-  # Latch gap: a 6 hour gap in the counter samples in the middle of busy traffic, then traffic again: silent throughout.
+  # Counter scrape gap: 6 hours without counter samples in the middle of busy traffic, then traffic again: silent throughout, and the latch still holds its last value (865800 s) in the middle of the gap (it would be absent without the carry-forward).
   - interval: 15m
     input_series:
       - series: "webanalytics_events_accepted_total"
@@ -216,6 +266,12 @@ tests:
         values: "1x4600"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
         values: "1x4600"
+    promql_expr_test:
+      - expr: webanalytics:accepted:last_seen_timestamp
+        eval_time: 14700m
+        exp_samples:
+          - labels: "webanalytics:accepted:last_seen_timestamp"
+            value: 865800
     alert_rule_test:
       - eval_time: 14700m
         alertname: WebAnalyticsIngestSilent
@@ -230,7 +286,7 @@ tests:
   - interval: 15m
     input_series:
       - series: "webanalytics_events_accepted_total"
-        values: "0 1+1x1343 1344x1919"
+        values: "0 1+1x1343 1344x767"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
         values: "1x1344 0x4600"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
@@ -246,7 +302,7 @@ tests:
   - interval: 15m
     input_series:
       - series: "webanalytics_events_accepted_total"
-        values: "0 1+1x1343 1344x1919"
+        values: "0 1+1x1343 1344x767"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
         values: "1x4600"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
@@ -262,7 +318,7 @@ tests:
   - interval: 15m
     input_series:
       - series: "webanalytics_events_accepted_total"
-        values: "0 1+1x1343 1344x11 0 0x1919"
+        values: "0 1+1x1343 1344x11 0 0x767"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"data-service\"}"
         values: "1x4600"
       - series: "kube_deployment_status_replicas_available{namespace=\"apps\", deployment=\"furchert-ch\"}"
@@ -279,4 +335,4 @@ tests:
               namespace: "apps"
             exp_annotations:
               summary: "No web analytics events were accepted for 7 days (24 hours after a busy week)"
-              description: "data-service has accepted no analytics event for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+              description: "data-service has accepted no analytics event (last event 1d 3h 30m 0s ago) for 7 days, or for 24 hours after a week that averaged at least 50 events per day, although data-service and furchert-ch are up. Check the furchert-ch collect route and the ANALYTICS_* flags, the tracker (consent bar and bundle), the forward queue and token, and data-service (GET /api/webanalytics/status, caps, rejects). Enquiries do not count. A planned stop (kill switch, caps 0) also fires it: silence it for the duration. Spec: docs/100-web-analytics.md §7.9; first checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
