@@ -2196,15 +2196,17 @@ Web analytics (Epic #348, spec `docs/100-web-analytics.md`) stores events in sch
 
 #### Alerts (`homelab-webanalytics`)
 
-Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml` and `cluster/values/tests/webanalytics-timing.test.yml` (30 s cadence, boundary of the 15 minute hold). Spec §7.9 is the contract for the metric names.
+Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml`, `cluster/values/tests/webanalytics-timing.test.yml` (30 s cadence, boundary of the 15 minute hold) and `cluster/values/tests/webanalytics-gauges.test.yml` (the two gauge rules, absent-series cases). Spec §7.9 is the contract for the metric names.
 
 | Alert | Fires when | For | Severity | First checks |
 |-------|------------|-----|----------|--------------|
 | `WebAnalyticsIngestSpike` | accepted events in the last hour > 500 **and** > 3 × the 7-day average of the hourly count (recording rule `webanalytics:accepted:increase1h`, current hour excluded) | 15m | warning | compare `webanalytics_edge_dropped_total` and `webanalytics_events_rejected_total`; Cloudflare analytics for a bot burst on `/api/v`; the cap state in `GET /api/webanalytics/status` |
 | `WebAnalyticsRejectRatioHigh` | rejects (all reasons except `erased`) > 100/h **and** > 50 % of rejects plus accepted | 30m | info | version mismatch between furchert-ch and data-service (spec §6.2), reasons in `webanalytics_events_rejected_total` |
+| `WebAnalyticsIngestCapped` | `max(webanalytics_ingest_capped) == 1`: the hourly (2 500) or daily (10 000) ingest cap is reached | 5m | warning | `GET /api/webanalytics/status` (`dailyCap`, `capped`), spike and reject counters, then data-service's runbooks "purge a poisoned day" and "adjust caps" |
 | `WebAnalyticsSecondLineRejects` | any increase of `webanalytics_events_rejected_total` in the last hour for a reason other than `erased` and `visitor_cap` | 0m | warning | the `reason` label; contract mismatch or an attack that passed furchert-ch's validation; data-service logs (class only) |
+| `WebAnalyticsTableLarge` | `max(webanalytics_raw_table_bytes) > 3 GiB` (total relation size of `webanalytics.events`; about 2.0 to 2.2 GB is expected at the caps; the volume is 10 GiB since homelab#359) | 1h | warning | retention job log, caps, volume headroom (owner checks below), data-service's "purge a poisoned day" |
 
-`info` alerts are normally visible only in Prometheus and Alertmanager, because the chart's `InfoInhibitor` suppresses them in Discord unless a warning fires in the same namespace. `WebAnalyticsIngestCapped` and `WebAnalyticsTableLarge` (gauges) follow with data-service WA-5; `WebAnalyticsIngestSilent` follows in WA-6 (#352), because before go-live there is no traffic and it would fire.
+`info` alerts are normally visible only in Prometheus and Alertmanager, because the chart's `InfoInhibitor` suppresses them in Discord unless a warning fires in the same namespace. The gauge rules `WebAnalyticsIngestCapped` and `WebAnalyticsTableLarge` read the gauges of data-service WA-5 (`webanalytics_ingest_capped`, `webanalytics_raw_table_bytes`); `WebAnalyticsTableLarge` has no series until the first successful measurement and does not fire then. `WebAnalyticsIngestSilent` follows in WA-6 (#352), because before go-live there is no traffic and it would fire.
 
 **Rollout.** Merge, then run `ansible-playbook infra/playbooks/41_monitoring.yml --check --diff` from an up-to-date checkout of `main`. Stop if the diff shows anything except the new PrometheusRule; then run the playbook, and a second run must show no change. Afterwards (all read-only; paste into a `bash` subshell, type `bash` first, because the block uses `exit`):
 
@@ -2225,7 +2227,20 @@ curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_rej
 kill "$PF"
 ```
 
-Rules and metric names are compared with the data-service actuator scrape before the gauge rules are added.
+The gauge rules are in; the metric names were verified on the live scrape of 2026-11-09.
+
+#### Runbooks (canonical in data-service; this file keeps the cluster-level steps)
+
+The SQL and the step lists live in homelab-data-service `DEPLOYMENT.md`, section "Runbooks (canonical; ...)", and are tested there against the real schema. They are not repeated here:
+
+| Situation | Data-service runbook | Cluster-level steps here |
+|-----------|---------------------|--------------------------|
+| A bot burst or poisoned events got through | (1) purge a poisoned day (raw events and the day's aggregates in one transaction) | dump the schema to the Mac first, then run the SQL through `kubectl -n apps exec -i postgresql-0 -c postgresql -- psql ...` (the data-service runbook gives the exact commands) |
+| Recompute after a fix | (2) reset D − 1, D, D + 1; (3) re-mark rollup days | same exec path; the rollup runs at 01:12 and 07:30 Europe/Zurich |
+| The caps are too low or too high | (4) adjust caps: a `k8s/deployment.yaml` PR in the data-service repo (Flux applies it), then `kubectl -n apps delete pod -l app=data-service` (never `rollout restart`) | none |
+| Stop analytics ingest | (5) data-side stop (a cap of 0; it makes `WebAnalyticsIngestCapped` fire, silence it for the duration); prefer furchert-ch's kill switch `ANALYTICS_COLLECT_ENABLED=false` (manifest PR in the furchert-ch repo, Flux applies it, then `kubectl -n apps delete pod -l app=furchert-ch`); forget and DELETE keep working | the rollup kill switch is the environment variable `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED="false"` (data-service manifest PR; `SPRING_APPLICATION_JSON` outranks it, do not set both) |
+
+Capacity: the PostgreSQL volume is 10 GiB since homelab#359 (runbook "Growing the PostgreSQL volume").
 
 #### Cloudflare rules for web analytics (owner, dashboard)
 
@@ -2328,7 +2343,7 @@ The test passes only if `pg_restore` ended without errors (an index or constrain
 | `cf.client.bot` available | WAF custom rule editor (field list) | field accepted, else the fallback rule above |
 | `/api/v` outside the auth rate-limit rule | Security → WAF → Rate limiting rules | expression matches only `/oauth2/token` and `/login` |
 | n8n schedules versus the rollup runs | n8n UI → workflows → schedule triggers | no job fires in the minutes around 01:12 and 07:30 Europe/Zurich, or an overlap is recorded as harmless (the run takes seconds) |
-| PVC usage versus the expansion threshold | `kubectl -n apps exec postgresql-0 -c postgresql -- df -h "$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c 'SHOW data_directory;')"` and the Longhorn UI (block level) for `data-postgresql-0` | usage and the threshold from homelab-data-service#57 are recorded; analytics at its cap adds about 1.2 GB (spec §7.3), on 2026-11-08 (data-service#57) the filesystem was 2.3 G of 4.9 G (48 %) and the Longhorn block level 4.58 GiB of 5 GiB (about 92 %); confirm the unit in the Longhorn UI |
+| PVC usage versus the expansion threshold | `kubectl -n apps exec postgresql-0 -c postgresql -- df -h "$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c 'SHOW data_directory;')"` and the Longhorn UI (block level) for `data-postgresql-0` | usage is recorded against the 10 GiB volume of homelab#359; `WebAnalyticsTableLarge` alerts at 3 GiB of table size, analytics at its cap adds about 2.0 to 2.2 GB of total relation size (spec §7.3, §7.9), on 2026-11-08 (data-service#57) the filesystem was 2.3 G of 4.9 G (48 %) and the Longhorn block level 4.58 GiB of 5 GiB (about 92 %); confirm the unit in the Longhorn UI |
 
 ### NM-4: login-event secrets (auth-service → data-service)
 
@@ -3432,6 +3447,236 @@ kubectl -n apps delete pod -l app=club-mcp
 **L3.** Pattern B, no Flux: `kubectl -n apps scale deploy/club-mcp --replicas=0` (a later run of 55 restores the replica count from the manifest).
 
 Decommission: `scale --replicas=0`, delete the club-mcp route from `cf_ingress_body` and re-run 40, remove the CNAME, delete the `claude-club-mcp` client authorizations, then remove the manifests. **Remove the `claude-club-mcp` client before any auth-service rollback** to a release that does not know it, exactly as for the hub.
+
+### Growing the PostgreSQL volume (data-postgresql-0, homelab#359)
+
+Owner decision 2026-11-09 (homelab-data-service#57): the shared PostgreSQL volume `data-postgresql-0` (namespace `apps`) grows from 5 GiB to 10 GiB before the web analytics go-live (Epic #348). All steps here change the live cluster and are the owner's (or the main session's with an explicit go).
+
+**Facts.** PostgreSQL is a raw StatefulSet `postgresql` applied by `infra/playbooks/50_apps_infra.yml` (not a Helm release). Its `volumeClaimTemplates` are immutable, and a StatefulSet never resizes existing PVCs, so the size is changed in two parts: the PVC is patched (Longhorn expands the attached volume online, no pod restart expected), then the StatefulSet object is re-created from its live state with the new template size and the pod is adopted. The pod template is not touched, so the pod is not restarted. Longhorn cannot shrink a volume: the expansion is one-way. Replication is 2.
+
+**Window.** Between 09:00 and 00:30 Europe/Zurich: after the mba morning reboots (06:10 and 07:40) and the replica rebuilds that follow, and clear of the 02:00 snapshot and 03:00 backup. A full run of playbook 50 from `main` fails at the StatefulSet task (Forbidden, immutable field) between the merge of the size change and step S below: do not run it in that gap.
+
+**Shell.** Paste each block into a `bash` subshell (type `bash` first): the blocks use shell functions. macOS bash 3.2 has no bracketed paste, so a failing line does not stop the lines pasted after it: **no block uses `exit` in the local shell**, and step S puts all of its guards and the delete into one compound command. Brackets appear only as the `[ ... ]` test command or inside quotes, and there are no unquoted globs, so the blocks are safe in zsh too. Off the LAN, use the `tunnel` kubectl context or the one-shot SSH forward from "Off-LAN kubectl / Ansible Access" for `kc`, and the off-LAN SSH config (`-F ~/.ssh/homelab-offlan.conf`) for the node commands.
+
+#### P. Prechecks (read-only)
+
+```bash
+kc() { kubectl --request-timeout=20s "$@"; }
+WORK=$(mktemp -d)
+echo "scratch directory: $WORK"
+
+# P1: the StorageClass allows expansion (must print true)
+kc get sc longhorn -o jsonpath='{.allowVolumeExpansion}{"\n"}'
+
+# P2: the Longhorn volume is attached and healthy, size 5368709120
+VOL=$(kc -n apps get pvc data-postgresql-0 -o jsonpath='{.spec.volumeName}')
+echo "volume: $VOL"
+kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.state} {.status.robustness} {.spec.size}{"\n"}'
+
+# P3: replica nodes and their headroom (the expansion adds 5 GiB per replica)
+kc -n longhorn-system get replicas.longhorn.io -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeID,VOLUME:.spec.volumeName | grep "$VOL"
+kc -n longhorn-system get nodes.longhorn.io -o json | python3 -c 'import sys,json
+for n in json.load(sys.stdin)["items"]:
+    for name, d in n["status"].get("diskStatus", {}).items():
+        gib = 2**30
+        print(n["metadata"]["name"], name, "max %.1f avail %.1f scheduled %.1f reserved %.1f GiB" % (d["storageMaximum"]/gib, d["storageAvailable"]/gib, d["storageScheduled"]/gib, d.get("storageReserved", 0)/gib))'
+```
+
+Stop rule P3: both replica nodes must keep `scheduled + 5` within the schedulable maximum (maximum minus reserved, times the over-provisioning percentage, default 100) and `available − 5` above the minimal-available percentage (default 25) of the maximum. Reading on 2026-11-09 11:20: mba1 max 456.5 / avail 347.5 / scheduled 47.0 / reserved 137.0 GiB, mba2 max 109.6 / avail 44.7 / scheduled 5.0 / reserved 32.9 GiB; both pass (mba2: 39.7 > 27.4 and 10 ≤ 76.7). Re-read the numbers right before the expansion, and stop if a replica sits on an SD-card node close to its DiskPressure threshold.
+
+```bash
+# P4: usage for the record (filesystem, database sizes)
+kc -n apps exec postgresql-0 -c postgresql -- df -h /var/lib/postgresql/data
+kc -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SELECT datname, pg_size_pretty(pg_database_size(datname)) FROM pg_database ORDER BY pg_database_size(datname) DESC;"
+
+# P5: the StatefulSet and the pod belong together; record the pod uid
+kc -n apps get sts postgresql -o jsonpath='{.status.currentRevision} {.status.updateRevision} collision={.status.collisionCount}{"\n"}'
+kc -n apps get pod postgresql-0 -L controller-revision-hash
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount}{"\n"}'
+kc -n apps get sts postgresql -o jsonpath='template annotations: {.spec.template.metadata.annotations}{"\n"}'
+```
+
+P5 reading: `collisionCount` empty or 0, the template annotations empty, and the pod's `controller-revision-hash` equal to the StatefulSet's `updateRevision`. `currentRevision` differing from `updateRevision` is harmless as long as the pod carries the `updateRevision`. Eyeball `kc -n apps get sts postgresql -o yaml` against the StatefulSet task in `50_apps_infra.yml` (image digests, resources). Write down the pod uid.
+
+```bash
+# P6: drift check BEFORE the size change is merged (from a checkout of the PR branch or main with the tag).
+# Expect: the StatefulSet task is ok, changed=0
+ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset -e postgresql_storage_size=5Gi --check --diff
+```
+
+After the size change is merged, the same command without `-e` is expected to fail with Forbidden (immutable field): that is the reason for step S.
+
+**P7: engine start versus the newest `iscsid` on its node (read-only, homelab#362).** Each Longhorn engine caches the host process id of `iscsid` when its frontend starts (go-iscsi-helper, `NewNamespaceExecutor("iscsid", "/host/proc")`). If `iscsid` restarts afterwards on that node (for example through unattended upgrades and needrestart), the engine is **stale**: it fails every frontend refresh with `nsenter: cannot open /host/proc/<pid>/ns/mnt`, and an expansion hangs at the very end (see "If the expansion gets stuck"). A k3s restart alone does not change the `iscsid` pid, and the age of the instance-manager pod is not a usable signal. Upstream: longhorn/longhorn#10544, fixed in Longhorn 1.13.0 and backported to 1.11.3 and 1.12.1 (nothing for 1.7.x). Check right before the expansion:
+
+```bash
+ENG_NODE=$(kc -n longhorn-system get engines.longhorn.io -l longhornvolume="$VOL" -o jsonpath='{.items[0].spec.nodeID}')
+NODE_IP=$(kc get node "$ENG_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+echo "engine node: $ENG_NODE ($NODE_IP)"
+nodesh() { ssh "ansible@$NODE_IP" "bash -s -- $1"; }
+# off the LAN instead: nodesh() { ssh -F ~/.ssh/homelab-offlan.conf "ansible@$NODE_IP" "bash -s -- $1"; }
+nodesh "$VOL" <<'REMOTE'
+vol=$1
+now=$(date +%s); newest=0
+for p in $(pgrep -x iscsid); do
+  s=$(( now - $(ps -o etimes= -p "$p") ))
+  [ "$s" -gt "$newest" ] && newest=$s
+done
+if [ "$newest" -gt 0 ]; then
+  echo "newest iscsid started $(date -d @"$newest" -Is)"
+else
+  echo "iscsid is not running: every engine on this node counts as STALE"
+fi
+ps -eo pid=,etimes=,args= | while read -r pid et args; do
+  case " $args " in *" controller $vol "*) ;; *) continue ;; esac
+  st=$(( now - et ))
+  if [ "$newest" -eq 0 ] || [ "$st" -lt "$newest" ]; then v=STALE; else v=ok; fi
+  echo "$vol engine pid $pid started $(date -d @"$st" -Is) $v"
+done
+REMOTE
+```
+
+P7 reading: `ok` = the engine started after the newest `iscsid`: continue. `STALE` = the engine started before it, or `iscsid` is not running at all (the block then prints every engine as `STALE` and says so): refresh the engine first (sub-step P7m). No engine line at all = the engine process was not found on that node: stop and look (`ps -eo pid,lstart,args | grep '[c]ontroller pvc-'` on the node, check the exact arguments).
+
+**P7m: refresh a stale engine (MUTATION, only if P7 printed STALE; P itself is read-only).** Scale the workload to 0 so that the volume really detaches, then back to 1; the next attach starts a fresh engine. The outage is the same as the offline fallback: about 1 to 3 minutes without a database for every app. A plain `kubectl delete pod` is not enough: the volume may stay attached on the same node with the same engine.
+
+```bash
+kc -n apps scale sts postgresql --replicas=0
+kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.state}{"\n"}'
+# repeat the line above until it prints detached, then
+kc -n apps scale sts postgresql --replicas=1
+```
+
+Afterwards run P7 again (it must print `ok`) and P2.
+
+#### B. Backup first
+
+1. `scripts/backup-app-data.sh` (see "App-data backups to the operator's Mac (#64)"), started after 03:45 and finished with "Backup complete". restic does not hold PostgreSQL data; the Mac dump is the off-cluster copy (the `mcp_hub` database is excluded from it by design).
+2. **Mandatory manual Longhorn snapshot** (it is the only pre-change copy of `mcp_hub`). In the Longhorn UI (`kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80`, then `http://localhost:8080`): Volume `pvc-…` of `data-postgresql-0` → Take Snapshot, name `pre-expand-359`. Check:
+
+```bash
+kc -n longhorn-system get snapshots.longhorn.io -o json | python3 -c 'import sys,json
+ok = False
+for s in json.load(sys.stdin)["items"]:
+    if s["spec"].get("volume") == "'"$VOL"'":
+        print(s["metadata"]["name"], s.get("status", {}).get("readyToUse"))
+        if s["metadata"]["name"] == "pre-expand-359" and s.get("status", {}).get("readyToUse") is True:
+            ok = True
+print("pre-expand-359 ready" if ok else "STOP: pre-expand-359 is missing or not ready")
+sys.exit(0 if ok else 1)'
+```
+
+Stop before the PVC patch unless this prints `pre-expand-359 ready` (an older ready snapshot does not count; it is the only pre-change copy of `mcp_hub`).
+
+The snapshot is deleted a few days after step V (UI → Snapshots → Delete) so that it does not hold blocks for good.
+
+#### E. Expand (online)
+
+```bash
+# P2 again right before the patch: robustness must be healthy
+kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.status.state} {.status.robustness}{"\n"}'
+
+# 9: patch the PVC
+kc -n apps patch pvc data-postgresql-0 --type merge -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+
+# 10: watch until the capacity shows 10Gi (a FileSystemResizePending condition may appear briefly)
+kc -n apps get pvc data-postgresql-0 -w
+
+# 11: verify the filesystem, the database and the pod
+kc -n apps get pvc data-postgresql-0 -o jsonpath='{.status.capacity.storage}{"\n"}'
+kc -n longhorn-system get volumes.longhorn.io "$VOL" -o jsonpath='{.spec.size} {.status.robustness}{"\n"}'
+kc -n apps exec postgresql-0 -c postgresql -- df -h /var/lib/postgresql/data
+kc -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c "SELECT pg_size_pretty(pg_database_size('data_service'));"
+kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount}{"\n"}'
+```
+
+Stop rule E: **do not start step S unless step 10 shows `10Gi` capacity** and the filesystem shows about 9.8G; the pod uid and restart count are unchanged. After the offline fallback (scale to 0 replaces the pod) or a recovery, take the replacement pod's uid and restart count after verifying it as the new baseline; step S compares against the uid recorded at step 12.
+
+**If the expansion gets stuck** (the PVC stays at `5Gi` capacity with a resize condition, or Longhorn reports an expansion error): `kc -n apps describe pvc data-postgresql-0` and the Longhorn UI event log name the cause. A PVC request cannot go back to `5Gi` (Kubernetes only allows lowering a request to a value above the current capacity, `RecoverVolumeExpansionFailure`), so there is no revert; nothing else has changed and the data is unaffected.
+
+- **Disk space or a rebuilding replica:** fix that and wait, Longhorn retries.
+- **Stale engine (homelab#362).** Symptom: the PVC stays `Resizing`, the Longhorn event or the engine log shows `Failed to expand the frontend … nsenter: cannot open /host/proc/<pid>/ns/mnt: No such file or directory`, the replicas and the backend already show the new size, and the Longhorn attachment ticket `volume-expansion-controller` may keep the volume attached. A pod that is scaled down or restarted then cannot attach again (`volume attachment is being deleted`). Cause: the engine started before the newest `iscsid` on its node (precheck P7; the trigger is an `iscsid` restart, for example by unattended upgrades; upstream longhorn/longhorn#10544). Recovery is to delete the **instance-manager pod on that node**, which is costly:
+  1. List what runs on that node first: `kc -n longhorn-system get engines.longhorn.io,replicas.longhorn.io -o custom-columns=KIND:.kind,NAME:.metadata.name,NODE:.spec.nodeID,VOLUME:.spec.volumeName | grep "$ENG_NODE"` (the instance-manager pod deletion kills **all engines and all replica processes** on the node).
+  2. Every affected volume needs a healthy replica on another node, and no other node may be down or rebuilding. Expect replica rebuilds afterwards.
+  3. `kc -n longhorn-system get pods -o wide | grep instance-manager` finds the pod on the engine node; delete it with `kc -n longhorn-system delete pod <that pod>`. Workload pods restart through Longhorn's "delete workload pod when volume detaches unexpectedly" (only controller-managed pods); the stuck expansion then completes and the volume attaches.
+  4. Restart DB clients that crash-loop: `kc -n apps delete pod -l app=<name>` (auth-service, data-service, device-service, others that lost their connection). Worst case observed on 2026-11-09: about 6 minutes without the database.
+- **Longhorn refuses an online expansion altogether:** fallback in a quiet hour: `kc -n apps scale sts postgresql --replicas=0`, wait for the volume to detach, expand, `scale ... --replicas=1` (about 1 to 3 minutes without a database for every app).
+
+If the pod or the replicas were scaled or restarted during E (recovery), the StatefulSet template is unchanged and the live-object re-create of step S stays valid, but the pod has a new uid: take the current uid right before step 12, not the one from P5.
+
+#### Merge, then S: align the StatefulSet with git
+
+Merge the PR (size `10Gi` in the playbook) only after P, B and E. Then do S right away, because a full run of playbook 50 fails at the StatefulSet task until S is done.
+
+```bash
+kc() { kubectl --request-timeout=20s "$@"; }
+WORK=$(mktemp -d)
+set -o pipefail
+echo "scratch directory: $WORK"
+
+# 12: save the live object (no secret values in a StatefulSet) and record the CURRENT pod facts (a recovery during E changes the uid)
+kc -n apps get sts postgresql -o yaml > "$WORK/sts-before.yaml"
+kc -n apps get pod postgresql-0 -L controller-revision-hash
+POD_UID=$(kc -n apps get pod postgresql-0 -o jsonpath='{.metadata.uid}')
+POD_RESTARTS=$(kc -n apps get pod postgresql-0 -o jsonpath='{.status.containerStatuses[?(@.name=="postgresql")].restartCount}')
+POD_HASH=$(kc -n apps get pod postgresql-0 -o jsonpath='{.metadata.labels.controller-revision-hash}')
+STS_REV=$(kc -n apps get sts postgresql -o jsonpath='{.status.updateRevision}')
+echo "pod uid=$POD_UID restarts=$POD_RESTARTS revision-hash=$POD_HASH, statefulset updateRevision=$STS_REV"
+
+# 13: ONE compound command: the manifest is built and every guard is checked first, and the StatefulSet is deleted only if all of them passed (the delete runs without the 20 s request timeout of kc). It re-creates the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. Keep the window between delete and create short.
+if [ -n "$POD_UID" ] && [ -n "$POD_HASH" ] && [ "$POD_HASH" = "$STS_REV" ] \
+   && kc -n apps get sts postgresql -o json | python3 -c 'import sys,json
+o = json.load(sys.stdin)
+if o["spec"].get("replicas") != 1:
+    sys.exit("replicas is not 1")
+o["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] = "10Gi"
+for k in ("uid", "resourceVersion", "creationTimestamp", "generation", "managedFields"):
+    o["metadata"].pop(k, None)
+o["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
+o.pop("status", None)
+json.dump(o, sys.stdout)' > "$WORK/sts-new.json" \
+   && [ -s "$WORK/sts-new.json" ]; then
+  kubectl -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json" && RECREATED=1
+else
+  echo "STOP: a guard failed (no pod uid or revision hash, pod revision differs from updateRevision, replicas is not 1, or the manifest was not built); nothing was deleted"
+fi
+
+# 14: verify adoption automatically: same pod uid and restart count as recorded at step 12 (not as in P5), template 10Gi, StatefulSet ready
+kc -n apps get sts postgresql -o jsonpath='{.status.readyReplicas}/{.spec.replicas} {.spec.volumeClaimTemplates[0].spec.resources.requests.storage}{"\n"}'
+NOW_UID=$(kc -n apps get pod postgresql-0 -o jsonpath='{.metadata.uid}')
+NOW_RESTARTS=$(kc -n apps get pod postgresql-0 -o jsonpath='{.status.containerStatuses[?(@.name=="postgresql")].restartCount}')
+if [ -z "$RECREATED" ]; then
+  echo "NOT RECREATED (STOP above): nothing was changed or the re-create failed, check the StatefulSet before anything else"
+elif [ "$NOW_UID" = "$POD_UID" ] && [ "$NOW_RESTARTS" = "$POD_RESTARTS" ]; then
+  echo "ADOPTED: same pod, no restart (uid $NOW_UID, restarts $NOW_RESTARTS)"
+else
+  echo "CHANGED: uid or restart count differs (was $POD_UID/$POD_RESTARTS, now $NOW_UID/$NOW_RESTARTS): the pod was rolled or the delete did not run, check the StatefulSet and that all apps reconnect"
+fi
+kc -n apps get pod postgresql-0 -o jsonpath='owner={.metadata.ownerReferences[0].kind}{"\n"}'
+kc -n apps get sts postgresql -o jsonpath='{.status.currentRevision} {.status.updateRevision}{"\n"}'
+```
+
+Step 15 (from an up-to-date checkout of `main` after the merge, not from the PR branch):
+
+```bash
+ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset --check --diff
+# off the LAN (context tunnel, see "Off-LAN kubectl / Ansible Access"):
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset --check --diff -e kubeconfig="$HOME/.kube/config"
+```
+
+Step 15 reading: the check may show a diff only in `metadata.managedFields` (the field owner is now `kubectl-create`); that is not drift. **Any diff under `spec` is drift: stop and compare with `$WORK/sts-before.yaml`; do not run the tagged task for real.** No `--save-config` is needed while the task uses a strategic-merge patch; revisit this if the task ever switches to apply or server-side apply.
+
+If the pod was rolled anyway (the uid changed), PostgreSQL restarts from the same volume within a minute or two; check that all apps reconnect.
+
+**If step 13 printed STOP:** nothing was deleted; fix the cause and rerun steps 12 and 13.
+
+**If step 13 fails after the orphan delete:** the pod keeps running (orphaned). If the delete itself timed out, check `kc -n apps get sts postgresql`: while it still exists wait; once it is `NotFound`, run `kc -n apps create -f "$WORK/sts-new.json"` (or the tagged playbook run, `ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset`). While the StatefulSet is missing nobody restarts a crashed pod, so do not leave this state.
+
+#### V. Verify and record
+
+`kc -n apps get pods`, data-service `/actuator/health`, the PostgreSQL panels in Grafana, no new alerts. Record the sizes, the P3 headroom and the timeline in homelab#359 and homelab-data-service#57, delete the `pre-expand-359` snapshot a few days later, and update the spec wording (docs/100-web-analytics.md §7.3 and R6 still say "5 Gi").
+
+**Residual risks.** (1) If an mba node is lost for a long time, Longhorn rebuilds the second replica, possibly onto an SD-card node (raspi5 or raspi4) with little headroom; node or disk tags for Longhorn are a separate issue. (2) Block-level usage is larger than the filesystem usage because the 7 daily snapshots keep their blocks and trim never touches valid snapshots; the size reduction work is homelab-data-service#57. (3) Follow-up (checkbox on homelab#359): a PVC filesystem alert keyed on `kubelet_volume_stats_*`, not on the Longhorn actual size.
 
 ### Backup & rollback for image updates (Open WebUI, LiteLLM, n8n, PostgreSQL, cloudflared)
 

@@ -11,7 +11,7 @@
 # auth.postgresPassword + auth.replicationPassword:
 #   would be injected from 50_apps_infra.yml via all.sops.yml — not stored here.
 #
-# Storage: 5Gi Longhorn (default StorageClass — no storageClassName needed).
+# Storage: 10Gi Longhorn (default StorageClass — no storageClassName needed); live size since 2026-11-09 (homelab#359).
 # Replicas: 0 read replicas (single primary, homelab workload).
 
 auth:
@@ -22,7 +22,7 @@ auth:
 primary:
   persistence:
     enabled: true
-    size: 5Gi
+    size: 10Gi
   resources:
     # Conservative for ARM64 pi4 (4GB RAM) + pi5 (8GB RAM). Increase memory limit if
     # workloads use heavy connection pooling or prepared statements.
