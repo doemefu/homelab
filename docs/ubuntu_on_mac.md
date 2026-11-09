@@ -709,6 +709,7 @@ kubectl get nodes -n longhorn-system
 **Fehlerbehebung:**
 - *Node erscheint nicht in `kubectl get nodes`:* `journalctl -u k3s-agent -f` auf dem Node prüfen; häufig DNS-Auflösung des Control-Plane oder UFW-Block auf Port 6443
 - *Longhorn-Volume bleibt „Degraded":* Longhorn-Prereqs nicht gelaufen → `longhorn_prereqs`-Rolle nachziehen und `iscsid` neu starten
+  - **Warning (homelab#362):** restarting `iscsid` makes every running Longhorn engine on this node stale (online expansion hangs, detach fails). Restart it only on a node without attached Longhorn volumes, otherwise run the check in `DEPLOYMENT.md` → "Stale engines after an iscsid restart (#362)" afterwards and refresh the stale engines.
 - *`apple-bce` fehlt nach k3s-Start:* Kernel-Modul muss beim Boot geladen sein (Schritt 8 der Checkliste), sonst kann k3s-Agent nicht starten falls Tastatur/Trackpad als Abhängigkeit fehlen
 
 ---
