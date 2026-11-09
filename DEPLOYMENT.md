@@ -2213,10 +2213,11 @@ Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalProme
 kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-webanalytics -o yaml \
   | grep -oE '(alert|record): [A-Za-z:0-9]+'
 # Prometheus itself loaded the group (a failed reload would keep the old rules): port-forward, then
+nc -z localhost 19090 2>/dev/null && { echo "port 19090 is already in use: stop"; exit 1; }
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 19090:9090 >/dev/null &
 PF=$!
 for i in $(seq 1 20); do curl -sf http://localhost:19090/-/ready >/dev/null && break; sleep 1; done
-curl -sf http://localhost:19090/-/ready >/dev/null || { echo "port-forward not ready"; kill "$PF"; exit 1; }
+curl -sf http://localhost:19090/-/ready >/dev/null && kill -0 "$PF" || { echo "port-forward not ready"; kill "$PF"; exit 1; }
 curl -s http://localhost:19090/api/v1/rules | python3 -c 'import sys,json; g=[x for x in json.load(sys.stdin)["data"]["groups"] if x["name"]=="homelab-webanalytics"]; print([r["name"] for r in g[0]["rules"]])'
 # the metrics exist (counters are exported with 0 from startup)
 curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_accepted_total)'
@@ -2239,7 +2240,11 @@ Cloudflare is a processor here (edge and transport) and no analytics product is 
 
 - **Backups (Q2, spec §13):** the nightly dumps, Longhorn snapshots and the Mac app-data dumps are unchanged. They contain the pseudonymous visitor ids of `webanalytics.events`. Erasure and retention act on live data only; copies age out on their own rotation (the Mac dumps when the owner deletes them).
 - **NetworkPolicy:** unchanged. The collect path is furchert-ch → data-service `POST /api/webanalytics/events` on the existing policy (`apps/data-service`, TCP 8082 from the furchert-ch pods).
-- **Restore test of `data_service` (owner step, schema `webanalytics` only; not run unattended).** Paste the block into a `bash` subshell (type `bash` first): it uses shell functions and `exit`, which would otherwise close the interactive shell. The Longhorn volume of the shared PostgreSQL is already close to full at block level (data-service#57), so the test restores one schema, streams the dump over stdin (no copy in `/tmp`) and drops the scratch database at the end.
+- **Restore test of `data_service` (owner step, schema `webanalytics` only; not run unattended).** Paste each stage into a `bash` subshell (type `bash` first): the stages use shell functions and `exit`, which would otherwise close the interactive shell. The Longhorn volume of the shared PostgreSQL is already close to full at block level (data-service#57), so the test restores one schema, streams the dump over stdin (no copy in `/tmp`) and drops the scratch database at the end.
+
+Run the three stages in the **same `bash` session** (the functions and variables carry over).
+
+*Stage 1: prechecks and the live counts.*
 
 ```bash
 pg() { kubectl -n apps exec -i postgresql-0 -c postgresql -- "$@"; }
@@ -2247,41 +2252,47 @@ psqlq() { pg psql -U postgres -t -A "$@"; }
 WORK=$(mktemp -d)
 COUNTS="SELECT table_name || '=' || (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_schema='webanalytics' AND table_type='BASE TABLE' ORDER BY table_name;"
 
-# 0) Free space first. (a) The data directory must be below 70 % ...
+# 0) Free space first. (a) The data directory must be below 70 % and have room for three times the schema
+#    size plus 1 GiB (restore, restore-time writes and live-write headroom)
 DATADIR=$(pg psql -U postgres -t -A -c "SHOW data_directory;")
 pg df -h "$DATADIR"
-# (b) ... and every Longhorn replica node must have room for the restore: the filesystem figure does not
-# show the block-level usage of the replicas. Expected size of the restored schema:
-psqlq -d data_service -c "SELECT pg_size_pretty(sum(pg_total_relation_size(format('%I.%I', schemaname, tablename)::regclass))) FROM pg_tables WHERE schemaname='webanalytics';"
+SIZE=$(psqlq -d data_service -c "SELECT coalesce(sum(pg_total_relation_size(format('%I.%I', schemaname, tablename)::regclass)), 0) FROM pg_tables WHERE schemaname='webanalytics';")
+AVAIL=$(pg df -Pk "$DATADIR" | awk 'NR==2{print $4*1024}')
+echo "schema size $SIZE bytes, data directory available $AVAIL bytes"
+[ "$AVAIL" -gt $((3*SIZE + 1073741824)) ] || { echo "not enough free space on the data directory: stop"; exit 1; }
+# (b) ... and every Longhorn replica node must have room too: the filesystem figure does not show the
+#     block-level usage of the replicas
 kubectl -n longhorn-system get nodes.longhorn.io -o json | python3 -c 'import sys,json
 for n in json.load(sys.stdin)["items"]:
     for d in n["status"].get("diskStatus", {}).values():
         print(n["metadata"]["name"], "available %.1f GiB of %.1f GiB" % (d["storageAvailable"]/2**30, d["storageMaximum"]/2**30))'
 # Proceed only if each node has more available than three times the schema size plus 1 GiB. Otherwise stop.
 
-# 1) Live counts, taken right before the backup run (outside 01:12 and 07:30), then run the backup
+# 1) Live counts, taken right before the backup run (outside 01:12 and 07:30)
 psqlq -d data_service -c "$COUNTS" > "$WORK/counts-live.txt"
-#    scripts/backup-app-data.sh (see "App-data backups to the operator's Mac (#64)").
-#    When it finishes, set RUN to the directory printed by "Backup complete": never reuse an older run,
-#    matching counts would hide the mistake.
-RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>
+```
 
+*Between the stages:* run `scripts/backup-app-data.sh` (see "App-data backups to the operator's Mac (#64)"). When it finishes, set `RUN` to the directory printed by "Backup complete" (`RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>`); never reuse an older run, matching counts would hide the mistake.
+
+*Stage 2: restore and compare.*
+
+```bash
 # 2) The dump contains the schema (the container's pg_restore: no local PostgreSQL client needed)
-kubectl -n apps exec -i postgresql-0 -c postgresql -- pg_restore -l < "$RUN/pg-data_service.dump" | grep -E 'SCHEMA - webanalytics'
+pg pg_restore -l < "$RUN/pg-data_service.dump" | grep -E 'SCHEMA - webanalytics'
 
 # 3) Create the scratch database; STOP if it fails (see "After an interrupted test" below)
 pg createdb -U postgres restore_test || { echo "restore_test exists or createdb failed: stop"; exit 1; }
 # The schema is created in every case: pg_restore -n skips the SCHEMA entry
 psqlq -d restore_test -c "CREATE SCHEMA IF NOT EXISTS webanalytics;"
 # Restore only that schema, streamed over stdin; the errors are kept before any cleanup
-RESTORE_OK=1
-kubectl -n apps exec -i postgresql-0 -c postgresql -- pg_restore -U postgres -d restore_test --no-owner -n webanalytics \
-  < "$RUN/pg-data_service.dump" 2> "$WORK/restore.err" || RESTORE_OK=0
+RESTORE_OK=1; SAVED=1
+pg pg_restore -U postgres -d restore_test --no-owner -n webanalytics < "$RUN/pg-data_service.dump" 2> "$WORK/restore.err" || RESTORE_OK=0
 [ -s "$WORK/restore.err" ] && RESTORE_OK=0
 if [ "$RESTORE_OK" = 0 ]; then
-  cp "$WORK/restore.err" "$RUN/restore-test.err" \
-    && echo "pg_restore failed or reported errors: details in $RUN/restore-test.err; the test FAILS, skip step 4 and run step 5" \
-    || echo "could not save the errors, they stay in $WORK/restore.err (keep that directory); the test FAILS, run step 5"
+  cp "$WORK/restore.err" "$RUN/restore-test.err" && cmp -s "$WORK/restore.err" "$RUN/restore-test.err" || SAVED=0
+  [ "$SAVED" = 1 ] \
+    && echo "pg_restore failed or reported errors: details in $RUN/restore-test.err; the test FAILS, skip step 4 and run stage 3" \
+    || echo "could not save the errors completely, they stay in $WORK/restore.err (keep that directory); the test FAILS, run stage 3"
 fi
 
 # 4) Only when RESTORE_OK=1: counts must match for every table, and at least one non-empty table must be among them
@@ -2290,16 +2301,20 @@ if [ "$RESTORE_OK" = 1 ]; then
   diff "$WORK/counts-live.txt" "$WORK/counts-restored.txt" && echo "counts match"
   grep -vE '=0$' "$WORK/counts-live.txt" | head -3
 fi
+```
 
-# 5) Cleanup, mandatory
-pg dropdb -U postgres restore_test
-# keep $WORK only when the error file could not be saved
-[ "$RESTORE_OK" = 1 ] || [ -s "$RUN/restore-test.err" ] && rm -rf "$WORK"
+*Stage 3: cleanup, mandatory.*
+
+```bash
+# 5) Drop the scratch database; if this fails, verify and finish the cleanup by hand before anything else
+pg dropdb -U postgres restore_test || { echo "dropdb failed: check with psqlq -d postgres -c '\l', drop restore_test, then continue"; exit 1; }
+# keep $WORK when the error file could not be saved completely
+{ [ "$RESTORE_OK" = 1 ] || [ "$SAVED" = 1 ]; } && rm -rf "$WORK"
 ```
 
 The test passes only if `pg_restore` ended without errors (an index or constraint can fail after the rows loaded, with equal counts) and the counts match. If events were written between the count snapshot and the dump, the `events` count can differ by the rows of that window; rerun outside traffic or compare the aggregate tables only and record the reason.
 
-**After an interrupted test.** A leftover `restore_test` blocks the next `createdb`. Check that no restore is still running (`SELECT pid, state FROM pg_stat_activity WHERE datname='restore_test';` through `psqlq -d postgres`; wait or terminate it), then `dropdb -U postgres restore_test` and start again from step 0.
+**After an interrupted test.** A leftover `restore_test` blocks the next `createdb`. Check that no restore is still running (`SELECT pid, state FROM pg_stat_activity WHERE datname='restore_test';` through `psqlq -d postgres`; wait or terminate it), then drop the scratch database inside the PostgreSQL container with `kubectl -n apps exec postgresql-0 -c postgresql -- dropdb -U postgres restore_test` (never a bare `dropdb`, which would run on the Mac) and start again from stage 1.
 
 **Before go-live the result can be inconclusive.** A fresh installation with the rollup disabled can have no analytics rows at all (every count `0`); a correct restore then cannot meet the "one non-empty table" criterion. Record "inconclusive" in homelab#351 and repeat the test after the first permitted rollup or the first real events.
 
