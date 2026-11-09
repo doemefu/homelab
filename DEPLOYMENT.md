@@ -3441,7 +3441,7 @@ Owner decision 2026-11-09 (homelab-data-service#57): the shared PostgreSQL volum
 
 **Window.** Between 09:00 and 00:30 Europe/Zurich: after the mba morning reboots (06:10 and 07:40) and the replica rebuilds that follow, and clear of the 02:00 snapshot and 03:00 backup. A full run of playbook 50 from `main` fails at the StatefulSet task (Forbidden, immutable field) between the merge of the size change and step S below: do not run it in that gap.
 
-**Shell.** Paste each block into a `bash` subshell (type `bash` first): the blocks use shell functions and `exit`. Brackets appear only as the `[ ... ]` test command or inside quotes, and there are no unquoted globs, so the blocks are safe in zsh too. Off the LAN, use the `tunnel` kubectl context or the one-shot SSH forward from "Off-LAN kubectl / Ansible Access" for `kc`, and the off-LAN SSH config (`-F ~/.ssh/homelab-offlan.conf`) for the node commands.
+**Shell.** Paste each block into a `bash` subshell (type `bash` first): the blocks use shell functions. macOS bash 3.2 has no bracketed paste, so a failing line does not stop the lines pasted after it: **no block uses `exit` in the local shell**, and step S puts all of its guards and the delete into one compound command. Brackets appear only as the `[ ... ]` test command or inside quotes, and there are no unquoted globs, so the blocks are safe in zsh too. Off the LAN, use the `tunnel` kubectl context or the one-shot SSH forward from "Off-LAN kubectl / Ansible Access" for `kc`, and the off-LAN SSH config (`-F ~/.ssh/homelab-offlan.conf`) for the node commands.
 
 #### P. Prechecks (read-only)
 
@@ -3498,7 +3498,7 @@ ENG_NODE=$(kc -n longhorn-system get engines.longhorn.io -l longhornvolume="$VOL
 NODE_IP=$(kc get node "$ENG_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 echo "engine node: $ENG_NODE ($NODE_IP)"
 nodesh() { ssh "ansible@$NODE_IP" "bash -s -- $1"; }
-# off the LAN instead: nodesh() { ssh -F ~/.ssh/homelab-offlan.conf "$ENG_NODE" "bash -s -- $1"; }
+# off the LAN instead: nodesh() { ssh -F ~/.ssh/homelab-offlan.conf "ansible@$NODE_IP" "bash -s -- $1"; }
 nodesh "$VOL" <<'REMOTE'
 vol=$1
 now=$(date +%s); newest=0
@@ -3506,20 +3506,23 @@ for p in $(pgrep -x iscsid); do
   s=$(( now - $(ps -o etimes= -p "$p") ))
   [ "$s" -gt "$newest" ] && newest=$s
 done
-[ "$newest" -gt 0 ] || { echo "iscsid is not running"; exit 0; }
-echo "newest iscsid started $(date -d @"$newest" -Is)"
+if [ "$newest" -gt 0 ]; then
+  echo "newest iscsid started $(date -d @"$newest" -Is)"
+else
+  echo "iscsid is not running: every engine on this node counts as STALE"
+fi
 ps -eo pid=,etimes=,args= | while read -r pid et args; do
   case " $args " in *" controller $vol "*) ;; *) continue ;; esac
   st=$(( now - et ))
-  [ "$st" -lt "$newest" ] && v=STALE || v=ok
+  if [ "$newest" -eq 0 ] || [ "$st" -lt "$newest" ]; then v=STALE; else v=ok; fi
   echo "$vol engine pid $pid started $(date -d @"$st" -Is) $v"
 done
 REMOTE
 ```
 
-P7 reading: `ok` = the engine started after the newest `iscsid`: continue. `STALE` = the engine started before it: refresh the engine first (sub-step P7m). No engine line at all = the engine process was not found on that node: stop and look (`ps -eo pid,lstart,args | grep '[c]ontroller pvc-'` on the node, check the exact arguments).
+P7 reading: `ok` = the engine started after the newest `iscsid`: continue. `STALE` = the engine started before it, or `iscsid` is not running at all (the block then prints every engine as `STALE` and says so): refresh the engine first (sub-step P7m). No engine line at all = the engine process was not found on that node: stop and look (`ps -eo pid,lstart,args | grep '[c]ontroller pvc-'` on the node, check the exact arguments).
 
-**P7m: refresh a stale engine (MUTATION, only if P7 printed STALE; P itself is read-only).** Scale the workload to 0 so that the volume really detaches, then back to 1; the next attach starts a fresh engine. The outage is the same as the offline fallback: about 1 to 3 minutes without a database for every app. A plain `kubectl delete pod` is not enough: the volume stays attached on the same node with the same engine.
+**P7m: refresh a stale engine (MUTATION, only if P7 printed STALE; P itself is read-only).** Scale the workload to 0 so that the volume really detaches, then back to 1; the next attach starts a fresh engine. The outage is the same as the offline fallback: about 1 to 3 minutes without a database for every app. A plain `kubectl delete pod` is not enough: the volume may stay attached on the same node with the same engine.
 
 ```bash
 kc -n apps scale sts postgresql --replicas=0
@@ -3597,38 +3600,55 @@ echo "scratch directory: $WORK"
 
 # 12: save the live object (no secret values in a StatefulSet) and record the CURRENT pod facts (a recovery during E changes the uid)
 kc -n apps get sts postgresql -o yaml > "$WORK/sts-before.yaml"
-kc -n apps get sts postgresql -o jsonpath='replicas={.spec.replicas} ready={.status.readyReplicas} currentRevision={.status.currentRevision} updateRevision={.status.updateRevision}{"\n"}'
 kc -n apps get pod postgresql-0 -L controller-revision-hash
-kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount}{"\n"}'
-# Stop here unless the pod's controller-revision-hash equals the StatefulSet's updateRevision (a pod on another revision would be rolled after the re-create).
+POD_UID=$(kc -n apps get pod postgresql-0 -o jsonpath='{.metadata.uid}')
+POD_RESTARTS=$(kc -n apps get pod postgresql-0 -o jsonpath='{.status.containerStatuses[?(@.name=="postgresql")].restartCount}')
+POD_HASH=$(kc -n apps get pod postgresql-0 -o jsonpath='{.metadata.labels.controller-revision-hash}')
+STS_REV=$(kc -n apps get sts postgresql -o jsonpath='{.status.updateRevision}')
+echo "pod uid=$POD_UID restarts=$POD_RESTARTS revision-hash=$POD_HASH, statefulset updateRevision=$STS_REV"
 
-# 13: re-create the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. It copies spec.replicas too, which must be 1 (the guard stops otherwise). Keep the window between delete and create short.
-kc -n apps get sts postgresql -o json | python3 -c 'import sys,json
+# 13: ONE compound command: the manifest is built and every guard is checked first, and the StatefulSet is deleted only if all of them passed (the delete runs without the 20 s request timeout of kc). It re-creates the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. Keep the window between delete and create short.
+if [ -n "$POD_UID" ] && [ "$POD_HASH" = "$STS_REV" ] \
+   && kc -n apps get sts postgresql -o json | python3 -c 'import sys,json
 o = json.load(sys.stdin)
 if o["spec"].get("replicas") != 1:
-    sys.exit("replicas is not 1: stop")
+    sys.exit("replicas is not 1")
 o["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] = "10Gi"
 for k in ("uid", "resourceVersion", "creationTimestamp", "generation", "managedFields"):
     o["metadata"].pop(k, None)
 o["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
 o.pop("status", None)
-json.dump(o, sys.stdout)' > "$WORK/sts-new.json" || { echo "could not build the manifest: stop, nothing was deleted"; exit 1; }
-[ -s "$WORK/sts-new.json" ] || { echo "empty manifest: stop, nothing was deleted"; exit 1; }
-# the delete runs without the 20 s request timeout of kc
-kubectl -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json"
+json.dump(o, sys.stdout)' > "$WORK/sts-new.json" \
+   && [ -s "$WORK/sts-new.json" ]; then
+  kubectl -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json"
+else
+  echo "STOP: a guard failed (no pod uid, pod revision differs from updateRevision, replicas is not 1, or the manifest was not built); nothing was deleted"
+fi
 
-# 14: verify adoption: same uid and restart count as recorded at step 12 (not as in P5), template 10Gi, StatefulSet ready
+# 14: verify adoption automatically: same pod uid and restart count as recorded at step 12 (not as in P5), template 10Gi, StatefulSet ready
 kc -n apps get sts postgresql -o jsonpath='{.status.readyReplicas}/{.spec.replicas} {.spec.volumeClaimTemplates[0].spec.resources.requests.storage}{"\n"}'
-kc -n apps get pod postgresql-0 -o jsonpath='uid={.metadata.uid} restarts={.status.containerStatuses[?(@.name=="postgresql")].restartCount} owner={.metadata.ownerReferences[0].kind}{"\n"}'
+NOW_UID=$(kc -n apps get pod postgresql-0 -o jsonpath='{.metadata.uid}')
+NOW_RESTARTS=$(kc -n apps get pod postgresql-0 -o jsonpath='{.status.containerStatuses[?(@.name=="postgresql")].restartCount}')
+if [ "$NOW_UID" = "$POD_UID" ] && [ "$NOW_RESTARTS" = "$POD_RESTARTS" ]; then
+  echo "ADOPTED: same pod, no restart (uid $NOW_UID, restarts $NOW_RESTARTS)"
+else
+  echo "CHANGED: uid or restart count differs (was $POD_UID/$POD_RESTARTS, now $NOW_UID/$NOW_RESTARTS): the pod was rolled or the delete did not run, check the StatefulSet and that all apps reconnect"
+fi
+kc -n apps get pod postgresql-0 -o jsonpath='owner={.metadata.ownerReferences[0].kind}{"\n"}'
 kc -n apps get sts postgresql -o jsonpath='{.status.currentRevision} {.status.updateRevision}{"\n"}'
+```
 
-# 15: drift check against git
+Step 15 (from an up-to-date checkout of `main` after the merge, not from the PR branch):
+
+```bash
 ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset --check --diff
 ```
 
-Step 15 reading: the first check may show a diff only in `metadata.managedFields` (the field owner is now `kubectl-create`); that is not drift. Any diff under `spec` is drift: stop and compare with `$WORK/sts-before.yaml`. Optionally run the tagged task once for real (`ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset`); a second `--check --diff` must then be clean. No `--save-config` is needed while the task uses a strategic-merge patch; revisit this if the task ever switches to apply or server-side apply.
+Step 15 reading: the check may show a diff only in `metadata.managedFields` (the field owner is now `kubectl-create`); that is not drift. **Any diff under `spec` is drift: stop and compare with `$WORK/sts-before.yaml`; do not run the tagged task for real.** No `--save-config` is needed while the task uses a strategic-merge patch; revisit this if the task ever switches to apply or server-side apply.
 
 If the pod was rolled anyway (the uid changed), PostgreSQL restarts from the same volume within a minute or two; check that all apps reconnect.
+
+**If step 13 printed STOP:** nothing was deleted; fix the cause and rerun steps 12 and 13.
 
 **If step 13 fails after the orphan delete:** the pod keeps running (orphaned). If the delete itself timed out, check `kc -n apps get sts postgresql`: while it still exists wait; once it is `NotFound`, run `kc -n apps create -f "$WORK/sts-new.json"` (or the tagged playbook run, `ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset`). While the StatefulSet is missing nobody restarts a crashed pod, so do not leave this state.
 
