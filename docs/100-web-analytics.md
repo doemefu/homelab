@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/100-web-analytics.md` forwards here (since homelab#349, WA-0). Relative `adr/` links resolve to `docs/adr/` in this repo. The specialist reports behind §15 are local-only and not part of this repo.
 
-**Status:** Accepted (rev 3.6, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.6 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
+**Status:** Accepted (rev 3.7, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.7 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
 **Epic:** `doemefu/homelab#348` · **Parent worklog:** `20261108-163648-web-analytics-epic-caea` (local-only)
 **Canonical location:** this file (`infrastructure/docs/100-web-analytics.md`). The parent workspace file `docs/100-web-analytics.md` is a forwarder (since `homelab#349`), following the `060` precedent.
 **ADR:** none new. [ADR 0002](adr/0002-network-telemetry-ownership.md) decisions 1 and 2 cover this (analytical data plane; one store, one owner); the push write path is a recorded exception to its decision 3 (§1.4); ADR 0002 carries the dated amendment of 2026-11-08 (WA-0).
@@ -189,14 +189,14 @@ Order: `hero`, `so-arbeite-ich`, `beispiel`, `preise`, `daten`, `ueber-mich`, `f
 | In flight | one request at a time per tab |
 | First flush across tabs | the first flush after the tracker starts in a tab runs inside `navigator.locks.request('fa-first-flush', …)`, so first flushes of parallel tabs are serialised and only the first one can mint `fa_vid`; the next tab's request then carries the cookie. Without the Web Locks API (pre-2022 browsers) the flush runs unserialised and two tabs may mint two ids; the second `Set-Cookie` wins and the first id stays a one-request orphan. This is a documented data-quality limit (at most one extra visitor per browser, only at the moment of consent) |
 | Landing flush | on tracker start and right after Accept the landing pageview is flushed immediately (this mints `fa_vid` early), not on the usual batching delay; the contact form's submit relies on it (§5.9) |
-| Retry | network error or 5xx: re-queue, retry after 5 s, then 30 s, then drop; no retry on 4xx; 429 pauses flushing 60 s |
+| Retry | network error or 5xx: re-queue, retry after 5 s, then 30 s, then drop; no retry on 4xx; 429 pauses flushing for `Retry-After` (1 to 600 s), 60 s when the header is missing or invalid |
 | Queue | max 100 events in memory; never persisted |
 | Lifecycle | no `unload`/`beforeunload` listeners; listeners stay on `pagehide` |
 
 ### 3.10 Mounting, singletons, bundle
 
 - `<Analytics />` (client) inside `<Providers>` in `src/app/[locale]/layout.tsx`, after `<Footer />`, outside `<main className="page-enter">`.
-- Client tracker: module singleton; `start()` idempotent; unmount never stops it; withdrawal, opt-out or sign-in call `stop()`.
+- Client tracker: module singleton, and the browser consent controller is a singleton on `globalThis` (a `Symbol.for` key under `furchert.analytics.`), so the separately loaded bundles share one instance; `start()` idempotent; unmount never stops it; withdrawal, opt-out or sign-in call `stop()`.
 - **Server singletons:** forward queue, per-scope token caches and [WA-5] rate limiters on `globalThis[Symbol.for('furchert.analytics.<name>')]`, shared by `/api/v`, forget and the Server Action. Verify in phase 1 (WA-2b) with a production build.
 - Budget (gzip, enforced by a post-build CI step in furchert-ch): the consent layer is async-only (nothing of it in the initial or prerendered bundle) in one controller chunk: controller ≤ 3 200 B (re-baselined after the WA-2b growth), bar ≤ 1.0 KB, privacy link ≤ 0.75 KB. The tracker is async-only, one chunk, loaded via dynamic `import()` after Allow: measured size + 10 %, at most 4 265 B. Post-build check with `node:zlib`.
 - Pure `.ts` modules with injected `window`/`document`/clock (vitest `node`). `navigator.webdriver === true` → tracker off (cheap, early).
@@ -218,7 +218,7 @@ Order: `hero`, `so-arbeite-ich`, `beispiel`, `preise`, `daten`, `ueber-mich`, `f
 | signed in | shown | off; server drops anyway |
 | Esc on the bar | hidden until the next document load; nothing stored | off |
 
-Until WA-5, a GPC/DNT browser simply sees the bar (dark launch: nobody sees it before go-live). An explicit Allow via footer settings overrides GPC/DNT.
+An explicit user Decline after a signal decline rewrites the stored record with `by: "user"` and a new `at` (today). Until WA-5, a GPC/DNT browser simply sees the bar (dark launch: nobody sees it before go-live). An explicit Allow via footer settings overrides GPC/DNT.
 
 ### 4.2 Storage
 
@@ -226,7 +226,7 @@ Until WA-5, a GPC/DNT browser simply sees the bar (dark launch: nobody sees it b
 |---|---|---|---|---|
 | `fa_consent` | `localStorage` | `{"v": <int>, "choice": "granted" \| "denied", "by": "user" \| "signal", "at": "YYYY-MM-DD"}` | on Allow, Decline, [WA-5] signal | `at` + 12 months (fixed), version mismatch (the expired or wrong-version record may be removed before a choice), new choice |
 | `fa_vid` | cookie, set only by the server | `<uuid v4>.<consent version>` | by `POST /api/v` when absent/stale, `cv` current and `consentDate` valid | `POST /api/v/forget`, expiry |
-| `fa_forget` [WA-5] | cookie, set only by the server | one or two `<uuid v4>` values separated by `.` (a valid cookie octet that does not occur in a UUID): the ids whose erasure is still pending | by `POST /api/v/forget` when the erasure of at least one id could not be completed (503) | by the next successful forget (all listed ids deleted); `Max-Age` 30 days |
+| `fa_forget` [WA-5] | cookie, set only by the server | up to four `<uuid v4>` values separated by `.` (a valid cookie octet that does not occur in a UUID; duplicates removed, the oldest dropped when more are pending): the ids whose erasure is still pending | by `POST /api/v/forget` when the erasure of at least one id could not be completed (503, or a guard error 408/413 with the request's ids) | by the next successful forget (all listed ids deleted); `Max-Age` 30 days |
 | `fa_optout` | `localStorage` | `"1"` | owner switch | the same switch |
 | `fa_forget_pending` | `localStorage` | `"1"` | before a forget call | after forget answered 204, or when a pending-forget run before a new Allow or at load ended (§4.4) |
 
@@ -243,12 +243,12 @@ Integer `ANALYTICS_CONSENT_VERSION` (start `1`) used by bar, `/api/v` and Server
 | Decline on the bar | store `denied`, set `fa_forget_pending`, `POST /api/v/forget` | expire `fa_vid` | plus: purge that id's queued events, wait for an in-flight batch, then delete synchronously (§5.4) |
 | Withdrawal (Allow → Decline) | store `denied`; `stop()`; drop the client queue; **abort every in-flight `/api/v` request via its `AbortController`**; only then set `fa_forget_pending` and `POST /api/v/forget` | as above | as above |
 | GPC/DNT auto-decline | — | — | client [WA-5]: store `denied` (`by: "signal"`), forget once |
-| Owner switch on | set `fa_optout`, abort in-flight requests, forget | as above | as above |
+| Owner switch on | write `fa_optout` first, then abort in-flight requests, forget; `fa_consent` untouched | as above | as above |
 | Forget failed (network error, 429 or 503) | `fa_forget_pending` stays; the next document load (or, after a 429, `Retry-After`) retries forget once, only with a stored `denied` choice or opt-out; with a stored `granted` choice at load, one forget runs before the tracker starts (the marker is dropped on any answer); with no stored choice it waits for the next choice (below) | — | 503 sets `fa_forget` so the retry still knows the id; 429 keeps `fa_vid` (§5.4) |
 
 **Race with an in-flight first collect.** Withdrawal writes `denied` before anything else, so no new flush starts; it aborts in-flight requests, so their responses are discarded by the browser; and forget runs strictly after the abort. A `Set-Cookie: fa_vid` from a collect response that the browser had already processed before the abort is cleared again by the forget response, which arrives later, on every forget response except 429 and a network failure (there the pending-forget retry covers it). `/api/v` itself never mints when the envelope does not carry a current `cv` and a valid `consentDate` (§5.3 step 10 runs before step 12); the tracker only sends while the stored choice is `granted`, so a withdrawn or absent consent state never produces a request that could mint.
 
-**Pending forget and re-consent (`fa_forget_pending`).** At document load: choice `granted` with the marker set → send one forget, await it, drop the marker whatever the answer, then start the tracker; "abandoned" means any answer other than 204 (a 429, 503 or network error does not block the tracker). No stored choice with the marker set → no network request before a choice (§1.4); the marker is kept and sent with the next choice (Decline sends its forget anyway; Allow runs the pending forget first and awaits it before the tracker starts). The timed retry runs only with a stored choice `denied` or while opted out, never before a choice and never while tracking is allowed. The pending forget therefore never erases the new consented events. If an Allow-triggered forget is abandoned (for example 503), `fa_forget` stays and nothing retries it until the next withdrawal or Decline; the old id then stays until that point or until raw retention removes it. After an abandoned 429 the same applies with `fa_vid` kept: the tracker starts on the same id whose erasure was requested, so the new consented events are recorded under it and its earlier events stay linked to it until the next withdrawal (accepted residual, R14).
+**Pending forget and re-consent (`fa_forget_pending`).** At document load: choice `granted` with the marker set → send one forget, await it, drop the marker whatever the answer, then start the tracker; "abandoned" means any answer other than 204 (a 429, 503 or network error does not block the tracker). No stored choice with the marker set → no network request before a choice (§1.4); the marker is kept and sent with the next choice (Decline sends its forget anyway; Allow runs the pending forget first and awaits it before the tracker starts). The timed retry runs only with a stored choice `denied` or while opted out, never before a choice and never while tracking is allowed. The pending forget therefore never erases the new consented events. If an Allow-triggered forget is abandoned (for example 503), `fa_forget` stays and nothing in the browser retries it until the next withdrawal or Decline; furchert-ch's bounded server-side retry (§5.4, 24 h, in memory) may still erase it, otherwise the old id stays until that point or until raw retention removes it. After an abandoned 429 the same applies with `fa_vid` kept: the tracker starts on the same id whose erasure was requested, so the new consented events are recorded under it and its earlier events stay linked to it until the next withdrawal (accepted residual, R14).
 
 **Residual risk (accepted, R13).** Aborting a browser request does not stop the server from finishing it, and a valid `cv`/`consentDate` does not prove that consent is still granted. An event from a collect that completes after abort and forget, or from a second tab's id minted without Web Locks (§3.9), can therefore end up under a pseudonymous id that the browser no longer holds. Such an orphan id is unlinkable to any person (never exposed, no join, aggregate-only analysis), expires with raw retention, and from WA-5 the tombstone rejects late events for an id that was erased. The forget response clears `fa_vid` again after the abort (every response except 429; after a network failure or 429 the `fa_forget_pending` retry does it), so a late collect `Set-Cookie` does not survive in the browser.
 
@@ -335,8 +335,12 @@ Steps 1 to 4 (body `{}`). **Never subject to the collect rate limits** (§5.8) a
 - **Early (WA-2b):** only expires the cookie; always 204.
 - **[WA-5] own limit:** 30 forget requests per key per minute (generous; a user clicks Decline a few times at most). Above it the response is **429 with `Retry-After`** and **keeps `fa_vid`** (nothing is cleared, nothing is deleted): the limit is keyed by IP, so another visitor behind the same NAT may have used the budget, and this visitor's erasure is then neither done nor pending. Tracking is already stopped client-side by the stored `denied` state, and the tracker keeps `fa_forget_pending` and retries forget on the next document load or after `Retry-After`, like the 503 path. "Clears the cookie first" therefore applies to every response except 429.
 - **[WA-5] durable erasure:** the ids are taken from the cookies, never from the body: `fa_vid` and `fa_forget`; when both are present **both ids are erased** (`fa_forget` has `Path=/api/v/forget`, so the collect route never sees it). The handler purges those ids' events from the forward queue, waits until a batch currently in flight has completed (so no event of those ids can be sent afterwards), then calls `DELETE /api/webanalytics/visitors/{uuid}` **synchronously** with a bounded retry (3 attempts, 1 s apart, 3 s timeout each, ≤ 12 s in total) before answering. Worst case for one forget is about 22 s (≤ 10 s waiting for an in-flight batch, §5.10, plus ≤ 12 s of DELETE retries); the client sends forget with a keepalive `fetch` and never blocks the UI on it:
-  - data-service answered 204 → respond 204 and clear `fa_forget` (`Max-Age=0`);
-  - data-service unreachable or 5xx after the retries → respond **503** and set `fa_forget=<uuid>[.<uuid>]` (§4.2) holding only the ids not yet deleted (an id that was deleted is not retried), so the ids survive the cleared `fa_vid`; the tracker keeps `fa_forget_pending` in `localStorage` and retries forget once on the next document load.
+  - data-service answered 204 → respond 204 and clear `fa_vid` and `fa_forget` (`Max-Age=0`);
+  - data-service unreachable or 5xx after the retries, or an unexpected error after the guard with known ids → respond **503** and set `fa_forget=<uuid>[.<uuid>…]` (§4.2, at most four ids, newest kept, `fa_vid` last) holding only the ids not yet deleted (an id that was deleted is not retried), so the ids survive the cleared `fa_vid`; the tracker keeps `fa_forget_pending` in `localStorage` and retries forget once on the next document load.
+  - Guard errors: a request that fails a guard (408 slow body, 413 too large) clears `fa_vid` and, like 503, sets `fa_forget` with the request's ids.
+- **[WA-5] global bounds:** besides the per-key limit, at most 4 erasures run at once (checked before any window is charged) and 120 forget requests per minute are accepted globally; over either bound the answer is 429 with `Retry-After` and no `Set-Cookie` (`fa_vid` is kept).
+- **[WA-5] bounded server-side retry:** failed ids are also retried by furchert-ch every 5 minutes for 24 hours (at most 1 000 ids, at most 20 per sweep, one background job at a time that never takes one of the 4 user slots, stopping at the first failure; kept in memory and lost on restart, the browser's `fa_forget` retry remains). After a timed-out wait for the in-flight batch, one re-DELETE runs once that attempt has settled.
+- **[WA-5] erased-id set:** the forward queue keeps the erased ids for 2 hours (at most 10 000, oldest dropped): their events are never enqueued or resent.
 
 ### 5.5 Canonicalisation and allowlists (C7, C8; WA-2b)
 
@@ -374,7 +378,10 @@ In-process sliding windows (contact limiter pattern; valid with `replicas: 1`; w
 | per key, `fa_vid` mints | `/api/v` | 5 / hour |
 | global | `/api/v` | 300 requests / 60 s **and** 2 000 events / 60 s |
 | per key | `/api/v/forget` | 30 requests / 60 s; over it 429 with `Retry-After`, `fa_vid` kept, the tracker retries (§5.4) |
+| global | `/api/v/forget` | 4 concurrent erasures (checked before any window is charged) and 120 requests / 60 s; over it 429 with `Retry-After`, `fa_vid` kept (§5.4) |
 | tracked keys | each limiter | 10 000, oldest evicted |
+
+Every 429 of these limiters carries a `Retry-After` of at most 600 s.
 
 Batching check: one active visitor sends ≤ 8 requests/min at peak and 1 to 3 typically, ~20 events per 10 min; the per-key limits admit 3 to 10 concurrent visitors behind one NAT. 20 events fit 8 KiB.
 
@@ -396,14 +403,14 @@ Batching check: one active visitor sends ≤ 8 requests/min at peak and 1 to 3 t
 | Item | Rule |
 |---|---|
 | Model | re-serialise from the validated model; add `edgeDrops` counts |
-| Order | one ordered pipeline for batches; [WA-5] forget waits for the in-flight batch before its synchronous delete (§5.4) |
+| Order | one ordered pipeline for batches; [WA-5] it becomes two lanes (`goal` and `enquiry` form a priority lane, analytics events the second lane), batches hold their own item references and are removed by identity, never by position, and a failed batch is retried with the same composition; [WA-5] forget waits for the in-flight batch before its synchronous delete (§5.4) |
 | Queue | 2 000 events; overflow dropped and counted |
 | Batches | ≤ 200 events **and** ≤ 48 KiB serialised (data-service caps at 200 events and 64 KiB; the margin covers envelope and encoding); a batch reaching either bound is closed and a new one started |
 | Flush | every 5 s or when a batch is full; one in flight; forward request timeout 10 s (async queue, no user waits; paired with data-service `statement_timeout` 2 s, §6.2) |
 | Retry and `edgeDrops` | on a retry of a batch furchert-ch sends `edgeDrops` zeroed (only the first attempt carries them). A replay after a lost response can still double-count edge drops: accepted data-quality residual |
 | Circuit | open 60 s after 3 consecutive failures |
 | Age | events older than 60 min dropped (`expired`) |
-| Capped 429 [WA-5] | read `capScope`, `retryAt`; pause analytics events until `retryAt`; goal and enquiry keep flowing |
+| Capped 429 [WA-5] | read `capScope`, `retryAt` (clamped to now + 1 s … now + 25 h); until then only the priority lane is sent, analytics events wait and age out; split and retry batches are discarded and their items stay in their lanes; no circuit failure and no hot loop; a valid capped body puts the batch's `edgeDrops` back (data-service counted nothing, §6.3), so the next batch carries them; a 429 on a priority-only batch, or one without a valid body, counts as a failure |
 | 413 | never drops valid events: the batch is split in halves and each half is retried; only a single event that alone exceeds the cap (impossible within the §6.2 field limits) is dropped and counted `invalid` |
 | Other errors | 400 drop the batch and count; 401 drop token, retry once; 403 drop, log a configuration hint |
 | Delivery | at-most-once; lost on pod restart (accepted) |
@@ -468,7 +475,7 @@ An `enquiry` event carries only `eventId`, `type`, `occurredAt`, `receivedAt`; e
 |---|---|---|
 | 200 | envelope valid | WA-1 |
 | 400 / 401 / 403 / 405 / 413 / 415 | schema (incl. `edgeDrops` values outside 0 to 1 000 000), token, scope/`sub` or any `ROLE_*` authority, method, size or more than 200 events (413), content type | WA-1 |
-| 429 | cap would be exceeded: `{"accepted": 0, "duplicates": 0, "rejected": 0, "capped": true, "capScope": "hour" \| "day", "retryAt": "…Z"}`, all-or-nothing per batch | [WA-5] |
+| 429 | cap would be exceeded: `{"accepted": 0, "duplicates": 0, "rejected": 0, "capped": true, "capScope": "hour" \| "day", "retryAt": "…Z"}`, all-or-nothing per batch; nothing of the batch is stored or counted, including its `edgeDrops`; a priority-only batch (goal, enquiry) is never capped | [WA-5] |
 
 ### 6.4 Caps [WA-5]
 
@@ -478,11 +485,11 @@ An `enquiry` event carries only `eventId`, `type`, `occurredAt`, `receivedAt`; e
 | Hourly | 2 500 | UTC hour of `received_at` |
 | Per visitor | 500 events per visitor id per UTC day; excess rejected (`visitor_cap`) | in-memory map, seeded per visitor on first sight |
 
-Seeded at startup from `events.received_at`. Exempt: `goal`, `enquiry` (bounded by the contact form's limits). `retryAt` = next UTC hour or 00:00 UTC.
+Seeded at startup from `events.received_at`. Exempt: `goal`, `enquiry` (bounded by the contact form's limits). `retryAt` = next UTC hour or 00:00 UTC. Only the current UTC hour and day windows are enforced; each event is charged to the window of its own `received_at`. A cap of `0` is accepted and is the data-side stop for analytics ingest (goal, enquiry and DELETE keep working). Capped events are recorded in `daily_ingest_stats` (stage `capped`, reason `day` or `hour`).
 
 ### 6.5 `DELETE /api/webanalytics/visitors/{visitorId}` and tombstones [WA-5]
 
-Write scope. Deletes all `events` rows of that id, adds it to an in-memory tombstone set for 2 h; events for a tombstoned id are rejected (`erased`). 204 (also when nothing matched), 400 for a bad uuid. Log `[webanalytics] visitor erased rows=<n>` only. Tombstones are lost on restart; the furchert-ch queue purge covers the normal case. Called synchronously by the forget handler (§5.4).
+Write scope. Order: (1) the id is tombstoned in memory for 2 h (the set holds at most 10 000 ids, oldest evicted) and events for a tombstoned id are rejected (`erased`); (2) a barrier transaction takes an advisory lock exclusively (`lock_timeout` 1 s) that every ingest batch holds shared, so batches already in flight finish first; (3) the rows of that id are deleted by `ctid` in batches of 5 000, each in its own transaction under a statement timeout of min(2 s, the remaining time of the 2.5 s bound), the bound being checked before each batch. The answer is 503 when the bound is reached, the barrier lock times out or a statement times out, and the client's retry finishes the erasure; other storage failures answer 500. 204 (also when nothing matched), 400 for a bad uuid. Problem bodies carry the path template `/api/webanalytics/visitors/%7BvisitorId%7D` as `instance`; the id appears in no body and no log (log `[webanalytics] visitor erased rows=<n>` only). Tombstones are lost on restart; the furchert-ch queue purge covers the normal case. Called synchronously by the forget handler (§5.4).
 
 ---
 
@@ -517,11 +524,11 @@ Write scope. Deletes all `events` rows of that id, adds it to an in-memory tombs
 
 Shape CHECK per type; UNIQUE `(pageview_id, seq)`; indexes `(occurred_at)`, `(visitor_id, occurred_at)`, `(received_at)`; autovacuum scale factors 0.02 / insert 0.05 / analyze 0.02.
 
-**`daily_ingest_stats`**: columns `day` (Zurich day of receipt), `stage` ∈ {`accepted`, `duplicate`, `rejected`, `edge`}, `reason` (for `rejected` the §7.9 reason labels; for `edge` the nine `edgeDrops` keys; otherwise `''`) and `events` (counter); PK `(day, stage, reason)`; the CHECK constraints are format-only so WA-5 can add stages; upsert-increment at ingest, id-free, never touched by the rollup. Enquiries (valid, duplicate or invalid) are not counted here. **`daily_enquiries`**: PK `(day)`, `submissions`, increment-only, id-free, never touched by the rollup.
+**`daily_ingest_stats`**: columns `day` (Zurich day of receipt), `stage` ∈ {`accepted`, `duplicate`, `rejected`, `edge`, `capped`}, `reason` (for `rejected` the §7.9 reason labels; for `edge` the nine `edgeDrops` keys; for `capped` `day` or `hour`; otherwise `''`) and `events` (counter); PK `(day, stage, reason)`; the CHECK constraints are format-only so WA-5 can add stages; upsert-increment at ingest, id-free, never touched by the rollup. Enquiries (valid, duplicate or invalid) are not counted here. **`daily_enquiries`**: PK `(day)`, `submissions`, increment-only, id-free, never touched by the rollup.
 
 ### 7.3 Size (≈ 300 B per row)
 
-Base (50 k events/month): ≈ 650 k rows, ≈ 200 MB at steady state. Worst case at the cap: ≈ 3.96 M rows, ≈ 1.2 GB (≈ 24 % of the shared 5 Gi PVC). Aggregates ≈ 40 to 50 MB/year. Until WA-5 there is no cap and no retention; the dark launch keeps volume at zero.
+Base (50 k events/month): ≈ 650 k rows, ≈ 200 MB at steady state. Worst case at the cap: ≈ 3.96 M rows, ≈ 1.2 GB of row data (≈ 24 % of the shared 5 Gi PVC); measured as `pg_total_relation_size` (heap, indexes and TOAST) the table is expected at about 2.0 to 2.2 GB (§7.9). Aggregates ≈ 40 to 50 MB/year. Until WA-5 there is no cap and no retention; the dark launch keeps volume at zero.
 
 ### 7.4 No partitioning
 
@@ -533,7 +540,7 @@ Partition keys break `event_id` dedupe; `ctid` batching is unsafe on partitioned
 |---|---|---|
 | Runner | `NetmonCollector` `webanalytics-rollup` via `CollectorRunner`; `NetmonCollector.group()` (default `netmon`, the webanalytics collectors `webanalytics`) and `/api/netmon/status` filters by group, not by name prefix, so it excludes the `webanalytics` group (network strip unchanged); `/api/webanalytics/status` lists them | WA-3a |
 | Default off | ships with `netmon.collectors.webanalytics-rollup.enabled=false`. `CollectorMetricsInitializer` exports no freshness gauge for a disabled collector, so the existing `NetmonCollectorStale` catch-all cannot fire before the alert change is live | WA-3a |
-| Enable gate | (1) homelab WA-3a PR (daily class + catch-all exclusion) merged; (2) the owner runs playbook `41_monitoring.yml`; (3) only then a follow-up data-service `k8s/deployment.yaml` change sets the environment variable `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED=true` (relaxed binding of the dashed property name works while the explicit YAML entry `netmon.collectors.webanalytics-rollup.enabled: false` is present; the form without separators does not; `SPRING_APPLICATION_JSON` is only an alternative), and the explicit `false` default in the committed YAML stays mandatory (env binding for the dashed collector name verified in WA-3a phase 1) | WA-3a |
+| Enable gate | (1) homelab WA-3a PR (daily class + catch-all exclusion) merged; (2) the owner runs playbook `41_monitoring.yml`; (3) only then a follow-up data-service `k8s/deployment.yaml` change sets the environment variable `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED=true` (with the explicit YAML entry `netmon.collectors.webanalytics-rollup.enabled: false` present, both `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED` and the no-separator form `NETMON_COLLECTORS_WEBANALYTICSROLLUP_ENABLED` bind; without the YAML entry neither reaches the dashed key, so the explicit `false` default in the committed YAML stays mandatory; `SPRING_APPLICATION_JSON` is only an alternative; an earlier probe that found the no-separator form unbound used a property source named `env`, which has no environment-variable mapping, and the binding test now uses the real environment source) | WA-3a |
 | Schedule | two daily runs, both `zone = "Europe/Zurich"` and through the same `CollectorRunner` (one lock, so they never overlap): **01:12** `@Scheduled(cron = "0 12 1 * * *")` (night run, §7.6) and **07:30** `@Scheduled(cron = "0 30 7 * * *")` (morning run, after yesterday closes at 07:15). 07:30 is clear of Longhorn 02:00, restic 03:00, `RetentionJob` (04:30/05:30), Longhorn trim 05:00 and blocklists (06:00/07:00); the mba1 scheduled reboot at 07:40 only happens after ≥ 3.5 days uptime and the run takes seconds, so an interrupted run is simply redone by the next night's lookback. It shares the minute mark with the 30-minute reputation and 5-minute Cloudflare collectors, which the scheduler pool (size 4) runs in parallel. Documented exception to "crons in UTC" | WA-3a |
 | Lock | `pg_try_advisory_xact_lock(hashtext('webanalytics-rollup'))` per day; a failed lock stops the whole run (warning and early return), it never skips a single day | WA-3a |
 | First run | no `rollup_day` rows yet: process yesterday only (zero rows + a `rollup_day` row when empty). At 01:12 it is written as provisional; a first-ever trigger at 07:30 may also write yesterday as provisional (never served, finalised at the next 01:12) | WA-3a |
@@ -542,7 +549,7 @@ Partition keys break `event_id` dedupe; `ctid` batching is unsafe on partitioned
 | Final vs provisional | a day D is **closed** once `start(D + 1) + 6 h` (visit cap) `+ 75 min` (60 min forward-queue age + 15 min clock-skew window) has passed, i.e. D + 1 at 07:15 Zurich time. A rollup of D before that writes `rollup_day.final = false` (provisional); a rollup after it writes `final = true` (exception: the first-ever run, see First run). The 01:12 run writes yesterday as provisional; the 07:30 run rewrites it as final the same morning. `lastCompleteDay` = the newest day with `final = true`; read endpoints serve only final days (provisional rows are not exposed). On DST-change days the close is computed in Europe/Zurich elapsed time and moves by ±1 h (06:15 on fall-back days, 08:15 on spring-forward days); on a spring-forward day the 07:30 run leaves yesterday provisional and the next 01:12 run finalises it. After 07:30 "data through" is therefore normally yesterday; between 00:00 and 07:30 it is the day before yesterday | WA-3a |
 | Empty days | always a `rollup_day` row, so `lastCompleteDay` advances | WA-3a |
 | Write mode | per day one transaction: DELETE the day from every rollup-owned table, then batch INSERT of the rows computed by the Java visit model (a documented deviation from INSERT … SELECT, because visits are built in Java; never `daily_ingest_stats`, `daily_enquiries`) | WA-3a |
-| Freeze guard | a day is (re)computed only if (a) `day < today`; (b) `day ≥ today − (retentionDays − 1)`, with `retentionDays` = the configured `webanalytics.retention.events-days`; (c) `day ≥ today − 30` or no `rollup_day` row; (d) not (`rollup_day.raw_events > 0` and now 0 raw events). Needed only once retention deletes data | [WA-5] |
+| Freeze guard | a day is (re)computed only if (a) `day < today`; (b) `day ≥ today − (retentionDays − 1)`, with `retentionDays` = the configured `webanalytics.retention.events-days`; (c) `day ≥ today − 30` or no `rollup_day` row; (d) for **final** rows only: not (`rollup_day.raw_events > 0` and now 0 raw events); provisional days are always recomputed, so the provisional day of an erased visitor goes to zero. A day kept by (d) is skipped, the run continues and ends with warning `partial`; days refused by (a) to (c) are not planned. Needed only once retention deletes data | [WA-5] |
 
 **Algorithm for day D:** load events in [start(D) − 6 h, start(D + 1) + 6 h); per visitor order by `occurred_at`, `event_id` (`seq` within a pageview); split at gaps > 30 min and at landings with referrer/UTM; cut at 6 h (continuous activity beyond 6 h is cut and the remainder starts a further visit: a documented data-quality limit, rare); keep visits starting in D (no pageview → `orphan_visits`); exclude visits with > 100 pageviews or > 500 events; merge same-path pageviews within 30 s (≤ 30.000 s); per original `pageviewId` MAX engaged/scroll, OR masks, then `engagedMs` summed across the reload-merged ids; engagement and click events with a known `pageviewId` attach to that pageview's visit regardless of any gap, and only pageviews, goals and events with an unknown `pageviewId` open visits or measure gaps; a visitor is new on D if any of its visits on D is new; per visit entry/exit, entry locale, device class, landing attributes, engaged (≥ 10 s, or ≥ 2 distinct pages, or a key event), offer visit, contact intent, converting, new/returning; channel and first channel; WA-3b: funnels, group path, entry × exit, seen-before, transitions, dimensions, CF baseline, submits by day; top 50 per open dimension, rest `(other)`; write rows and `rollup_day(D)`. Funnels and path keys in Java; `SET LOCAL work_mem = '16MB'`, `statement_timeout = '120s'`.
 
@@ -611,7 +618,7 @@ Re-evaluation: an id-free per-visit fact table is rejected (rare country + devic
 
 Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`, `/projects/*`, `/about`); `personal` (`/rowing`); `contact` (`/contact`); `other` (every other tracked path). `daily_group_path.path_key`: repeats collapsed, the first 4 groups joined by `" > "`, then `" > …"` when more follow, and always ending `" > (exit)"`.
 
-`daily_cf_baseline` from `netmon.inbound_request_groups` (host `furchert.ch`, `GET`, 200–299, path `^/(de|en)(/[a-z0-9][a-z0-9-]{0,63}){0,2}/?$` → locale-free path + locale, hours inside the Zurich day), no IP-derived column. The path expression excludes the first segments `dashboard`, `imprint` and `privacy` (consistent with `TRACKED_PATHS`). **One-time backfill:** when empty, the first WA-3b run fills every day netmon still holds (≈ 90 days) as a pre-launch baseline; then nightly. The CF baseline (nightly replace and backfill) runs in a separate, **non-fatal** transaction in the same collector after the day loop: a failure is logged (class only) and counted, and never aborts the analytics rollup. A day is skipped when `D < today − (inbound retention − 1)` or when netmon returns 0 rows while rows are stored; the backfill is exempt from `eligible()` (it writes neither events-derived tables nor `rollup_day`), checks emptiness after taking the advisory lock in the same transaction (a held lock is a partial-run warning), skips the oldest (partial) netmon day, and an empty netmon is simply retried on the next run. Hours without Cloudflare traffic have no row and are not zero-filled (documented limit, like R8).
+`daily_cf_baseline` from `netmon.inbound_request_groups` (host `furchert.ch`, `GET`, 200–299, path `^/(de|en)(/[a-z0-9][a-z0-9-]{0,63}){0,2}/?$` → locale-free path + locale, hours inside the Zurich day), no IP-derived column. The path expression excludes the first segments `dashboard`, `imprint` and `privacy` (consistent with `TRACKED_PATHS`). **Backfill:** every run writes each day that has no `daily_cf_baseline` row yet, from netmon's second day to yesterday (on an empty table this is the one-time pre-launch backfill of ≈ 90 days), per day, each in its own statement and transaction under the advisory lock with the day re-checked as empty after the lock; a day that fails (for example the 120 s statement timeout) does not block the others and is resumed by the next run, and the backfill stops after 3 consecutive failed days (the remaining days are deferred). The nightly replace of rolled days does not require a completed backfill, skips a day whose backfill failed earlier in the same run, and also stops after 3 consecutive failures; failures are reported as one aggregated warning per step. The CF baseline (nightly replace and backfill) runs in a separate, **non-fatal** transaction in the same collector after the day loop: a failure is logged (class only) and counted, and never aborts the analytics rollup. A day is skipped when `D < today − (inbound retention − 1)` or when netmon returns 0 rows while rows are stored; the backfill is exempt from `eligible()` (it writes neither events-derived tables nor `rollup_day`), skips the oldest (partial) netmon day, a held lock stops the step with a partial-run warning, and an empty netmon is simply retried on the next run. Hours without Cloudflare traffic have no row and are not zero-filled (documented limit, like R8).
 
 ### 7.9 Metrics and alerts
 
@@ -621,7 +628,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 | `webanalytics_enquiries_total` (separate counter for enquiry increments) | counter | WA-1 |
 | `webanalytics_events_rejected_total{reason}` (`shape`, `enum`, `range`, `time`, `path`, `other`; [WA-5] `erased`, `visitor_cap`) | counter | WA-1 |
 | `webanalytics_edge_dropped_total{reason}` | counter | WA-1 |
-| `webanalytics_ingest_capped`, `webanalytics_events_today` (UTC day, `received_at`), `webanalytics_raw_table_bytes` (every 15 min) | gauge | [WA-5] |
+| `webanalytics_ingest_capped`, `webanalytics_events_today` (UTC day, `received_at`), `webanalytics_raw_table_bytes` (every 15 min; `pg_total_relation_size` of `webanalytics.events`, i.e. heap, indexes and TOAST; absent until the first successful measurement) | gauge | [WA-5] |
 | `netmon_collector_last_success_timestamp_seconds{collector="webanalytics-rollup"}` | gauge | WA-3a (exported only once the collector is enabled, §7.5) |
 
 **Rollup staleness (homelab, WA-3a):** add `webanalytics-rollup` to the `NetmonCollectorStale` 26 h daily class regex and to the 15-min catch-all exclusion, with a promtool test; it must be live (playbook `41_monitoring.yml` run) before the collector is enabled (§7.5).
@@ -636,7 +643,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 | `WebAnalyticsIngestSpike` | `webanalytics:accepted:increase1h` (recording rule, `sum(increase(webanalytics_events_accepted_total[1h]))`) > 500 and > 3 × its 7-day average (`avg_over_time(…[7d] offset 1h)`, the current hour excluded) | 15m | warning | 5 |
 | `WebAnalyticsRejectRatioHigh` | rejects / (rejects + accepted) > 0.5 and rejects > 100/h; rejects exclude only `erased`, `visitor_cap` counts | 30m | info | 5 |
 | `WebAnalyticsSecondLineRejects` | `sum by (reason) (increase(webanalytics_events_rejected_total{reason!~"erased\|visitor_cap"}[1h])) > 0` | 0m | warning | 5 |
-| `WebAnalyticsTableLarge` | `webanalytics_raw_table_bytes > 1.5 GiB` (above the ≈ 1.2 GB steady state at the cap) | 1h | warning | 5 |
+| `WebAnalyticsTableLarge` | `webanalytics_raw_table_bytes > 1.5 GiB` (the threshold is re-checked on homelab#351 part 2 and homelab-data-service#57: the total relation size at the caps is about 2.0 to 2.2 GB, not the ≈ 1.2 GB of the row-data estimate) | 1h | warning | 5 |
 | `WebAnalyticsIngestSilent` | no increase of `webanalytics_events_accepted_total` (enquiries not counted) for 7 days while data-service and furchert-ch are up | 1h | info | 6 |
 
 ---
@@ -652,7 +659,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 | Source | aggregates only (repository test); `/status.ingest` from memory; no visitor id in any response |
 | Range | `from`, `to` (Zurich dates, inclusive); default `to` = `lastCompleteDay`, `from` = `to − 27 d`; span ≤ 366 d; `to` clamped to `lastCompleteDay` (provisional days are never served, §7.5); invalid → 400 `invalid_window` |
 | Range echo | every endpoint that takes a range returns `"range": {"from", "to", "days", "lastCompleteDay", "previous": {"from", "to"} \| null}`; the empty state (before any final rollup) is `{"from": null, "to": null, "days": 0, "lastCompleteDay": null, "previous": null}` |
-| Compare | `compare=previous` (default) or `none` (`previous` is then `null`) |
+| Compare | `compare=previous` (default) or `none` (`previous` is then `null`); after the `definitionFrom` clamp (§8.5) on `/funnels`, `/paths`, `/audience` and the `/pages/detail` previous/next lists, the previous range can be shorter than the current one |
 | Edge cases | `to < from` after clamping → 200 with the empty range (`from`, `to` and `previous` null, `days` 0, `lastCompleteDay` keeps its known value); `/clicks` `kind` is optional (missing = all kinds); a whole calendar month takes precedence and uses the month basis, whose `previous` is the previous calendar month; `/status` `lastWindowEnd` is `start(D + 1)` Europe/Zurich as an instant (ISO-8601 UTC) |
 | Filters | `locale=de\|en` (entry locale), `device=desktop\|mobile\|tablet`; echoed as `"filters": {"applied": {…}, "ignored": [...]}` |
 | Numbers | counts only; rates, intervals, medians in furchert-ch; daily series |
@@ -703,7 +710,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 
 **`GET /audience`** (3b): `newVsReturning {newVisits, returningVisits}`, `repeatOfferViewers {value, basis}`, `deviceClass`, `entryLocale`, `dimensions {country, browserFamily, osFamily, viewport, visitorType}` (each `[{value, visits}]`).
 
-**`GET /coverage`** (3b): `baselineFrom`, `daily [{day, consentedPageviews, cloudflareRequests, sampled}]`, `byPage [{path, locale, consentedPageviews, cloudflareRequests, sampled}]` (page locale), `enquiries {consentedSubmits, totalSubmits}`, `dataQuality {edge {…}, secondLine {…}, duplicates, cappedDays}`. **Coverage window starts at go-live:** `baselineFrom` = the configured go-live date `webanalytics.coverage.go-live-date` (default unset, set in WA-6; no latching from raw data), `null` while unset or in the future; `daily`, `byPage`, `enquiries` and the CF totals cover only `[max(from, baselineFrom), to]` and are empty before go-live. `consentedPageviews` = `Σ daily_page.pageviews` (consistent with `byPage`; it differs from `rollup_day.raw_pageviews`, which counts all raw pageviews of the day). `dataQuality` comes from `daily_ingest_stats` with every reason key present and 0-filled, `cappedDays` is `null` until WA-5. The pre-launch CF rows from the backfill stay stored but are never compared with tracked pageviews. `enquiries` counts both sides by **submission day**: `consentedSubmits = Σ daily_submits.consented_submits` and `totalSubmits = Σ daily_enquiries.submissions` over the same days (not by visit start day).
+**`GET /coverage`** (3b): `baselineFrom`, `daily [{day, consentedPageviews, cloudflareRequests, sampled}]`, `byPage [{path, locale, consentedPageviews, cloudflareRequests, sampled}]` (page locale, registry paths only), `enquiries {consentedSubmits, totalSubmits}`, `dataQuality {edge {…}, secondLine {…}, duplicates, cappedDays}`. **Coverage window starts at go-live:** `baselineFrom` = the configured go-live date `webanalytics.coverage.go-live-date` (default unset, set in WA-6; no latching from raw data), `null` while unset or in the future; `daily`, `byPage`, `enquiries` and the CF totals cover only `[max(from, baselineFrom, definitionFrom), to]` and are empty before go-live and without a final day of the current definition. `consentedPageviews` = `Σ daily_page.pageviews` (consistent with `byPage`; it differs from `rollup_day.raw_pageviews`, which counts all raw pageviews of the day). `dataQuality` comes from `daily_ingest_stats` with every reason key present and 0-filled, `cappedDays` = the number of Zurich receipt days with a capped batch (stage `capped` of `daily_ingest_stats`; `null` until WA-5); `secondLine` keeps the six validation reasons (`shape`, `enum`, `range`, `time`, `path`, `other`), while `erased` and `visitor_cap` appear only in the metric and in `daily_ingest_stats`. The pre-launch CF rows from the backfill stay stored but are never compared with tracked pageviews. `enquiries` counts both sides by **submission day**: `consentedSubmits = Σ daily_submits.consented_submits` and `totalSubmits = Σ daily_enquiries.submissions` over the same days (not by visit start day).
 
 ### 8.3 Metric definitions (binding)
 
@@ -732,7 +739,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 
 ### 8.5 Funnels (`DEFINITION_VERSION = 2` with WA-3b)
 
-F1 `offer`: visit → offer visit → reached `preise` → contact intent → form start → `contact_submit`. F2 `contact_form`: `/contact` pageview → form start → `contact_submit`. F3: `daily_section`. A definition change recomputes the last 30 days. WA-3b raises `DEFINITION_VERSION` from 1 to 2: days rolled before the bump keep version 1 and have no WA-3b rows; `/status` and `/funnels` report `definitionVersion`, and `/funnels` and `/paths` also return `definitionFrom` (the first version-2 day) and clamp `from` to it. Funnel and seen-before steps are matched greedily at the earliest occurrence, in order. `definitionFrom` also bounds `/audience` and the `/pages/detail` previous/next lists (they read WA-3b tables); before go-live there is no version-1 data, so nothing is undercounted in practice. Section reach and `formStarted` are ordered by their pageview's start time (slot start); two steps inside one pageview have no finer order (documented limit).
+F1 `offer`: visit → offer visit → reached `preise` → contact intent → form start → `contact_submit`. F2 `contact_form`: `/contact` pageview → form start → `contact_submit`. F3: `daily_section`. A definition change recomputes the last 30 days. WA-3b raises `DEFINITION_VERSION` from 1 to 2: days rolled before the bump keep version 1 and have no WA-3b rows; `/status` and `/funnels` report `definitionVersion`, and `/funnels` and `/paths` also return `definitionFrom` (the first final version-2 day after the newest day with a version below 2, i.e. the contiguous version-2 range; this differs from the first version-2 day only after a long rollback) and clamp `from` to it. Funnel and seen-before steps are matched greedily at the earliest occurrence, in order. `definitionFrom` also bounds `/audience` and the `/pages/detail` previous/next lists (they read WA-3b tables); before go-live there is no version-1 data, so nothing is undercounted in practice. Section reach and `formStarted` are ordered by their pageview's start time (slot start); two steps inside one pageview have no finer order (documented limit).
 
 ### 8.6 Small-numbers rules (furchert-ch)
 
@@ -761,7 +768,7 @@ F1 `offer`: visit → offer visit → reached `preise` → contact intent → fo
 | Data | `src/lib/analytics/read.ts`, result union like `NetmonResult`, `no-store`, 5 s timeout, one retry after 401, per-section `allSettled`, honest "unavailable" / "no data yet" / "not yet available" |
 | Token | `analytics:read` only; env `DATA_SERVICE_URL`, `DATA_SERVICE_TOKEN_URL` reused |
 | Rendering (C16) | React text only; no `dangerouslySetInnerHTML`, no stored-value hrefs; inline SVG/div, ETHON tokens |
-| Controls | range `7d`/`28d` (default)/`90d`/`12m`/custom, compare on, locale (entry), device; ignored filters shown per section |
+| Controls | range `7d`/`28d` (default)/`90d`/`12m`/custom (`12m` = the rolling 365 days ending at `to`, not a calendar year), compare on, locale (entry; the search parameter is named `entry`, values `de`/`en`), device; ignored filters shown per section |
 | Header | "Data through <lastCompleteDay> · consented visits only · own visits excluded" (`lastCompleteDay` is the newest final day: normally yesterday after the 07:30 run, the day before yesterday before it) |
 | Design pass | `dataviz` + `frontend-design` skills, owner review (WA-4a, whole page) |
 
@@ -784,7 +791,7 @@ No per-visitor timeline, converting-visit list, id lookup or export. Docs (`INTE
 
 ### 9.3 "Never track this browser" (D8)
 
-On: `fa_optout`, abort in-flight requests, forget, stop. Off: remove `fa_optout`. Per browser/device; not auto-enabled on sign-in.
+On: write `fa_optout` first, then abort in-flight requests, forget, stop; `fa_consent` is left untouched (the choice and its date stay). Off: remove `fa_optout`. The switch is active while the feature is dark (it is a client control of the dashboard, available before WA-6). Per browser/device; not auto-enabled on sign-in.
 
 ---
 
@@ -887,6 +894,7 @@ All additive; **no backwards-incompatible change.** `/api/netmon/status` output 
 - furchert-ch: `ANALYTICS_COLLECT_ENABLED=false` (pod delete) stops ingest, goal, enquiry; forget keeps working; or revert the go-live PR.
 - data-service: rollup kill switch, or the previous image: Flyway ignores applied future migrations by default (`ignore-migration-patterns: *:future`, verify in WA-1 phase 1); never edit or undo a merged migration.
 - auth-service: scopes stay (harmless).
+- Operator procedures (purge a day, reset the rollup marks, adjust the caps, stop ingest on the data side) are the canonical SQL and steps in data-service's own `DEPLOYMENT.md`; homelab's `DEPLOYMENT.md` keeps only the cluster-level steps and links them.
 
 ---
 
@@ -1029,7 +1037,7 @@ Local-only specialist reports (not in this repo), summarised in this section. A 
 | R3 | Mac dumps keep raw ids indefinitely | owner accepted (Q2); privacy text claims nothing about backups |
 | R4 | Low consent rate | §8.6; coverage |
 | R5 | Forged events | WA-5 limits, caps, alerts; dark until WA-6 |
-| R6 | Shared 5 Gi PVC | WA-5 cap (≤ 1.2 GB), size alert |
+| R6 | Shared 5 Gi PVC | WA-5 cap; ≈ 1.2 GB row data, ≈ 2.0–2.2 GB total relation size at the cap; threshold and PVC decision in homelab#351 part 2 and homelab-data-service#57; size alert |
 | R7 | Lost snapshots, at-most-once loss | heartbeat; accepted |
 | R8 | CF baseline includes bots, prefetches | separate lines |
 | R9 | First 12 months almost everyone "new" | UI note |
@@ -1037,7 +1045,7 @@ Local-only specialist reports (not in this repo), summarised in this section. A 
 | R11 | Erased visitor's events in flight | abort on withdrawal, queue purge, synchronous delete, tombstone |
 | R12 | WA-5 slips while value work is done | go-live depends on WA-5; flag stays off |
 | R13 | Two ids minted at consent in browsers without Web Locks; a collect completing after abort and forget leaves an orphan id | documented data-quality limit (§3.9); accepted residual risk (§4.4): orphan ids are unlinkable, expire with raw retention, tombstoned ids reject late events (WA-5) |
-| R14 | A forget abandoned on Allow (429 or 503): the old id stays in use (429) or pending in `fa_forget` (503) until the next withdrawal; earlier events stay linked to it | accepted residual (§4.4); the id is pseudonymous, aggregate-only, expires with raw retention |
+| R14 | A forget abandoned on Allow (429 or 503): the old id stays in use (429) or pending in `fa_forget` (503) until the next withdrawal (nothing in the browser retries it; the bounded server-side retry of §5.4 may still erase it); earlier events stay linked to it | accepted residual (§4.4); the id is pseudonymous, aggregate-only, expires with raw retention |
 
 **Owner questions:** all answered on 2026-11-08 (Q1 to Q7, O1; §1.2). None open.
 
@@ -1141,7 +1149,7 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 - V8 tables (incl. `daily_submits`); `DEFINITION_VERSION` 2 recomputes the horizon (older days keep version 1 and no WA-3b rows; `definitionFrom` clamp on `/funnels` and `/paths`); CF baseline in a separate non-fatal transaction, backfill rules and path exclusions per §7.8; `/coverage` from the configured go-live date.
 - Funnels monotonic, out-of-order not counted; transitions `(entrance)` = `(exit)` = visits; group paths, entry × exit, seen-before.
 - **Exact uniques test: one visitor with offer pageviews in visits on two different days within 28 days counts once in `repeat_offer_viewers_28d`, and one visitor active on two days of the same 7-day range counts once in the audience visitors figure.**
-- `daily_cf_baseline` one-time backfill when empty (seeded netmon rows), nightly afterwards, `sampled` carried, no IP column; empty-table and idempotency tests.
+- `daily_cf_baseline`: backfill of every missing day, per day, in each run (on an empty table the one-time pre-launch backfill from the seeded netmon rows), stop after 3 consecutive failed days, nightly replace afterwards, `sampled` carried, no IP column; empty-table, resume-after-failure and idempotency tests.
 - `/coverage`: `baselineFrom` = the configured go-live date, comparisons only from there (test with pre-launch CF rows); `consentedSubmits` by submission day (test: a visit starting 23:50 with a goal at 00:10 counts the submit on the second day, matching `daily_enquiries`).
 - Contract tests for `/funnels`, `/paths`, `/audience`, `/coverage`, detail `previous`/`next`.
 
@@ -1158,7 +1166,7 @@ Order: **WA-0 → WA-1 → (WA-2a ∥ WA-2b ∥ WA-3a → WA-3b) → (WA-4a → 
 
 **furchert-ch: "WA-4b: Funnel, paths, audience, coverage and page-flow sections" (skills: `dataviz`, `frontend-design`)**
 - Sections 2, 6, 7, 8 and drilldown previous/next per the WA-4a design.
-- Small-cell rule on paths and funnels and on the `/audience` dimension lists (§8.6 minimum of 3); coverage as two lines from `baselineFrom`, band only when both ≥ 50; enquiry coverage by submission day.
+- Small-cell rule on paths and funnels and on the `/audience` dimension lists (§8.6 minimum of 3); the coverage chart on one axis, not drawn as a subset of the consented series (the two are different measures), from `baselineFrom`, band only when both ≥ 50; enquiry coverage shown as "x of n" without a ratio, by submission day; funnels show rate deltas only (both n ≥ 30, equal spans), no count deltas; `/coverage` `byPage` lists registry paths only.
 - States, DE/EN, lint/typecheck/test/build, docs.
 
 ### WA-5 Compliance & hardening (5.5 PD; all of it before go-live, everything still dark)
@@ -1178,14 +1186,14 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 **furchert-ch: "WA-5: Abuse limits, durable forget erasure, GPC/DNT and final texts" (2.0 PD; after the data-service WA-5 rollout)**
 - Collect rate limits per key and global with `Retry-After`, IPv6 /64, mint limit 5/h, bot UA list (`bots.ts` test table), `Sec-Purpose: prefetch` drop; forget has its own limit (30/min per key) and is never blocked by the collect limits; over its limit it answers 429 with `Retry-After` and keeps `fa_vid`; the tracker keeps `fa_forget_pending` and retries (tests incl. a NAT neighbour exhausting the limit).
 - Forward queue honours 429 `retryAt`; goal and enquiry keep flowing.
-- Durable forget (§5.4): when both `fa_vid` and `fa_forget` are present both ids are erased (test); purge queued events of the id, wait for the in-flight batch, synchronous `DELETE` with 3 attempts; 204 on success (clears `fa_forget`); 503 with `fa_forget` when data-service is unreachable; the tracker keeps `fa_forget_pending` and the next load's retry erases via `fa_forget` (race tests: queued batch, in-flight batch, data-service down then up; Allow with `fa_forget_pending` set: the pending forget runs first, the tracker starts after it, and the new events are not erased; two concurrent first collects without Web Locks then withdrawal: the cookie id is erased and the orphan id is documented as residual, §4.4).
+- Durable forget (§5.4): when both `fa_vid` and `fa_forget` are present both ids are erased (test); purge queued events of the id, wait for the in-flight batch, synchronous `DELETE` with 3 attempts (details §5.4); 204 on success (clears `fa_vid` and `fa_forget`); 503 with `fa_forget` when data-service is unreachable; the tracker keeps `fa_forget_pending` and the next load's retry erases via `fa_forget` (race tests: queued batch, in-flight batch, data-service down then up; Allow with `fa_forget_pending` set: the pending forget runs first, the tracker starts after it, and the new events are not erased; two concurrent first collects without Web Locks then withdrawal: the cookie id is erased and the orphan id is documented as residual, §4.4).
 - GPC/DNT auto-decline stores `denied` (`by: "signal"`) and calls forget once; explicit Allow (`by: "user"`) overrides, also for the goal flag (tests).
 - `legal.ts` L1 to L7 (incl. `fa_forget` in L3) and the final bar copy prepared as a reviewed commit on the WA-6 go-live branch (never merged before the flip); owner sign-off of the copy recorded.
 
 **homelab: "WA-5: WebAnalytics alerts, record of processing, runbooks and owner checks" (1.0 PD, plus 0.5 PD integration re-test across repos; after the data-service WA-5 rollout)**
 - Five §7.9 WA-5 rules under `homelab-webanalytics`, promtool tests, no duplicate key (IngestSilent follows in WA-6).
 - Record of processing and DPIA note finalised in the canonical spec (§13.1, §13.2).
-- `DEPLOYMENT.md` runbooks: purge a day after poisoning, change caps, disable ingest, reset the rollup mark; "Cloudflare rules" with the optional WAF rule and "`/api/v` outside the auth rate-limit rule"; backup note per Q2 (dumps unchanged, contain pseudonymous ids); NetworkPolicy unchanged; restore test of `data_service` into a scratch DB with matching `webanalytics` row counts.
+- `DEPLOYMENT.md` cluster-level steps (dump first, exec, order, kill switches) that link data-service's canonical runbooks (purge a day after poisoning, change caps, disable ingest, reset the rollup mark); "Cloudflare rules" with the optional WAF rule and "`/api/v` outside the auth rate-limit rule"; backup note per Q2 (dumps unchanged, contain pseudonymous ids); NetworkPolicy unchanged; restore test of `data_service` into a scratch DB with matching `webanalytics` row counts.
 - Owner checks recorded: Cloudflare Web Analytics/RUM and Zaraz off; `cf.client.bot`; n8n schedules vs 01:12 and 07:30; PVC usage vs threshold.
 - Infra `INTERFACES.md` lists `furchert.ch/api/v`.
 
@@ -1242,7 +1250,7 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 | F12 | IngestSilent after 7 days | §7.9 |
 | F13 | WA-3 and WA-4 split; re-estimate | §17 |
 | F14 | Erasure on live data only; no backup claim | §13, §10.2 |
-| F15 | ~300 B/row, ≈ 1.2 GB at cap, TableLarge 1.5 GiB | §7.3, §7.9 |
+| F15 | ~300 B/row, ≈ 1.2 GB row data (≈ 2.0–2.2 GB total relation size) at cap, TableLarge 1.5 GiB (to be re-checked in homelab#351 part 2 and homelab-data-service#57) | §7.3, §7.9 |
 | F16 | Forget independent of kill switches | §5.4 |
 | F17 | End-to-end checklist right after the flip | §12.3, §17 WA-6 |
 | F18 | Visit cap 6 h | §3.1, §7.5 |
@@ -1387,6 +1395,30 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 53 | Reject ratio excludes only `erased` (`visitor_cap` counts); second-line rejects exclude both | §7.9 | homelab #351 |
 | 54 | Record of processing and DPIA note final (Cloudflare only as processor, own storage and copies row, review trigger) | §13.1, §13.2 | homelab #351 |
 | 55 | WAF custom rule uses the exact path set `{"/api/v" "/api/v/forget"}` | §13 | homelab #351 |
+
+### Revision 3.7 (follow-ups from the WA-2b to WA-5 implementation and review rounds, 2026-11-09)
+
+| # | Item (source) | Sections changed | Affected WA issues |
+|---|---|---|---|
+| 56 | The never-track switch is active while dark, writes `fa_optout` first and leaves `fa_consent` untouched; `12m` = rolling 365 days; the entry-locale search parameter is `entry`; the browser controller is a `globalThis` singleton (WA-4a plan) | §3.10, §4.4, §9.1, §9.3 | furchert-ch #155 |
+| 57 | Enable gate: with the explicit YAML entry both `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED` and the no-separator form bind, without it neither does; the earlier probe used a source named `env` (WA-3b) | §7.5 | data-service #54, #55 |
+| 58 | Coverage chart on one axis, enquiry coverage as "x of n", funnels with rate deltas only (n ≥ 30, equal spans), `byPage` registry paths only (owner Q5, WA-4b) | §8.2, §17 WA-4b | furchert-ch #156 |
+| 59 | `definitionFrom` = first final version-2 day after the newest day below version 2 (data-service #62) | §8.5 | data-service #55 |
+| 60 | `fa_forget` holds up to four ids (dedup, oldest dropped) (furchert-ch #172 D2) | §4.2, §5.4 | furchert-ch #157 |
+| 61 | Forget guard errors 408/413 set `fa_forget`; global erase bound 4 concurrent / 120 per minute (429, no cookie change); bounded server-side retry (5 min for 24 h, at most 1 000 ids, in memory); queue-side erased-id set (2 h, at most 10 000) (furchert-ch #172 D3, D4, D5, D7) | §5.4, §4.2, §5.8 | furchert-ch #157 |
+| 62 | Collect 429 honours `Retry-After` (1 to 600 s); capped 429 pauses until `retryAt` (clamped now + 1 s … now + 25 h) with priority-only batches (furchert-ch #172 D1, D6) | §3.9, §5.10 | furchert-ch #157 |
+| 63 | An explicit user Decline after a signal decline rewrites `by: "user"` (WA-5 plan) | §4.1 | furchert-ch #157 |
+| 64 | Two-lane forward queue (priority lane for goal and enquiry; batches removed by identity) (furchert-ch #172 D6) | §5.10 | furchert-ch #157 |
+| 65 | Operator procedures link to data-service's canonical SQL (WA-5 plan) | §12.4 | homelab #351 |
+| 66 | CF baseline backfill per day, resumes missing days every run, stops after 3 consecutive failed days; replace skips a failed-backfill day and stops after 3 failures; `/coverage` window `[max(from, baselineFrom, definitionFrom), to]` (data-service #63, #65) | §7.8, §8.2, §17 WA-3b | data-service #55 |
+| 67 | Freeze guard (d) applies to final rows only; a day kept by (d) is skipped, the run continues and ends with warning `partial`, days refused by (a) to (c) are not planned (data-service #66 items 5, 9) | §7.5 | data-service #56 |
+| 68 | Erasure = tombstone, barrier lock, batched deletes within 2.5 s per request, 503 when incomplete, 500 on other storage failures, tombstone set bounded, `instance` path template (data-service #66 item 4) | §6.5 | data-service #56 |
+| 69 | Caps accept 0 (data-side stop); only the current UTC hour and day windows; each event charged to its own `received_at` (data-service #66 items 1, 6) | §6.4 | data-service #56 |
+| 70 | `daily_ingest_stats` stage `capped` (reason `day`/`hour`) and `cappedDays` (data-service #66 item 2) | §7.2, §8.2 | data-service #56 |
+| 71 | `edgeDrops` of a capped batch are not counted; priority-only batches are never capped (data-service #66 item 8) | §6.3 | data-service #56 |
+| 72 | `secondLine` keeps the six validation reasons; `erased` and `visitor_cap` only in the metric and `daily_ingest_stats` (data-service #66 item 7) | §8.2 | data-service #56 |
+| 73 | `webanalytics_raw_table_bytes` = `pg_total_relation_size`, absent until the first measurement; `WebAnalyticsTableLarge` threshold to be re-checked (about 2.0 to 2.2 GB at the caps) (data-service #66 item 3) | §7.9 | data-service #56, homelab #351 |
+| 74 | Already in rev 3.6 (homelab #357): reject ratio excludes only `erased`, recording rule `webanalytics:accepted:increase1h`, info alerts via InfoInhibitor, WAF path set | none (see rows 52–55) | homelab #351 |
 
 ### Committed (2026-11-08, WA-0)
 
