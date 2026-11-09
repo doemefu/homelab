@@ -2206,7 +2206,7 @@ Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalProme
 
 `info` alerts are normally visible only in Prometheus and Alertmanager, because the chart's `InfoInhibitor` suppresses them in Discord unless a warning fires in the same namespace. `WebAnalyticsIngestCapped` and `WebAnalyticsTableLarge` (gauges) follow with data-service WA-5; `WebAnalyticsIngestSilent` follows in WA-6 (#352), because before go-live there is no traffic and it would fire.
 
-**Rollout.** Merge, then run `ansible-playbook infra/playbooks/41_monitoring.yml --check --diff` from an up-to-date checkout of `main`. Stop if the diff shows anything except the new PrometheusRule; then run the playbook, and a second run must show no change. Afterwards (all read-only):
+**Rollout.** Merge, then run `ansible-playbook infra/playbooks/41_monitoring.yml --check --diff` from an up-to-date checkout of `main`. Stop if the diff shows anything except the new PrometheusRule; then run the playbook, and a second run must show no change. Afterwards (all read-only; paste into a `bash` subshell, type `bash` first, because the block uses `exit`):
 
 ```bash
 # the PrometheusRule carries the alerts and the recording rule
@@ -2247,7 +2247,8 @@ Run the three stages in the **same `bash` session** (the functions and variables
 *Stage 1: prechecks and the live counts.*
 
 ```bash
-pg() { kubectl -n apps exec -i postgresql-0 -c postgresql -- "$@"; }
+pg() { kubectl -n apps exec postgresql-0 -c postgresql -- "$@"; }          # no stdin
+pgi() { kubectl -n apps exec -i postgresql-0 -c postgresql -- "$@"; }       # with stdin, only for the two pg_restore calls
 psqlq() { pg psql -U postgres -t -A "$@"; }
 WORK=$(mktemp -d)
 COUNTS="SELECT table_name || '=' || (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_schema='webanalytics' AND table_type='BASE TABLE' ORDER BY table_name;"
@@ -2258,6 +2259,7 @@ DATADIR=$(pg psql -U postgres -t -A -c "SHOW data_directory;")
 pg df -h "$DATADIR"
 SIZE=$(psqlq -d data_service -c "SELECT coalesce(sum(pg_total_relation_size(format('%I.%I', schemaname, tablename)::regclass)), 0) FROM pg_tables WHERE schemaname='webanalytics';")
 AVAIL=$(pg df -Pk "$DATADIR" | awk 'NR==2{print $4*1024}')
+[ -n "$SIZE" ] && [ -n "$AVAIL" ] || { echo "schema size or free space unknown: stop"; exit 1; }
 echo "schema size $SIZE bytes, data directory available $AVAIL bytes"
 [ "$AVAIL" -gt $((3*SIZE + 1073741824)) ] || { echo "not enough free space on the data directory: stop"; exit 1; }
 # (b) ... and every Longhorn replica node must have room too: the filesystem figure does not show the
@@ -2278,7 +2280,7 @@ psqlq -d data_service -c "$COUNTS" > "$WORK/counts-live.txt"
 
 ```bash
 # 2) The dump contains the schema (the container's pg_restore: no local PostgreSQL client needed)
-pg pg_restore -l < "$RUN/pg-data_service.dump" | grep -E 'SCHEMA - webanalytics'
+pgi pg_restore -l < "$RUN/pg-data_service.dump" | grep -E 'SCHEMA - webanalytics'
 
 # 3) Create the scratch database; STOP if it fails (see "After an interrupted test" below)
 pg createdb -U postgres restore_test || { echo "restore_test exists or createdb failed: stop"; exit 1; }
@@ -2286,7 +2288,7 @@ pg createdb -U postgres restore_test || { echo "restore_test exists or createdb 
 psqlq -d restore_test -c "CREATE SCHEMA IF NOT EXISTS webanalytics;"
 # Restore only that schema, streamed over stdin; the errors are kept before any cleanup
 RESTORE_OK=1; SAVED=1
-pg pg_restore -U postgres -d restore_test --no-owner -n webanalytics < "$RUN/pg-data_service.dump" 2> "$WORK/restore.err" || RESTORE_OK=0
+pgi pg_restore -U postgres -d restore_test --no-owner -n webanalytics < "$RUN/pg-data_service.dump" 2> "$WORK/restore.err" || RESTORE_OK=0
 [ -s "$WORK/restore.err" ] && RESTORE_OK=0
 if [ "$RESTORE_OK" = 0 ]; then
   cp "$WORK/restore.err" "$RUN/restore-test.err" && cmp -s "$WORK/restore.err" "$RUN/restore-test.err" || SAVED=0

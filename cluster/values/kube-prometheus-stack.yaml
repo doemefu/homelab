@@ -752,7 +752,8 @@ additionalPrometheusRulesMap:
   # aggregated alerts, and without it a namespace-less warning could release the info alert. With it,
   # Spike and SecondLineRejects (warnings) release RejectRatioHigh (info) without releasing the other
   # info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
-  # NetmonSeriesTruncated has no static label.
+  # NetmonSeriesTruncated has no static label. Trade-off: any warning in namespace apps releases
+  # RejectRatioHigh, and Spike and SecondLineRejects release the other info alerts with namespace apps.
   homelab-webanalytics:
     groups:
       - name: homelab-webanalytics
