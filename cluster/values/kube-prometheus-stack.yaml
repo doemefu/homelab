@@ -84,6 +84,7 @@ defaultRules:
 #   homelab-backups        backup alerts (PR #109)
 #   homelab-platform       Flux, cert-manager and workload availability alerts (#284)
 #   homelab-mcp-hub        mcp-hub account status and scrape alerts (#178, docs/080 §7.4)
+#   homelab-webanalytics   web analytics ingest alerts (WA-5, #351, docs/100 §7.9)
 # ⚠️ Each of those PRs adds its own top-level additionalPrometheusRulesMap key. Git can
 # merge two such blocks without any conflict (it did for #109 + #131), leaving a
 # duplicate YAML key that Helm resolves by silently dropping one map. CI's yamllint
@@ -738,6 +739,91 @@ additionalPrometheusRulesMap:
                 10 minutes while the Deployment wants a replica, so McpHubAccountAuthExpired is blind. Check
                 `kubectl -n apps get pods -l app=mcp-hub`, `kubectl -n monitoring get servicemonitor mcp-hub` and
                 any NetworkPolicy in apps that selects the hub; runbook in DEPLOYMENT.md "mcp-hub alerts (#178)".
+
+  # Web analytics (Epic #348, WA-5, #351; docs/100-web-analytics.md §7.9). Metrics come from
+  # data-service (job data-service, ServiceMonitor monitoring/data-service). The collect path is dark
+  # until WA-6, so before go-live there is no traffic and none of these rules can fire.
+  # WebAnalyticsIngestSilent follows in WA-6 (#352); the gauge rules (IngestCapped, TableLarge) follow
+  # with data-service WA-5 (#56). The rules in this block use only counters.
+  # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts in
+  # Discord unless a warning fires in the same namespace (InfoInhibitor joins on the namespace label).
+  # It stays visible in Prometheus/Alertmanager. All three alerts carry the static label
+  # namespace: apps, the namespace of the source series (data-service): sum() drops the label from the
+  # aggregated alerts, and without it a namespace-less warning could release the info alert. With it,
+  # Spike and SecondLineRejects (warnings) release RejectRatioHigh (info) without releasing the other
+  # info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
+  # NetmonSeriesTruncated has no static label. Trade-off: any warning in namespace apps releases
+  # RejectRatioHigh, and Spike and SecondLineRejects release the other info alerts with namespace apps.
+  homelab-webanalytics:
+    groups:
+      - name: homelab-webanalytics
+        rules:
+          # Hourly accepted events as a recording rule: cheaper than a subquery and the 7-day baseline
+          # survives a gap in the raw counters. sum() drops the labels of every scrape target.
+          - record: webanalytics:accepted:increase1h
+            expr: sum(increase(webanalytics_events_accepted_total[1h]))
+          # Baseline = average of the recorded hourly increase over the previous 7 days, excluding the
+          # current hour (offset 1h), so a burst does not raise its own baseline. With fewer than 7 days
+          # of history the average covers only the days that exist; after a quiet week the baseline is 0
+          # and the 500/h floor decides (the daily cap, WA-5, bounds the worst case).
+          - alert: WebAnalyticsIngestSpike
+            expr: >-
+              webanalytics:accepted:increase1h > 500
+              and
+              webanalytics:accepted:increase1h > 3 * avg_over_time(webanalytics:accepted:increase1h[7d] offset 1h)
+            for: 15m
+            labels:
+              severity: warning
+              namespace: apps
+            annotations:
+              summary: "Web analytics ingest is more than 3x the 7-day hourly average"
+              description: >-
+                data-service accepted more than 500 analytics events in the last hour, more than three
+                times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare
+                webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap
+                state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks
+                in DEPLOYMENT.md "Web analytics (WA-5): alerts, Cloudflare rules and owner checks".
+          # Rejects of the second-line validation vs accepted events. `erased` (tombstoned ids after an
+          # erasure) is expected by design and excluded; `visitor_cap` stays in (the only per-visitor
+          # flood signal).
+          - alert: WebAnalyticsRejectRatioHigh
+            expr: >-
+              sum(increase(webanalytics_events_rejected_total{reason!="erased"}[1h]))
+                / (
+                  sum(increase(webanalytics_events_rejected_total{reason!="erased"}[1h]))
+                  + sum(increase(webanalytics_events_accepted_total[1h]))
+                ) > 0.5
+              and
+              sum(increase(webanalytics_events_rejected_total{reason!="erased"}[1h])) > 100
+            for: 30m
+            labels:
+              severity: info
+              namespace: apps
+            annotations:
+              summary: "More than half of the web analytics events are rejected"
+              description: >-
+                More than 100 events per hour were rejected by data-service and the rejects are more than
+                50 percent of rejects plus accepted events (reason erased excluded). furchert-ch should have
+                dropped these at the edge: check the deployed furchert-ch version against the data-service
+                contract (docs/100-web-analytics.md §6.2) and the reasons in webanalytics_events_rejected_total.
+          # Anything rejected by the second line is a contract mismatch or an attack that got past
+          # furchert-ch's validation, except the by-design reasons erased and visitor_cap. The counters
+          # are exported with 0 from startup, so the first reject shows as an increase; a restart
+          # (counter reset) or a new series does not. sum by (reason) merges the pods of one reason into
+          # one alert (a rollout briefly runs two pods).
+          - alert: WebAnalyticsSecondLineRejects
+            expr: sum by (reason) (increase(webanalytics_events_rejected_total{reason!~"erased|visitor_cap"}[1h])) > 0
+            for: 0m
+            labels:
+              severity: warning
+              namespace: apps
+            annotations:
+              summary: "data-service rejected web analytics events (reason {{ $labels.reason }})"
+              description: >-
+                data-service rejected events with reason {{ $labels.reason }} in the last hour although
+                furchert-ch validates every event first. Check that furchert-ch and data-service run
+                matching contract versions (docs/100-web-analytics.md §6.2) and the data-service logs
+                (class only, never event contents).
 
 prometheus:
   prometheusSpec:

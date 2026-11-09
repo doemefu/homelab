@@ -2190,6 +2190,146 @@ curl -s 'http://localhost:9090/api/v1/rules' | jq '.data.groups[] | select(.name
 
 **`NetmonDataServiceDown`** (warning, `for: 10m`) fires when Prometheus cannot scrape data-service, or has no target for it at all. Check `kubectl -n apps get pods -l app=data-service`, `flux get kustomizations data-service -n flux-system`, `kubectl -n monitoring get servicemonitor data-service` and the NetworkPolicy `kubectl -n apps get networkpolicy data-service`: its Prometheus selector must still match the Prometheus pod labels ("data-service NetworkPolicy (#127)"). The alert also fires during a planned scale-to-0 or Flux suspend, so silence it in Alertmanager for planned downtime.
 
+### Web analytics (WA-5): alerts, Cloudflare rules and owner checks
+
+Web analytics (Epic #348, spec `docs/100-web-analytics.md`) stores events in schema `webanalytics` of the `data_service` database and is dark until WA-6. This section holds the operator side of WA-5 (homelab#351): the alert rules, the Cloudflare settings and the owner checks. Procedures that need the data-service WA-5 code (purge a day, change caps, disable ingest, reset the rollup mark) follow with data-service#56 and link its own docs.
+
+#### Alerts (`homelab-webanalytics`)
+
+Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml` and `cluster/values/tests/webanalytics-timing.test.yml` (30 s cadence, boundary of the 15 minute hold). Spec §7.9 is the contract for the metric names.
+
+| Alert | Fires when | For | Severity | First checks |
+|-------|------------|-----|----------|--------------|
+| `WebAnalyticsIngestSpike` | accepted events in the last hour > 500 **and** > 3 × the 7-day average of the hourly count (recording rule `webanalytics:accepted:increase1h`, current hour excluded) | 15m | warning | compare `webanalytics_edge_dropped_total` and `webanalytics_events_rejected_total`; Cloudflare analytics for a bot burst on `/api/v`; the cap state in `GET /api/webanalytics/status` |
+| `WebAnalyticsRejectRatioHigh` | rejects (all reasons except `erased`) > 100/h **and** > 50 % of rejects plus accepted | 30m | info | version mismatch between furchert-ch and data-service (spec §6.2), reasons in `webanalytics_events_rejected_total` |
+| `WebAnalyticsSecondLineRejects` | any increase of `webanalytics_events_rejected_total` in the last hour for a reason other than `erased` and `visitor_cap` | 0m | warning | the `reason` label; contract mismatch or an attack that passed furchert-ch's validation; data-service logs (class only) |
+
+`info` alerts are normally visible only in Prometheus and Alertmanager, because the chart's `InfoInhibitor` suppresses them in Discord unless a warning fires in the same namespace. `WebAnalyticsIngestCapped` and `WebAnalyticsTableLarge` (gauges) follow with data-service WA-5; `WebAnalyticsIngestSilent` follows in WA-6 (#352), because before go-live there is no traffic and it would fire.
+
+**Rollout.** Merge, then run `ansible-playbook infra/playbooks/41_monitoring.yml --check --diff` from an up-to-date checkout of `main`. Stop if the diff shows anything except the new PrometheusRule; then run the playbook, and a second run must show no change. Afterwards (all read-only; paste into a `bash` subshell, type `bash` first, because the block uses `exit`):
+
+```bash
+# the PrometheusRule carries the alerts and the recording rule
+kubectl -n monitoring get prometheusrule kube-prometheus-stack-homelab-webanalytics -o yaml \
+  | grep -oE '(alert|record): [A-Za-z:0-9]+'
+# Prometheus itself loaded the group (a failed reload would keep the old rules): port-forward, then
+nc -z localhost 19090 2>/dev/null && { echo "port 19090 is already in use: stop"; exit 1; }
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 19090:9090 >/dev/null &
+PF=$!
+for i in $(seq 1 20); do curl -sf http://localhost:19090/-/ready >/dev/null && break; sleep 1; done
+curl -sf http://localhost:19090/-/ready >/dev/null && kill -0 "$PF" || { echo "port-forward not ready"; kill "$PF"; exit 1; }
+curl -s http://localhost:19090/api/v1/rules | python3 -c 'import sys,json; g=[x for x in json.load(sys.stdin)["data"]["groups"] if x["name"]=="homelab-webanalytics"]; print([r["name"] for r in g[0]["rules"]])'
+# the metrics exist (counters are exported with 0 from startup)
+curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_accepted_total)'
+curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_rejected_total)'
+kill "$PF"
+```
+
+Rules and metric names are compared with the data-service actuator scrape before the gauge rules are added.
+
+#### Cloudflare rules for web analytics (owner, dashboard)
+
+Cloudflare is a processor here (edge and transport) and no analytics product is enabled for the zone.
+
+1. **Web Analytics / RUM and Zaraz off.** Dashboard `furchert.ch` → Web Analytics (no site enabled, no automatic beacon) and Zaraz (no tool configured). Record the result in homelab#351.
+2. **`/api/v` outside the auth rate-limit rule.** The Free-plan rule `auth-service: token and login` (see "Cloudflare rules (owner, dashboard; recreate from these settings)" below) matches only `(http.request.uri.path eq "/oauth2/token" or http.request.uri.path eq "/login")`. Check that the expression contains no prefix match such as `starts_with(... "/api")`, so the collect route `/api/v` and `/api/v/forget` are not counted by it. furchert-ch limits `/api/v` itself (spec §5.8).
+3. **Optional WAF custom rule** (only the first time the owner wants edge filtering of the collect route; one custom-rule slot, keep the slot reserved for the mcp-hub incident rule free if the plan only has one left, see "L1 — Cloudflare block"): name `web analytics: collect route`, expression
+   `(http.host eq "furchert.ch" and http.request.uri.path in {"/api/v" "/api/v/forget"} and (http.request.method ne "POST" or cf.client.bot))`, action **Block**. If `cf.client.bot` is not available on the zone's plan, use `(http.host eq "furchert.ch" and http.request.uri.path in {"/api/v" "/api/v/forget"} and http.request.method ne "POST")`. Undo: disable or delete the rule; the collect route works without it.
+
+#### Backups, NetworkPolicy and restore test
+
+- **Backups (Q2, spec §13):** the nightly dumps, Longhorn snapshots and the Mac app-data dumps are unchanged. They contain the pseudonymous visitor ids of `webanalytics.events`. Erasure and retention act on live data only; copies age out on their own rotation (the Mac dumps when the owner deletes them).
+- **NetworkPolicy:** unchanged. The collect path is furchert-ch → data-service `POST /api/webanalytics/events` on the existing policy (`apps/data-service`, TCP 8082 from the furchert-ch pods).
+- **Restore test of `data_service` (owner step, schema `webanalytics` only; not run unattended).** Paste each stage into a `bash` subshell (type `bash` first): the stages use shell functions and `exit`, which would otherwise close the interactive shell. The Longhorn volume of the shared PostgreSQL is already close to full at block level (data-service#57), so the test restores one schema, streams the dump over stdin (no copy in `/tmp`) and drops the scratch database at the end.
+
+Run the three stages in the **same `bash` session** (the functions and variables carry over).
+
+*Stage 1: prechecks and the live counts.*
+
+```bash
+pg() { kubectl -n apps exec postgresql-0 -c postgresql -- "$@"; }          # no stdin
+pgi() { kubectl -n apps exec -i postgresql-0 -c postgresql -- "$@"; }       # with stdin, only for the two pg_restore calls
+psqlq() { pg psql -U postgres -t -A "$@"; }
+WORK=$(mktemp -d)
+COUNTS="SELECT table_name || '=' || (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_schema='webanalytics' AND table_type='BASE TABLE' ORDER BY table_name;"
+
+# 0) Free space first. (a) The data directory must be below 70 % and have room for three times the schema
+#    size plus 1 GiB (restore, restore-time writes and live-write headroom)
+DATADIR=$(pg psql -U postgres -t -A -c "SHOW data_directory;")
+pg df -h "$DATADIR"
+SIZE=$(psqlq -d data_service -c "SELECT coalesce(sum(pg_total_relation_size(format('%I.%I', schemaname, tablename)::regclass)), 0) FROM pg_tables WHERE schemaname='webanalytics';")
+AVAIL=$(pg df -Pk "$DATADIR" | awk 'NR==2{print $4*1024}')
+[ -n "$SIZE" ] && [ -n "$AVAIL" ] || { echo "schema size or free space unknown: stop"; exit 1; }
+echo "schema size $SIZE bytes, data directory available $AVAIL bytes"
+[ "$AVAIL" -gt $((3*SIZE + 1073741824)) ] || { echo "not enough free space on the data directory: stop"; exit 1; }
+# (b) ... and every Longhorn replica node must have room too: the filesystem figure does not show the
+#     block-level usage of the replicas
+kubectl -n longhorn-system get nodes.longhorn.io -o json | python3 -c 'import sys,json
+for n in json.load(sys.stdin)["items"]:
+    for d in n["status"].get("diskStatus", {}).values():
+        print(n["metadata"]["name"], "available %.1f GiB of %.1f GiB" % (d["storageAvailable"]/2**30, d["storageMaximum"]/2**30))'
+# Proceed only if each node has more available than three times the schema size plus 1 GiB. Otherwise stop.
+
+# 1) Live counts, taken right before the backup run (outside 01:12 and 07:30)
+psqlq -d data_service -c "$COUNTS" > "$WORK/counts-live.txt"
+```
+
+*Between the stages:* run `scripts/backup-app-data.sh` (see "App-data backups to the operator's Mac (#64)"). When it finishes, set `RUN` to the directory printed by "Backup complete" (`RUN=~/informatik/homelab/backups/<YYYY-MM-DD_HHMMSS>`); never reuse an older run, matching counts would hide the mistake.
+
+*Stage 2: restore and compare.*
+
+```bash
+# 2) The dump contains the schema (the container's pg_restore: no local PostgreSQL client needed)
+pgi pg_restore -l < "$RUN/pg-data_service.dump" | grep -E 'SCHEMA - webanalytics'
+
+# 3) Create the scratch database; STOP if it fails (see "After an interrupted test" below)
+pg createdb -U postgres restore_test || { echo "restore_test exists or createdb failed: stop"; exit 1; }
+# The schema is created in every case: pg_restore -n skips the SCHEMA entry
+psqlq -d restore_test -c "CREATE SCHEMA IF NOT EXISTS webanalytics;"
+# Restore only that schema, streamed over stdin; the errors are kept before any cleanup
+RESTORE_OK=1; SAVED=1
+pgi pg_restore -U postgres -d restore_test --no-owner -n webanalytics < "$RUN/pg-data_service.dump" 2> "$WORK/restore.err" || RESTORE_OK=0
+[ -s "$WORK/restore.err" ] && RESTORE_OK=0
+if [ "$RESTORE_OK" = 0 ]; then
+  cp "$WORK/restore.err" "$RUN/restore-test.err" && cmp -s "$WORK/restore.err" "$RUN/restore-test.err" || SAVED=0
+  [ "$SAVED" = 1 ] \
+    && echo "pg_restore failed or reported errors: details in $RUN/restore-test.err; the test FAILS, skip step 4 and run stage 3" \
+    || echo "could not save the errors completely, they stay in $WORK/restore.err (keep that directory); the test FAILS, run stage 3"
+fi
+
+# 4) Only when RESTORE_OK=1: counts must match for every table, and at least one non-empty table must be among them
+if [ "$RESTORE_OK" = 1 ]; then
+  psqlq -d restore_test -c "$COUNTS" > "$WORK/counts-restored.txt"
+  diff "$WORK/counts-live.txt" "$WORK/counts-restored.txt" && echo "counts match"
+  grep -vE '=0$' "$WORK/counts-live.txt" | head -3
+fi
+```
+
+*Stage 3: cleanup, mandatory.*
+
+```bash
+# 5) Drop the scratch database; if this fails, verify and finish the cleanup by hand before anything else
+pg dropdb -U postgres restore_test || { echo "dropdb failed: check with psqlq -d postgres -c '\l', drop restore_test, then continue"; exit 1; }
+# keep $WORK when the error file could not be saved completely
+{ [ "$RESTORE_OK" = 1 ] || [ "$SAVED" = 1 ]; } && rm -rf "$WORK"
+```
+
+The test passes only if `pg_restore` ended without errors (an index or constraint can fail after the rows loaded, with equal counts) and the counts match. If events were written between the count snapshot and the dump, the `events` count can differ by the rows of that window; rerun outside traffic or compare the aggregate tables only and record the reason.
+
+**After an interrupted test.** A leftover `restore_test` blocks the next `createdb`. Check that no restore is still running (`SELECT pid, state FROM pg_stat_activity WHERE datname='restore_test';` through `psqlq -d postgres`; wait or terminate it), then drop the scratch database inside the PostgreSQL container with `kubectl -n apps exec postgresql-0 -c postgresql -- dropdb -U postgres restore_test` (never a bare `dropdb`, which would run on the Mac) and start again from stage 1.
+
+**Before go-live the result can be inconclusive.** A fresh installation with the rollup disabled can have no analytics rows at all (every count `0`); a correct restore then cannot meet the "one non-empty table" criterion. Record "inconclusive" in homelab#351 and repeat the test after the first permitted rollup or the first real events.
+
+#### Owner checks (record each result in homelab#351)
+
+| Check | Where | Pass when |
+|-------|-------|-----------|
+| Cloudflare Web Analytics/RUM and Zaraz off | dashboard `furchert.ch` | no site enabled, no Zaraz tool |
+| `cf.client.bot` available | WAF custom rule editor (field list) | field accepted, else the fallback rule above |
+| `/api/v` outside the auth rate-limit rule | Security → WAF → Rate limiting rules | expression matches only `/oauth2/token` and `/login` |
+| n8n schedules versus the rollup runs | n8n UI → workflows → schedule triggers | no job fires in the minutes around 01:12 and 07:30 Europe/Zurich, or an overlap is recorded as harmless (the run takes seconds) |
+| PVC usage versus the expansion threshold | `kubectl -n apps exec postgresql-0 -c postgresql -- df -h "$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c 'SHOW data_directory;')"` and the Longhorn UI (block level) for `data-postgresql-0` | usage and the threshold from homelab-data-service#57 are recorded; analytics at its cap adds about 1.2 GB (spec §7.3), on 2026-11-08 (data-service#57) the filesystem was 2.3 G of 4.9 G (48 %) and the Longhorn block level 4.58 GiB of 5 GiB (about 92 %); confirm the unit in the Longhorn UI |
+
 ### NM-4: login-event secrets (auth-service → data-service)
 
 NM-4 (#134) adds the secrets for the login-event pipeline: auth-service records form logins in an outbox, and data-service pulls them with its own client (`data-service`, scope `login-events:read`). Contract: `docs/060-network-monitoring.md` §7.6, §9.
