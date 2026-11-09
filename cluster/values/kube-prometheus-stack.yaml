@@ -748,13 +748,13 @@ additionalPrometheusRulesMap:
   # runs two pods, and the gauges are per pod.
   # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts in
   # Discord unless a warning fires in the same namespace (InfoInhibitor joins on the namespace label).
-  # It stays visible in Prometheus/Alertmanager. All three alerts carry the static label
+  # It stays visible in Prometheus/Alertmanager. All five alerts carry the static label
   # namespace: apps, the namespace of the source series (data-service): sum() drops the label from the
   # aggregated alerts, and without it a namespace-less warning could release the info alert. With it,
-  # Spike and SecondLineRejects (warnings) release RejectRatioHigh (info) without releasing the other
-  # info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
+  # Spike, SecondLineRejects, IngestCapped and TableLarge (warnings) release RejectRatioHigh (info)
+  # without releasing the other info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
   # NetmonSeriesTruncated has no static label. Trade-off: any warning in namespace apps releases
-  # RejectRatioHigh, and Spike and SecondLineRejects release the other info alerts with namespace apps.
+  # RejectRatioHigh, and the four warnings release the other info alerts with namespace apps.
   homelab-webanalytics:
     groups:
       - name: homelab-webanalytics

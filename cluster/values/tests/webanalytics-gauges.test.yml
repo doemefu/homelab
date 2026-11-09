@@ -54,7 +54,7 @@ tests:
             exp_annotations:
               summary: "Web analytics ingest is capped"
               description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
-  # Capped: the gauge at 0 never fires, and a restarted pod with a stale 1 on the old series that disappears does not keep the alert.
+  # Capped: the gauge at 0 never fires.
   - interval: 1m
     input_series:
       - series: "webanalytics_ingest_capped{pod=\"data-service-a\"}"
@@ -64,6 +64,35 @@ tests:
         alertname: WebAnalyticsIngestCapped
         exp_alerts: []
       - eval_time: 60m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts: []
+  # Capped: a restarted pod whose old series ends with a stale marker (pod a: 1 for 11 minutes, then stale) while the new pod (b) reports 0 does not keep the alert: firing at 9, resolved at 12.
+  - interval: 1m
+    input_series:
+      - series: "webanalytics_ingest_capped{pod=\"data-service-a\"}"
+        values: "1x10 stale"
+      - series: "webanalytics_ingest_capped{pod=\"data-service-b\"}"
+        values: "_x11 0x50"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is capped"
+              description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 10m
+        alertname: WebAnalyticsIngestCapped
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "apps"
+            exp_annotations:
+              summary: "Web analytics ingest is capped"
+              description: "data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service runbooks in its DEPLOYMENT.md (\"Runbooks (canonical ...)\": purge a poisoned day, adjust caps); owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."
+      - eval_time: 12m
         alertname: WebAnalyticsIngestCapped
         exp_alerts: []
   # Capped: an absent series (before data-service WA-5 or right after a restart) is silent.

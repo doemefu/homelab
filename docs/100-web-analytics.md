@@ -1425,7 +1425,7 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | # | Item | Sections changed | Affected WA issues |
 |---|---|---|---|
 | 75 | Gauge rules shipped: `WebAnalyticsIngestCapped` (`max(...) == 1`, 5m) and `WebAnalyticsTableLarge` (`max(...) > 3 GiB`, 1h), both `namespace: apps`; metric names verified on the live scrape | §7.9 | homelab #351 |
-| 76 | `WebAnalyticsTableLarge` threshold 3 GiB (owner decision after the volume grew to 10 GiB, homelab#359); the gauge is absent until the first measurement | §7.9, §7.3, §16 R6 | homelab #351 |
+| 76 | `WebAnalyticsTableLarge` threshold 3 GiB (owner decision after the volume grew to 10 GiB, homelab#359); the gauge is absent until the first measurement | §7.9, §7.3, §16 R6, F15 | homelab #351 |
 | 77 | Runbooks live in data-service's DEPLOYMENT (canonical); homelab keeps the cluster-level steps and links | §12.4 (already), DEPLOYMENT | homelab #351 |
 
 ### Committed (2026-11-08, WA-0)

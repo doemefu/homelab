@@ -2196,7 +2196,7 @@ Web analytics (Epic #348, spec `docs/100-web-analytics.md`) stores events in sch
 
 #### Alerts (`homelab-webanalytics`)
 
-Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml` `cluster/values/tests/webanalytics-timing.test.yml` (30 s cadence, boundary of the 15 minute hold) and `cluster/values/tests/webanalytics-gauges.test.yml` (the two gauge rules, absent-series cases). Spec §7.9 is the contract for the metric names.
+Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml`, `cluster/values/tests/webanalytics-timing.test.yml` (30 s cadence, boundary of the 15 minute hold) and `cluster/values/tests/webanalytics-gauges.test.yml` (the two gauge rules, absent-series cases). Spec §7.9 is the contract for the metric names.
 
 | Alert | Fires when | For | Severity | First checks |
 |-------|------------|-----|----------|--------------|
@@ -2227,7 +2227,7 @@ curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_rej
 kill "$PF"
 ```
 
-Rules and metric names are compared with the data-service actuator scrape before the gauge rules are added.
+The gauge rules are in; the metric names were verified on the live scrape of 2026-11-09.
 
 #### Runbooks (canonical in data-service; this file keeps the cluster-level steps)
 
@@ -2238,7 +2238,7 @@ The SQL and the step lists live in homelab-data-service `DEPLOYMENT.md`, section
 | A bot burst or poisoned events got through | (1) purge a poisoned day (raw events and the day's aggregates in one transaction) | dump the schema to the Mac first, then run the SQL through `kubectl -n apps exec -i postgresql-0 -c postgresql -- psql ...` (the data-service runbook gives the exact commands) |
 | Recompute after a fix | (2) reset D − 1, D, D + 1; (3) re-mark rollup days | same exec path; the rollup runs at 01:12 and 07:30 Europe/Zurich |
 | The caps are too low or too high | (4) adjust caps: a `k8s/deployment.yaml` PR in the data-service repo (Flux applies it), then `kubectl -n apps delete pod -l app=data-service` (never `rollout restart`) | none |
-| Stop analytics ingest | (5) data-side stop (a cap of 0); prefer furchert-ch's kill switch `ANALYTICS_COLLECT_ENABLED=false` (manifest PR in the furchert-ch repo, Flux applies it, then `kubectl -n apps delete pod -l app=furchert-ch`); forget and DELETE keep working | the rollup kill switch is `netmon.collectors.webanalytics-rollup.enabled=false` (data-service manifest PR) |
+| Stop analytics ingest | (5) data-side stop (a cap of 0; it makes `WebAnalyticsIngestCapped` fire, silence it for the duration); prefer furchert-ch's kill switch `ANALYTICS_COLLECT_ENABLED=false` (manifest PR in the furchert-ch repo, Flux applies it, then `kubectl -n apps delete pod -l app=furchert-ch`); forget and DELETE keep working | the rollup kill switch is the environment variable `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED="false"` (data-service manifest PR; `SPRING_APPLICATION_JSON` outranks it, do not set both) |
 
 Capacity: the PostgreSQL volume is 10 GiB since homelab#359 (runbook "Growing the PostgreSQL volume").
 
