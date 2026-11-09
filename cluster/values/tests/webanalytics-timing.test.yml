@@ -1,0 +1,30 @@
+# promtool timing test for WebAnalyticsIngestSpike at the production evaluation cadence (30 s),
+# docs/100-web-analytics.md §7.9, homelab#351. webanalytics.test.yml evaluates every 2 minutes (the
+# 7-day baseline needs that to stay under promtool's 10 000 sample cap) and cannot tell a 15 minute
+# hold from a 14 or 16 minute one. This file uses a short history (3 hours at 60/h, then 840/h), so
+# it stays far below the cap. The recorded hourly increase first exceeds 500 at 3h34m (pending from
+# then on); with `for: 15m` the alert must be silent at 3h48m30s and firing at 3h49m.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30s
+tests:
+  - interval: 1m
+    input_series:
+      - series: webanalytics_events_accepted_total
+        values: "0+1x180 194+14x90"
+    alert_rule_test:
+      - eval_time: 3h34m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts: []
+      - eval_time: 3h48m30s
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts: []
+      - eval_time: 3h49m
+        alertname: WebAnalyticsIngestSpike
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              namespace: "monitoring"
+            exp_annotations:
+              summary: "Web analytics ingest is more than 3x the 7-day hourly average"
+              description: "data-service accepted more than 500 analytics events in the last hour, more than three times the hourly average of the previous 7 days. Possible poisoning or a bot loop: compare webanalytics_edge_dropped_total and webanalytics_events_rejected_total, check the daily cap state in GET /api/webanalytics/status, and see docs/100-web-analytics.md §7.9; owner checks in DEPLOYMENT.md \"Web analytics (WA-5): alerts, Cloudflare rules and owner checks\"."

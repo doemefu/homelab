@@ -748,6 +748,9 @@ additionalPrometheusRulesMap:
   # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts
   # in Discord unless a warning fires in the same namespace (monitoring). It stays visible in
   # Prometheus/Alertmanager.
+  # The two aggregated alerts (Spike, RejectRatioHigh) use sum() and lose the namespace of their source
+  # series, so they carry the static label namespace: monitoring (like the other info rules in this
+  # file); otherwise a namespace-less warning could release the info alert from its inhibition.
   homelab-webanalytics:
     groups:
       - name: homelab-webanalytics
@@ -768,6 +771,7 @@ additionalPrometheusRulesMap:
             for: 15m
             labels:
               severity: warning
+              namespace: monitoring
             annotations:
               summary: "Web analytics ingest is more than 3x the 7-day hourly average"
               description: >-
@@ -791,6 +795,7 @@ additionalPrometheusRulesMap:
             for: 30m
             labels:
               severity: info
+              namespace: monitoring
             annotations:
               summary: "More than half of the web analytics events are rejected"
               description: >-
