@@ -654,8 +654,10 @@ additionalPrometheusRulesMap:
                 DEPLOYMENT.md "Platform alerting (#284)".
           # The counterpart of WorkloadUnavailable's `spec > 0` guard (#362): a workload scaled to 0 for
           # maintenance (engine refresh, PVC expansion, restore) and never scaled back stays silent there.
-          # Deliberate zeros fire too, by design: mcp-hub kill switch L3 (silence the alert for the
-          # incident). No other workload in these namespaces is meant to sit at 0.
+          # Deliberate zeros fire too, by design, once they last over 1 h: mcp-hub kill switch L3 and
+          # club-mcp kill switch L3 or its decommission (silence the alert, or remove the object), and a
+          # `scripts/backup-app-data.sh --quiesce` run that scales open-webui and n8n to 0 for longer than
+          # an hour. No other workload in these namespaces is meant to sit at 0.
           - alert: WorkloadScaledToZero
             expr: >-
               (max by (namespace, deployment) (kube_deployment_spec_replicas{namespace=~"apps|platform|flux-system"}) == 0)
@@ -672,12 +674,14 @@ additionalPrometheusRulesMap:
                 WorkloadUnavailable ignores a deliberate scale to 0, so a forgotten scale-up after maintenance
                 shows up only here. Scale it back (`kubectl -n {{ $labels.namespace }} scale
                 {{ if $labels.deployment }}deployment/{{ $labels.deployment }}{{ else }}statefulset/{{ $labels.statefulset }}{{ end }}
-                --replicas=1`) or re-run the owning playbook. Expected during mcp-hub kill switch L3:
-                silence it for the incident; runbook in DEPLOYMENT.md "Platform alerting (#284)".
+                --replicas=1`) or re-run the owning playbook. Expected during a kill switch L3 (mcp-hub,
+                club-mcp) or a decommission: silence it; runbook in DEPLOYMENT.md "Platform alerting (#284)".
           # A PVC whose expansion does not finish (#359/#362: a stale Longhorn engine hung the frontend
           # rescan for 18 min, nothing alerted). Branch 1: the PVC request exceeds the capacity of its bound
           # PV (the PV grows only when the controller-side expansion succeeds); kube_persistentvolume_*
           # is cluster-scoped, so the claim's namespace/name come from kube_persistentvolume_claim_ref.
+          # Both join sides are aggregated with max by first: during a KSM rollout two pods export the
+          # same series for a moment, which would make the join many-to-many and fail the rule.
           # Branch 2: a resize condition stays true (kube_persistentvolumeclaim_status_condition is
           # experimental in KSM v2.14; branch 1 alone still covers the Longhorn case).
           - alert: PersistentVolumeClaimResizeStuck
@@ -687,8 +691,9 @@ additionalPrometheusRulesMap:
                 > on (namespace, persistentvolumeclaim)
                 max by (namespace, persistentvolumeclaim) (
                   label_replace(label_replace(
-                    kube_persistentvolume_capacity_bytes
-                      * on (persistentvolume) group_left (claim_namespace, name) kube_persistentvolume_claim_ref,
+                    max by (persistentvolume) (kube_persistentvolume_capacity_bytes)
+                      * on (persistentvolume) group_left (claim_namespace, name)
+                    max by (persistentvolume, claim_namespace, name) (kube_persistentvolume_claim_ref),
                     "namespace", "$1", "claim_namespace", "(.+)"),
                   "persistentvolumeclaim", "$1", "name", "(.+)"))
               )

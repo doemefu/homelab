@@ -380,12 +380,17 @@ tests:
                 ServiceMonitor monitoring/cert-manager (applied by 41_monitoring.yml).
 
   # --- WorkloadScaledToZero (#362) ---
-  # A Deployment at spec 0 fires after 1 h (not at 59 min); a StatefulSet at spec 1 and a
-  # Deployment at 0 outside apps/platform/flux-system never fire.
+  # A Deployment and a StatefulSet at spec 0 fire after 1 h (not at 59 min); a Deployment that is
+  # scaled back up after 50 min never fires; a StatefulSet at spec 1 and a Deployment at 0 outside
+  # apps/platform/flux-system never fire.
   - interval: 1m
     input_series:
       - series: kube_deployment_spec_replicas{namespace="apps", deployment="open-webui"}
         values: 0x70
+      - series: kube_statefulset_replicas{namespace="apps", statefulset="postgresql"}
+        values: 0x70
+      - series: kube_deployment_spec_replicas{namespace="apps", deployment="n8n"}
+        values: 0x50 1x20
       - series: kube_statefulset_replicas{namespace="apps", statefulset="influxdb2"}
         values: 1x70
       - series: kube_deployment_spec_replicas{namespace="monitoring", deployment="kube-prometheus-stack-grafana"}
@@ -407,8 +412,20 @@ tests:
                 Deployment apps/open-webui has wanted 0 replicas for an hour. WorkloadUnavailable ignores a
                 deliberate scale to 0, so a forgotten scale-up after maintenance shows up only here. Scale it
                 back (`kubectl -n apps scale deployment/open-webui --replicas=1`) or re-run the owning
-                playbook. Expected during mcp-hub kill switch L3: silence it for the incident; runbook in
-                DEPLOYMENT.md "Platform alerting (#284)".
+                playbook. Expected during a kill switch L3 (mcp-hub, club-mcp) or a decommission: silence
+                it; runbook in DEPLOYMENT.md "Platform alerting (#284)".
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              statefulset: postgresql
+            exp_annotations:
+              summary: "apps/postgresql has been scaled to 0 for 1 hour"
+              description: >-
+                StatefulSet apps/postgresql has wanted 0 replicas for an hour. WorkloadUnavailable ignores a
+                deliberate scale to 0, so a forgotten scale-up after maintenance shows up only here. Scale it
+                back (`kubectl -n apps scale statefulset/postgresql --replicas=1`) or re-run the owning
+                playbook. Expected during a kill switch L3 (mcp-hub, club-mcp) or a decommission: silence
+                it; runbook in DEPLOYMENT.md "Platform alerting (#284)".
 
   # --- PersistentVolumeClaimResizeStuck (#362) ---
   # data-postgresql-0 requests 10Gi while its PV still has 5Gi (fires after 15 min, also carries a
@@ -424,6 +441,12 @@ tests:
         values: 5368709120x25
       - series: kube_persistentvolume_claim_ref{namespace="monitoring", persistentvolume="pvc-pg", claim_namespace="apps",
           name="data-postgresql-0"}
+        values: 1x25
+      # a second KSM pod (rollout) exports the same PV series with another instance label
+      - series: kube_persistentvolume_capacity_bytes{namespace="monitoring", instance="ksm-2", persistentvolume="pvc-pg"}
+        values: 5368709120x25
+      - series: kube_persistentvolume_claim_ref{namespace="monitoring", instance="ksm-2", persistentvolume="pvc-pg",
+          claim_namespace="apps", name="data-postgresql-0"}
         values: 1x25
       - series: kube_persistentvolumeclaim_status_condition{namespace="apps", persistentvolumeclaim="data-postgresql-0",
           type="Resizing", status="true"}
