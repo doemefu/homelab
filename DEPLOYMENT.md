@@ -2205,15 +2205,17 @@ Web analytics (Epic #348, spec `docs/100-web-analytics.md`) stores events in sch
 
 #### Alerts (`homelab-webanalytics`)
 
-Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml` and `cluster/values/tests/webanalytics-timing.test.yml` (30 s cadence, boundary of the 15 minute hold). Spec §7.9 is the contract for the metric names.
+Rules live in `cluster/values/kube-prometheus-stack.yaml` under `additionalPrometheusRulesMap.homelab-webanalytics`; tests in `cluster/values/tests/webanalytics.test.yml`, `cluster/values/tests/webanalytics-timing.test.yml` (30 s cadence, boundary of the 15 minute hold) and `cluster/values/tests/webanalytics-gauges.test.yml` (the two gauge rules, absent-series cases). Spec §7.9 is the contract for the metric names.
 
 | Alert | Fires when | For | Severity | First checks |
 |-------|------------|-----|----------|--------------|
 | `WebAnalyticsIngestSpike` | accepted events in the last hour > 500 **and** > 3 × the 7-day average of the hourly count (recording rule `webanalytics:accepted:increase1h`, current hour excluded) | 15m | warning | compare `webanalytics_edge_dropped_total` and `webanalytics_events_rejected_total`; Cloudflare analytics for a bot burst on `/api/v`; the cap state in `GET /api/webanalytics/status` |
 | `WebAnalyticsRejectRatioHigh` | rejects (all reasons except `erased`) > 100/h **and** > 50 % of rejects plus accepted | 30m | info | version mismatch between furchert-ch and data-service (spec §6.2), reasons in `webanalytics_events_rejected_total` |
+| `WebAnalyticsIngestCapped` | `max(webanalytics_ingest_capped) == 1`: the hourly (2 500) or daily (10 000) ingest cap is reached | 5m | warning | `GET /api/webanalytics/status` (`dailyCap`, `capped`), spike and reject counters, then data-service's runbooks "purge a poisoned day" and "adjust caps" |
 | `WebAnalyticsSecondLineRejects` | any increase of `webanalytics_events_rejected_total` in the last hour for a reason other than `erased` and `visitor_cap` | 0m | warning | the `reason` label; contract mismatch or an attack that passed furchert-ch's validation; data-service logs (class only) |
+| `WebAnalyticsTableLarge` | `max(webanalytics_raw_table_bytes) > 3 GiB` (total relation size of `webanalytics.events`; about 2.0 to 2.2 GB is expected at the caps; the volume is 10 GiB since homelab#359) | 1h | warning | retention job log, caps, volume headroom (owner checks below), data-service's "purge a poisoned day" |
 
-`info` alerts are normally visible only in Prometheus and Alertmanager, because the chart's `InfoInhibitor` suppresses them in Discord unless a warning fires in the same namespace. `WebAnalyticsIngestCapped` and `WebAnalyticsTableLarge` (gauges) follow with data-service WA-5; `WebAnalyticsIngestSilent` follows in WA-6 (#352), because before go-live there is no traffic and it would fire.
+`info` alerts are normally visible only in Prometheus and Alertmanager, because the chart's `InfoInhibitor` suppresses them in Discord unless a warning fires in the same namespace. The gauge rules `WebAnalyticsIngestCapped` and `WebAnalyticsTableLarge` read the gauges of data-service WA-5 (`webanalytics_ingest_capped`, `webanalytics_raw_table_bytes`); `WebAnalyticsTableLarge` has no series until the first successful measurement and does not fire then. `WebAnalyticsIngestSilent` follows in WA-6 (#352), because before go-live there is no traffic and it would fire.
 
 **Rollout.** Merge, then run `ansible-playbook infra/playbooks/41_monitoring.yml --check --diff` from an up-to-date checkout of `main`. Stop if the diff shows anything except the new PrometheusRule; then run the playbook, and a second run must show no change. Afterwards (all read-only; paste into a `bash` subshell, type `bash` first, because the block uses `exit`):
 
@@ -2234,7 +2236,20 @@ curl -s 'http://localhost:19090/api/v1/query?query=count(webanalytics_events_rej
 kill "$PF"
 ```
 
-Rules and metric names are compared with the data-service actuator scrape before the gauge rules are added.
+The gauge rules are in; the metric names were verified on the live scrape of 2026-11-09.
+
+#### Runbooks (canonical in data-service; this file keeps the cluster-level steps)
+
+The SQL and the step lists live in homelab-data-service `DEPLOYMENT.md`, section "Runbooks (canonical; ...)", and are tested there against the real schema. They are not repeated here:
+
+| Situation | Data-service runbook | Cluster-level steps here |
+|-----------|---------------------|--------------------------|
+| A bot burst or poisoned events got through | (1) purge a poisoned day (raw events and the day's aggregates in one transaction) | dump the schema to the Mac first, then run the SQL through `kubectl -n apps exec -i postgresql-0 -c postgresql -- psql ...` (the data-service runbook gives the exact commands) |
+| Recompute after a fix | (2) reset D − 1, D, D + 1; (3) re-mark rollup days | same exec path; the rollup runs at 01:12 and 07:30 Europe/Zurich |
+| The caps are too low or too high | (4) adjust caps: a `k8s/deployment.yaml` PR in the data-service repo (Flux applies it), then `kubectl -n apps delete pod -l app=data-service` (never `rollout restart`) | none |
+| Stop analytics ingest | (5) data-side stop (a cap of 0; it makes `WebAnalyticsIngestCapped` fire, silence it for the duration); prefer furchert-ch's kill switch `ANALYTICS_COLLECT_ENABLED=false` (manifest PR in the furchert-ch repo, Flux applies it, then `kubectl -n apps delete pod -l app=furchert-ch`); forget and DELETE keep working | the rollup kill switch is the environment variable `NETMON_COLLECTORS_WEBANALYTICS_ROLLUP_ENABLED="false"` (data-service manifest PR; `SPRING_APPLICATION_JSON` outranks it, do not set both) |
+
+Capacity: the PostgreSQL volume is 10 GiB since homelab#359 (runbook "Growing the PostgreSQL volume").
 
 #### Cloudflare rules for web analytics (owner, dashboard)
 
@@ -2337,7 +2352,7 @@ The test passes only if `pg_restore` ended without errors (an index or constrain
 | `cf.client.bot` available | WAF custom rule editor (field list) | field accepted, else the fallback rule above |
 | `/api/v` outside the auth rate-limit rule | Security → WAF → Rate limiting rules | expression matches only `/oauth2/token` and `/login` |
 | n8n schedules versus the rollup runs | n8n UI → workflows → schedule triggers | no job fires in the minutes around 01:12 and 07:30 Europe/Zurich, or an overlap is recorded as harmless (the run takes seconds) |
-| PVC usage versus the expansion threshold | `kubectl -n apps exec postgresql-0 -c postgresql -- df -h "$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c 'SHOW data_directory;')"` and the Longhorn UI (block level) for `data-postgresql-0` | usage and the threshold from homelab-data-service#57 are recorded; analytics at its cap adds about 1.2 GB (spec §7.3), on 2026-11-08 (data-service#57) the filesystem was 2.3 G of 4.9 G (48 %) and the Longhorn block level 4.58 GiB of 5 GiB (about 92 %); confirm the unit in the Longhorn UI |
+| PVC usage versus the expansion threshold | `kubectl -n apps exec postgresql-0 -c postgresql -- df -h "$(kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -t -A -c 'SHOW data_directory;')"` and the Longhorn UI (block level) for `data-postgresql-0` | usage is recorded against the 10 GiB volume of homelab#359; `WebAnalyticsTableLarge` alerts at 3 GiB of table size, analytics at its cap adds about 2.0 to 2.2 GB of total relation size (spec §7.3, §7.9), on 2026-11-08 (data-service#57) the filesystem was 2.3 G of 4.9 G (48 %) and the Longhorn block level 4.58 GiB of 5 GiB (about 92 %); confirm the unit in the Longhorn UI |
 
 ### NM-4: login-event secrets (auth-service → data-service)
 
