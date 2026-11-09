@@ -2,7 +2,7 @@
 
 > Canonical copy (infrastructure repo). The parent workspace file `docs/100-web-analytics.md` forwards here (since homelab#349, WA-0). Relative `adr/` links resolve to `docs/adr/` in this repo. The specialist reports behind §15 are local-only and not part of this repo.
 
-**Status:** Accepted (rev 3.8, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.8 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
+**Status:** Accepted (rev 3.9, owner approval of rev 3.1 2026-11-08; rev 3.2 to 3.9 = review clarifications); committed in WA-0 (homelab#349). Specialist reports folded in (§15); plan review, re-review and the CodeRabbit design review of homelab PR #353 applied; all owner answers of 2026-11-08 applied, including the delivery rule "value first, compliance and hardening late, go-live last" (§18). No open owner question.
 **Epic:** `doemefu/homelab#348` · **Parent worklog:** `20261108-163648-web-analytics-epic-caea` (local-only)
 **Canonical location:** this file (`infrastructure/docs/100-web-analytics.md`). The parent workspace file `docs/100-web-analytics.md` is a forwarder (since `homelab#349`), following the `060` precedent.
 **ADR:** none new. [ADR 0002](adr/0002-network-telemetry-ownership.md) decisions 1 and 2 cover this (analytical data plane; one store, one owner); the push write path is a recorded exception to its decision 3 (§1.4); ADR 0002 carries the dated amendment of 2026-11-08 (WA-0).
@@ -79,7 +79,7 @@ Real-time or "active now"; heatmaps, session replay, rage/dead clicks, form-fiel
                                                                                                      netmon.inbound_request_groups ─► daily CF baseline
                                                                                                                 ▲ rollup 01:12 (provisional) + 07:30 (final), Europe/Zurich
  Admin ──► /[locale]/dashboard/analytics (SSR, ADMIN) ──GET, Bearer analytics:read─────────────────────────► GET /api/webanalytics/*
- Alerts: NetmonCollectorStale daily class (WA-3a) + 5 WebAnalytics* rules [WA-5] + IngestSilent (WA-6) ─► Alertmanager ─► Discord
+ Alerts: NetmonCollectorStale daily class (WA-3a) + 5 WebAnalytics* rules [WA-5] + IngestSilent (WA-6, info: Alertmanager and Prometheus, Discord only with a warning in namespace apps) ─► Alertmanager ─► Discord
 ```
 
 | Endpoint | Reachable from | Used by |
@@ -635,7 +635,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 
 **Delivery split (homelab#351):** the counter rules (`WebAnalyticsIngestSpike` with its recording rule, `WebAnalyticsRejectRatioHigh`, `WebAnalyticsSecondLineRejects`) shipped first (part 1); the gauge rules (`WebAnalyticsIngestCapped`, `WebAnalyticsTableLarge`) followed once data-service WA-5 exported `webanalytics_ingest_capped` and `webanalytics_raw_table_bytes` (part 2, verified on the live scrape 2026-11-09); both gauge rules use `max()` across pods and carry the static label `namespace: apps`. No separate presence alert rule is added: after the rules are applied, the owner checks (DEPLOYMENT.md) read the loaded expressions and count the series, and this section is the contract for the metric names. `info` alerts are normally visible only in Prometheus/Alertmanager (the chart's `InfoInhibitor`). The three counter alerts carry the static label `namespace: apps` (the namespace of the source series), so the warnings release the info alert. `WebAnalyticsSecondLineRejects` excludes `erased` and `visitor_cap` (by design); the ratio rule excludes only `erased`.
 
-**WebAnalytics rules** (key `homelab-webanalytics`, single `additionalPrometheusRulesMap`, promtool tests): five rules in WA-5, `WebAnalyticsIngestSilent` in WA-6 (go-live), because before go-live there is no traffic and the rule would fire.
+**WebAnalytics rules** (key `homelab-webanalytics`, single `additionalPrometheusRulesMap`, promtool tests): five rules in WA-5, `WebAnalyticsIngestSilent` in WA-6 (go-live). A naive "no event for 7 days" would fire right after the merge, because the accepted counter has been flat at 0 since WA-1; the rule is therefore gated on a latch recording rule (`webanalytics:accepted:last_seen_timestamp`, the Unix time of the last hour with accepted events, carried forward for up to a day between evaluations) and stays inert until the first events. It can be merged before the go-live end-to-end checklist, which then both proves the ingest and arms the rule: the checklist's events followed by a quiet week fire it on day 7 (day 1 after a busy week of at least 50 events per day). A Prometheus outage longer than one day loses the latch; the next accepted event rebuilds it. The availability clause (kube-state-metrics, both deployments) is a per-moment check: an outage that already ended does not suppress the alert.
 
 | Alert | Expression (sketch) | For | Severity | WA |
 |---|---|---|---|---|
@@ -644,7 +644,7 @@ Page groups: `home` (`/`); `offer` (`/automation`, `/it`); `proof` (`/projects`,
 | `WebAnalyticsRejectRatioHigh` | rejects / (rejects + accepted) > 0.5 and rejects > 100/h; rejects exclude only `erased`, `visitor_cap` counts | 30m | info | 5 |
 | `WebAnalyticsSecondLineRejects` | `sum by (reason) (increase(webanalytics_events_rejected_total{reason!~"erased\|visitor_cap"}[1h])) > 0` | 0m | warning | 5 |
 | `WebAnalyticsTableLarge` | `max(webanalytics_raw_table_bytes) > 3 GiB` (owner decision 2026-11-09: the shared volume is 10 GiB after homelab#359, the total relation size is expected at about 2.0 to 2.2 GB at the caps, so 3 GiB signals growth beyond the cap-based expectation; the gauge is absent until the first measurement and then the rule stays silent) | 1h | warning | 5 |
-| `WebAnalyticsIngestSilent` | no increase of `webanalytics_events_accepted_total` (enquiries not counted) for 7 days while data-service and furchert-ch are up | 1h | info | 6 |
+| `WebAnalyticsIngestSilent` | no analytics event accepted for 7 days, or for 24 hours when the previous week averaged at least 50 accepted events per day (owner decision 2026-11-09); detected through the latch recording rule `webanalytics:accepted:last_seen_timestamp` (the Unix time of the last hour with accepted events, carried forward), so it is inert while the feature is dark; both `data-service` and `furchert-ch` deployments available at evaluation time; enquiries are not counted | 1h | info | 6 |
 
 ---
 
@@ -887,7 +887,7 @@ All additive; **no backwards-incompatible change.** `/api/netmon/status` output 
 4. WA-3a: data-service WA-3a deployed with the rollup **disabled**; homelab daily-class PR merged; the owner runs playbook `41_monitoring.yml`; then the data-service follow-up enables the rollup. Then WA-3b.
 5. WA-4a, WA-4b: dashboard (it shows "no data yet" while dark).
 6. WA-5 "Compliance & hardening": auth-service side finding; data-service hardening rolled out first; then furchert-ch hardening (dark) and the homelab alerts; owner checks; final texts on the WA-6 branch.
-7. WA-6 go-live: one furchert-ch PR (legal text + flag flip) and one data-service PR (the coverage go-live date, homelab-data-service#61); end-to-end checklist right after the flip (no production end-to-end test is possible earlier; accepted); then the homelab `WebAnalyticsIngestSilent` rule.
+7. WA-6 go-live: one furchert-ch PR (legal text + flag flip) and one data-service PR (the coverage go-live date, homelab-data-service#61); end-to-end checklist right after the flip (no production end-to-end test is possible earlier; accepted); the homelab `WebAnalyticsIngestSilent` rule is merged and applied before the flip (it stays inert until the checklist's first events arm it).
 
 ### 12.4 Rollback
 
@@ -1209,8 +1209,9 @@ Order inside WA-5: the auth-service issue and the **data-service issue are rolle
 **homelab-data-service: "WA-6: set the coverage go-live date" (doemefu/homelab-data-service#61)**
 - One `k8s/deployment.yaml` PR setting `WEBANALYTICS_COVERAGE_GOLIVEDATE` to the go-live day (§8.2 `/coverage`, §11); merged and rolled out together with the furchert-ch go-live PR.
 
-**homelab: "WA-6: WebAnalyticsIngestSilent rule" (within the 0.5 PD; after the go-live end-to-end checklist passed)**
-- Rule per §7.9 (7 days, info) under `homelab-webanalytics`; promtool test; enquiries do not keep it silent (it reads `webanalytics_events_accepted_total` only).
+**homelab: "WA-6: WebAnalyticsIngestSilent rule" (within the 0.5 PD; merged and applied before the go-live end-to-end checklist, which arms it)**
+- Rule per §7.9 (7 days, 24 hours after a busy week; info) and the latch recording rule under `homelab-webanalytics`; promtool tests (dark, go-live, quiet nights, outage with exact firing boundary, 30 days of silence, fast path with and without a busy baseline, pod replacement, a 6 hour gap, deployments down, counter reset); enquiries do not keep it silent (the latch reads `webanalytics_events_accepted_total` only).
+- After `41_monitoring.yml`: `/api/v1/rules` shows the rule `ok` and `inactive`; after the checklist the latch series exists.
 
 ### Issue map
 
@@ -1427,6 +1428,14 @@ WA issue numbers (confirmed by the main session): homelab #349 (WA-0), #350 (WA-
 | 75 | Gauge rules shipped: `WebAnalyticsIngestCapped` (`max(...) == 1`, 5m) and `WebAnalyticsTableLarge` (`max(...) > 3 GiB`, 1h), both `namespace: apps`; metric names verified on the live scrape | §7.9 | homelab #351 |
 | 76 | `WebAnalyticsTableLarge` threshold 3 GiB (owner decision after the volume grew to 10 GiB, homelab#359); the gauge is absent until the first measurement | §7.9, §7.3, §16 R6, F15 | homelab #351 |
 | 77 | Runbooks live in data-service's DEPLOYMENT (canonical); homelab keeps the cluster-level steps and links | §12.4 (already), DEPLOYMENT | homelab #351 |
+
+### Revision 3.9 (WA-6 homelab, homelab#352, 2026-11-09)
+
+| # | Item | Sections changed | Affected WA issues |
+|---|---|---|---|
+| 78 | `WebAnalyticsIngestSilent`: 7 days, plus a 24 hour fast path when the previous week averaged at least 50 accepted events per day (owner decision); gated by the latch recording rule `webanalytics:accepted:last_seen_timestamp`, so it is inert while dark; info, `namespace: apps` | §7.9 | homelab #352 |
+| 79 | Merge and apply before the go-live checklist (the checklist arms the rule); the diagram and §12.3 say info alerts are not in Discord unless a warning fires in namespace apps | §7.9, §12.3, §17 WA-6, diagram | homelab #352, furchert-ch #158 |
+| 80 | Documented limits: availability is a per-moment check; a Prometheus outage longer than one day loses the latch; a planned stop fires the alert after the same delay (silence it) | §7.9 | homelab #352 |
 
 ### Committed (2026-11-08, WA-0)
 
