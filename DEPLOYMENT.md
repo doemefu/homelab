@@ -2274,19 +2274,27 @@ $PG createdb -U postgres restore_test || { echo "restore_test exists or createdb
 # The schema is created in every case: pg_restore -n skips the SCHEMA entry
 $PSQL -d restore_test -c "CREATE SCHEMA IF NOT EXISTS webanalytics;"
 # Restore only that schema, streamed over stdin; the errors are kept before any cleanup
+RESTORE_OK=1
 kubectl -n apps exec -i postgresql-0 -c postgresql -- pg_restore -U postgres -d restore_test --no-owner -n webanalytics \
-  < "$RUN/pg-data_service.dump" 2> "$WORK/restore.err" \
-  || { cp "$WORK/restore.err" "$RUN/restore-test.err"; echo "pg_restore failed, details in $RUN/restore-test.err: skip step 4, run step 5"; }
-[ -s "$WORK/restore.err" ] && { cp "$WORK/restore.err" "$RUN/restore-test.err"; echo "pg_restore reported errors (see $RUN/restore-test.err): the test fails"; }
+  < "$RUN/pg-data_service.dump" 2> "$WORK/restore.err" || RESTORE_OK=0
+[ -s "$WORK/restore.err" ] && RESTORE_OK=0
+if [ "$RESTORE_OK" = 0 ]; then
+  cp "$WORK/restore.err" "$RUN/restore-test.err" \
+    && echo "pg_restore failed or reported errors: details in $RUN/restore-test.err; the test FAILS, skip step 4 and run step 5" \
+    || echo "could not save the errors, they stay in $WORK/restore.err (keep that directory); the test FAILS, run step 5"
+fi
 
-# 4) Counts must match for every table, and at least one non-empty table must be among them
-$PSQL -d restore_test -c "$COUNTS" > "$WORK/counts-restored.txt"
-diff "$WORK/counts-live.txt" "$WORK/counts-restored.txt" && echo "counts match"
-grep -vE '=0$' "$WORK/counts-live.txt" | head -3
+# 4) Only when RESTORE_OK=1: counts must match for every table, and at least one non-empty table must be among them
+if [ "$RESTORE_OK" = 1 ]; then
+  $PSQL -d restore_test -c "$COUNTS" > "$WORK/counts-restored.txt"
+  diff "$WORK/counts-live.txt" "$WORK/counts-restored.txt" && echo "counts match"
+  grep -vE '=0$' "$WORK/counts-live.txt" | head -3
+fi
 
 # 5) Cleanup, mandatory
 $PG dropdb -U postgres restore_test
-rm -rf "$WORK"
+# keep $WORK only when the error file could not be saved
+[ "$RESTORE_OK" = 1 ] || [ -s "$RUN/restore-test.err" ] && rm -rf "$WORK"
 ```
 
 The test passes only if `pg_restore` ended without errors (an index or constraint can fail after the rows loaded, with equal counts) and the counts match. If events were written between the count snapshot and the dump, the `events` count can differ by the rows of that window; rerun outside traffic or compare the aggregate tables only and record the reason.
