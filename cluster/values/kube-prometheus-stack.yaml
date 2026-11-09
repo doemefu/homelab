@@ -743,17 +743,18 @@ additionalPrometheusRulesMap:
   # Web analytics (Epic #348, WA-5, #351; docs/100-web-analytics.md §7.9). Metrics come from
   # data-service (job data-service, ServiceMonitor monitoring/data-service). The collect path is dark
   # until WA-6, so before go-live there is no traffic and none of these rules can fire.
-  # WebAnalyticsIngestSilent follows in WA-6 (#352); the gauge rules (IngestCapped, TableLarge) follow
-  # with data-service WA-5 (#56). The rules in this block use only counters.
+  # WebAnalyticsIngestSilent follows in WA-6 (#352). The gauge rules (IngestCapped, TableLarge, #351
+  # part 2) read the gauges exported by data-service WA-5 (#56). max() across pods: a rollout briefly
+  # runs two pods, and the gauges are per pod.
   # severity info: routed like everything else, but the chart's InfoInhibitor suppresses info alerts in
   # Discord unless a warning fires in the same namespace (InfoInhibitor joins on the namespace label).
-  # It stays visible in Prometheus/Alertmanager. All three alerts carry the static label
+  # It stays visible in Prometheus/Alertmanager. All five alerts carry the static label
   # namespace: apps, the namespace of the source series (data-service): sum() drops the label from the
   # aggregated alerts, and without it a namespace-less warning could release the info alert. With it,
-  # Spike and SecondLineRejects (warnings) release RejectRatioHigh (info) without releasing the other
-  # info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
+  # Spike, SecondLineRejects, IngestCapped and TableLarge (warnings) release RejectRatioHigh (info)
+  # without releasing the other info alerts of monitoring. NetmonNewExternalDestination sets namespace: monitoring;
   # NetmonSeriesTruncated has no static label. Trade-off: any warning in namespace apps releases
-  # RejectRatioHigh, and Spike and SecondLineRejects release the other info alerts with namespace apps.
+  # RejectRatioHigh, and the four warnings release the other info alerts with namespace apps.
   homelab-webanalytics:
     groups:
       - name: homelab-webanalytics
@@ -806,6 +807,41 @@ additionalPrometheusRulesMap:
                 50 percent of rejects plus accepted events (reason erased excluded). furchert-ch should have
                 dropped these at the edge: check the deployed furchert-ch version against the data-service
                 contract (docs/100-web-analytics.md §6.2) and the reasons in webanalytics_events_rejected_total.
+          # The ingest caps (daily 10 000, hourly 2 500 accepted events, docs/100 §6.4) are reached: new
+          # analytics events are rejected with 429 until retryAt, goal and enquiry keep flowing. The gauge
+          # returns to 0 at retryAt without traffic, and the series is absent only before data-service WA-5.
+          - alert: WebAnalyticsIngestCapped
+            expr: max(webanalytics_ingest_capped) == 1
+            for: 5m
+            labels:
+              severity: warning
+              namespace: apps
+            annotations:
+              summary: "Web analytics ingest is capped"
+              description: >-
+                data-service has reached its hourly or daily ingest cap and answers 429 to analytics batches
+                until retryAt (GET /api/webanalytics/status shows dailyCap, capped and the day). Check for a
+                bot burst or poisoning (WebAnalyticsIngestSpike, reject counters), then the data-service
+                runbooks in its DEPLOYMENT.md ("Runbooks (canonical ...)": purge a poisoned day, adjust caps);
+                owner checks in DEPLOYMENT.md "Web analytics (WA-5): alerts, Cloudflare rules and owner checks".
+          # Total relation size (heap, indexes, TOAST) of webanalytics.events, measured every 15 minutes.
+          # About 2.0 to 2.2 GB is expected at the caps; 3 GiB is 30 percent of the 10 GiB volume after
+          # homelab#359 and signals growth beyond the cap-based expectation (docs/100 §7.9, homelab#351).
+          # The series is absent until the first successful measurement: no alert then.
+          - alert: WebAnalyticsTableLarge
+            expr: max(webanalytics_raw_table_bytes) > 3 * 1024 * 1024 * 1024
+            for: 1h
+            labels:
+              severity: warning
+              namespace: apps
+            annotations:
+              summary: "The web analytics raw table is larger than 3 GiB"
+              description: >-
+                webanalytics.events is larger than 3 GiB (total relation size) for an hour, more than the
+                about 2.0 to 2.2 GB expected at the ingest caps. Check retention (396 days, the retention
+                job log of data-service), the caps and the volume headroom (DEPLOYMENT.md "Web analytics
+                (WA-5): alerts, Cloudflare rules and owner checks", homelab-data-service#57), and the
+                data-service runbooks (purge a poisoned day).
           # Anything rejected by the second line is a contract mismatch or an attack that got past
           # furchert-ch's validation, except the by-design reasons erased and visitor_cap. The counters
           # are exported with 0 from startup, so the first reject shows as an increase; a restart
