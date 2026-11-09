@@ -3608,7 +3608,7 @@ STS_REV=$(kc -n apps get sts postgresql -o jsonpath='{.status.updateRevision}')
 echo "pod uid=$POD_UID restarts=$POD_RESTARTS revision-hash=$POD_HASH, statefulset updateRevision=$STS_REV"
 
 # 13: ONE compound command: the manifest is built and every guard is checked first, and the StatefulSet is deleted only if all of them passed (the delete runs without the 20 s request timeout of kc). It re-creates the StatefulSet from the LIVE object with the new size: the pod template stays byte-identical, so the pod is adopted and not restarted. Keep the window between delete and create short.
-if [ -n "$POD_UID" ] && [ "$POD_HASH" = "$STS_REV" ] \
+if [ -n "$POD_UID" ] && [ -n "$POD_HASH" ] && [ "$POD_HASH" = "$STS_REV" ] \
    && kc -n apps get sts postgresql -o json | python3 -c 'import sys,json
 o = json.load(sys.stdin)
 if o["spec"].get("replicas") != 1:
@@ -3620,16 +3620,18 @@ o["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-con
 o.pop("status", None)
 json.dump(o, sys.stdout)' > "$WORK/sts-new.json" \
    && [ -s "$WORK/sts-new.json" ]; then
-  kubectl -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json"
+  kubectl -n apps delete sts postgresql --cascade=orphan && kc -n apps create -f "$WORK/sts-new.json" && RECREATED=1
 else
-  echo "STOP: a guard failed (no pod uid, pod revision differs from updateRevision, replicas is not 1, or the manifest was not built); nothing was deleted"
+  echo "STOP: a guard failed (no pod uid or revision hash, pod revision differs from updateRevision, replicas is not 1, or the manifest was not built); nothing was deleted"
 fi
 
 # 14: verify adoption automatically: same pod uid and restart count as recorded at step 12 (not as in P5), template 10Gi, StatefulSet ready
 kc -n apps get sts postgresql -o jsonpath='{.status.readyReplicas}/{.spec.replicas} {.spec.volumeClaimTemplates[0].spec.resources.requests.storage}{"\n"}'
 NOW_UID=$(kc -n apps get pod postgresql-0 -o jsonpath='{.metadata.uid}')
 NOW_RESTARTS=$(kc -n apps get pod postgresql-0 -o jsonpath='{.status.containerStatuses[?(@.name=="postgresql")].restartCount}')
-if [ "$NOW_UID" = "$POD_UID" ] && [ "$NOW_RESTARTS" = "$POD_RESTARTS" ]; then
+if [ -z "$RECREATED" ]; then
+  echo "NOT RECREATED (STOP above): nothing was changed or the re-create failed, check the StatefulSet before anything else"
+elif [ "$NOW_UID" = "$POD_UID" ] && [ "$NOW_RESTARTS" = "$POD_RESTARTS" ]; then
   echo "ADOPTED: same pod, no restart (uid $NOW_UID, restarts $NOW_RESTARTS)"
 else
   echo "CHANGED: uid or restart count differs (was $POD_UID/$POD_RESTARTS, now $NOW_UID/$NOW_RESTARTS): the pod was rolled or the delete did not run, check the StatefulSet and that all apps reconnect"
@@ -3642,6 +3644,9 @@ Step 15 (from an up-to-date checkout of `main` after the merge, not from the PR 
 
 ```bash
 ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset --check --diff
+# off the LAN (context tunnel, see "Off-LAN kubectl / Ansible Access"):
+ANSIBLE_SSH_ARGS="-F $HOME/.ssh/homelab-offlan.conf -o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=60s" \
+  ansible-playbook infra/playbooks/50_apps_infra.yml --tags postgresql-statefulset --check --diff -e kubeconfig="$HOME/.kube/config"
 ```
 
 Step 15 reading: the check may show a diff only in `metadata.managedFields` (the field owner is now `kubectl-create`); that is not drift. **Any diff under `spec` is drift: stop and compare with `$WORK/sts-before.yaml`; do not run the tagged task for real.** No `--save-config` is needed while the task uses a strategic-merge patch; revisit this if the task ever switches to apply or server-side apply.
