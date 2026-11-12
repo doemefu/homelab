@@ -1289,40 +1289,70 @@ configuration error exits with status 255, which systemd does not restart. Witho
 
 ---
 
-### Cloudflare Access for grafana, n8n and ssh (#121)
+### Cloudflare Access for grafana, n8n, club, ai and ssh (#121)
 
 `ssh.furchert.ch` already sits behind a Cloudflare Access application, which `cloudflared access ssh`
-and the off-LAN runbooks need. `grafana.furchert.ch` and `n8n.furchert.ch` are public tunnel routes
-protected only by each app's own login. n8n's is a local account, because OIDC single sign-on is
-enterprise-only in the n8n community edition; account MFA is #280. This runbook puts both behind
-Access with the same owner-only policy. It is done in the Cloudflare dashboard. Codifying it (an API
-token with the Access scope, stored as a new encrypted inventory value by the owner) is a follow-up.
+and the off-LAN runbooks need. `grafana`, `n8n`, `club` and `ai.furchert.ch` are public tunnel routes
+protected only by each app's own login:
+
+- Grafana: a local admin account.
+- n8n: a local owner account, because OIDC single sign-on is enterprise-only in the n8n community
+  edition; account MFA is #280.
+- Open WebUI (`club`): a local admin account, signup off.
+- LiteLLM (`ai`): SSO against auth-service, plus the break-glass form `/fallback/login`, which accepts
+  `admin` + the master key and grants `proxy_admin`. The master key also works on the API.
+
+This runbook puts all four behind Access with the same owner-only policy. For `ai`, a second policy lets
+scripts in with an Access service token. It is done in the Cloudflare dashboard. A read-only drift check
+of the result is a follow-up (#121).
+
+`auth`, `mcp`, `club-mcp`, `device` and the apex stay without Access: they serve public OIDC/OAuth flows,
+the claude.ai connectors (protected by the Anthropic-range WAF rule) or the public site. `device` gets
+tunnel 404 rules for its REST API instead ("Internal-only paths on public hosts").
 
 **Who reaches these hosts from outside the browser** (n8n workflow exports in doemefu/homelab-n8n,
-club-assistant repo, all homelab repos, 2026-11-03):
+club-assistant repo, all homelab repos, 2026-11-03 and 2026-11-12):
 
 | Host | Caller outside a browser | Path | Handling |
 |---|---|---|---|
-| `n8n.furchert.ch` | Telegram Bot API → Telegram Trigger of the active workflow `m6_telegram_drafting` | `/webhook/<webhookId>/webhook` | **Bypass application** for exactly this path (step 3) |
+| `n8n.furchert.ch` | Telegram Bot API → Telegram Trigger of the active workflow `m6_telegram_drafting` | `/webhook/<webhookId>/webhook` | **Bypass application** for exactly this path (step 4), created in the same sitting as the n8n app |
 | `n8n.furchert.ch` | Open WebUI club pipe → `m6_chat_agent`, `m6_chat_commands` webhooks; club-mcp → `club-mcp-gateway` | — | in-cluster (`n8n.apps.svc.cluster.local`), not affected |
 | `n8n.furchert.ch` | Approve/edit links in the drafting messages: the send-and-wait nodes "Approval SendAndWait" and "Form SendAndWait" of `m6_telegram_drafting`, opened in the phone's Telegram browser | `/webhook-waiting/*` | No bypass. The owner is the only authorized chat, so the phone shows the e-mail PIN page once per 24 h session, then the link works |
-| `n8n.furchert.ch` | Workflow export/import scripts and agents using the n8n public API (`/api/v1/*`) from the Mac | `/api/v1/*` | No bypass: use `kubectl -n apps port-forward svc/n8n 5678:80` and `N8N_BASE_URL=http://localhost:5678` |
+| `n8n.furchert.ch` | Workflow export/import and seeding scripts and agents using the n8n public API (`/api/v1/*`) from the Mac, including the club-assistant scripts that default to `N8N_BASE_URL=https://n8n.furchert.ch` | `/api/v1/*` | No bypass: use `kubectl -n apps port-forward svc/n8n 5678:80` and `N8N_BASE_URL=http://localhost:5678` (pre-check 3) |
+| `n8n.furchert.ch` | club-assistant `scripts/backup.sh`, documented as a nightly 04:00 cron on raspi5, calls `export_workflows.sh` when `N8N_API_KEY` is set | `/api/v1/*` | **Blocking** pre-check 2 |
 | `n8n.furchert.ch` | Google OAuth credential callback `/rest/oauth2-credential/callback` | — | browser redirect in a session that already passed Access, so no change |
 | `grafana.furchert.ch` | none (browser only; alert links in Discord open in the browser) | — | — |
+| `club.furchert.ch` | none (single user; Open WebUI calls LiteLLM and n8n in-cluster; socket.io is same-origin) | — | — |
+| `ai.furchert.ch` | `scripts/smoke-test-litellm.sh` (this repo), club-assistant operator scripts (`backfill_drive_corpus.py`, `ocr_backfill.py`, `seed_golden_examples.py`, `eval_embed_d5.py`, `smoke_litellm_club.sh`) and any OpenAI- or Anthropic-compatible client on the Mac, all with bearer virtual keys or the master key | `/v1/*`, `/health/*` | **Service Auth policy** with an Access service token (step 3). Scripts send `CF-Access-Client-Id` and `CF-Access-Client-Secret`. Alternative without a token: `kubectl -n apps port-forward svc/litellm 4000:4000` and `http://localhost:4000`. **Never** a path bypass for `/v1/*` |
+| `ai.furchert.ch` | LiteLLM SSO callback `/sso/callback` | — | top-level browser redirect in a session that already passed Access, so no change |
+| `ai.furchert.ch` | Open WebUI, n8n and the club pipe | — | in-cluster (`litellm.apps.svc.cluster.local:4000`), not affected |
 
-The exports cover the workflows the backup workflow writes to GitHub. Before step 3, check in the n8n UI
+The exports cover the workflows the backup workflow writes to GitHub. Before step 4, check in the n8n UI
 that no other **active** workflow has a Webhook, Form, Chat or Telegram trigger, or a Send-and-Wait or
 "Wait → On webhook call" node. The Google Drive, Gmail and schedule triggers poll outbound and are not
 affected.
 
-**Pre-checks (owner, before step 2):**
+**Pre-checks (owner).** 1–4 block the n8n application; 5 blocks the ai application.
 
 1. n8n → Credentials → "n8n account" (type n8n API), used by "Back up n8n workflows to Github": its
-   Base URL must be `http://localhost:5678/api/v1`. If it is `https://n8n.furchert.ch/api/v1`, the backup
-   request leaves the pod, comes back through Access and fails. Change it first, then run the backup
-   workflow once by hand.
-2. n8n → workflow `m6_telegram_drafting` → Telegram Trigger node → Webhook URLs → **Production URL**.
+   Base URL must be `http://localhost:5678/api/v1` (n8n calling itself inside the pod; no port-forward
+   needed). If it is `https://n8n.furchert.ch/api/v1`, the backup request leaves the pod, comes back
+   through Access and fails. Change it first, then run the backup workflow once by hand from the UI.
+2. raspi5 crontab: `ssh raspi5 'crontab -l; sudo crontab -l' 2>/dev/null | grep -n backup.sh`. If the
+   club-assistant `backup.sh` runs there with `N8N_API_KEY` set, point its `N8N_BASE_URL` at an
+   in-cluster URL (`http://n8n.apps.svc.cluster.local`) or drop the export step before step 2, and
+   confirm the next nightly run is green.
+3. club-assistant scripts that default to `N8N_BASE_URL=https://n8n.furchert.ch` (`n8n_import.py`,
+   `n8n_put.py`, `seed_*_datatable.py`, `verify_eval_run.py`, `export_workflows.sh`): change their
+   default to the port-forward URL `http://localhost:5678` (owner commit in the club-assistant repo).
+4. n8n → workflow `m6_telegram_drafting` → Telegram Trigger node → Webhook URLs → **Production URL**.
    Note the path; it has the form `/webhook/<webhookId>/webhook`. Never put the id into this public repo.
+   Plan homelab#320 (PUBLIC CONNECT on the n8n and club databases) for the same period as the n8n app.
+5. ai callers: create the service token (step 3) first, then give every script that targets
+   `https://ai.furchert.ch` the two headers (env `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`,
+   see "Scripts and the ai service token" below) or move it to the port-forward. The club-assistant
+   script defaults are owner commits. While at it, check that the LiteLLM master key is a long random
+   value (at least 32 random bytes); it remains the break-glass admin password behind Access.
 
 **Steps (Cloudflare dashboard, `one.dash.cloudflare.com`):**
 
@@ -1330,59 +1360,113 @@ affected.
    **One-time PIN** (skip if it is already listed).
 2. **Owner-only application per host.** Zero Trust → Access controls → Applications → Create new
    application → Self-hosted and private → Add public hostname. Use these values:
-   - Application name: `grafana` (then `n8n` the same way).
-   - Subdomain `grafana` (or `n8n`), Domain `furchert.ch`. Leave the path empty, so the whole host is covered.
+   - Application name: `grafana` (then `club`, `n8n` and `ai` the same way; `n8n` only after pre-checks
+     1–4 and together with step 4, `ai` only after pre-check 5 and step 3).
+   - Subdomain `grafana` (or `club`, `n8n`, `ai`), Domain `furchert.ch`. Leave the path empty, so the
+     whole host is covered.
    - Session duration: `24 hours`.
    - Identity providers: only One-time PIN; enable "Apply instant authentication".
    - Access policies → create a policy `owner-only`: Action **Allow**, Include → **Emails** → your own
-     e-mail address. Reuse the same policy for the second application.
+     e-mail address. Reuse the same policy for every other application.
    - Create.
-3. **Telegram bypass (n8n only).** Create new application → Self-hosted and private → Add public hostname
-   with these values:
+3. **ai service token and Service Auth policy (ai only).**
+   - Zero Trust → Access controls → Service credentials → Service Tokens → Create Service Token. Name
+     `ai-scripts`, duration 1 year (note the expiry date in #121). Copy the Client ID and Client Secret
+     once; the secret is shown only now. Keep both in the password manager and in the local environment
+     of the machines that run scripts, never in a repo or in this cluster.
+   - Access controls → Policies → create a policy `ai-scripts`: Action **Service Auth**, Include →
+     **Service Token** → `ai-scripts`.
+   - In the `ai` application, attach `owner-only` **and** `ai-scripts`. Do not add a Bypass policy or a
+     second application for any `ai` path, `/v1/*` included: a bypass would leave the master key usable
+     as an internet-facing admin credential.
+4. **Telegram bypass (n8n only, same sitting as the n8n app).** Create new application → Self-hosted and
+   private → Add public hostname with these values:
    - Application name: `n8n-telegram-webhook`.
-   - Subdomain `n8n`, Domain `furchert.ch`, Path `webhook/<webhookId>/webhook` (from pre-check 2).
+   - Subdomain `n8n`, Domain `furchert.ch`, Path `webhook/<webhookId>/webhook` (from pre-check 4).
    - Policy: Action **Bypass**. Include → **IP ranges** → Telegram's webhook source ranges
      `149.154.160.0/20` and `91.108.4.0/22` (or Include → **Everyone** if Telegram deliveries fail).
 
    Access applies the most specific path, so only this one URL skips the login. Bypass requests are not
-   logged by Access. On that path, n8n's Telegram Trigger, which checks Telegram's secret-token header,
-   is then the control. Do not add bypass rules for other n8n paths.
-4. **ssh.furchert.ch (already exists):** Zero Trust → Access controls → Applications → the SSH
-   application. Attach the `owner-only` policy. Remove its old policy only after `cloudflared access
-   login https://ssh.furchert.ch` and an off-LAN `ssh raspi5` still work. Record the IdP and session
-   length in #121, not here.
+   logged by Access. What protects this path is the unguessable `<webhookId>` and n8n's check of
+   Telegram's secret-token header (`X-Telegram-Bot-Api-Secret-Token`), not the IP ranges: anyone can
+   create a bot and point its webhook at this URL, and Telegram's servers then deliver from inside the
+   ranges. Do not add bypass rules for other n8n paths.
+5. **ssh.furchert.ch (already exists; optional, may come after the four apps):** Zero Trust → Access
+   controls → Applications → the SSH application. Attach the `owner-only` policy. Remove its old policy
+   only after `cloudflared access login https://ssh.furchert.ch` and an off-LAN `ssh raspi5` still work.
+   Do this **on the LAN** (a direct `ssh raspi5` is the fallback) and never on the day of a maintenance
+   window (Mosquitto #122 phases, the device-service database window #153), because off-LAN kubectl runs
+   through `ssh.furchert.ch`. Record the IdP and session length in #121, not here.
+
+**Scripts and the ai service token.** A script reaches `https://ai.furchert.ch` with both headers on
+every request, next to its own `Authorization: Bearer <key>`:
+
+```bash
+export CF_ACCESS_CLIENT_ID=<client id>.access CF_ACCESS_CLIENT_SECRET=<client secret>   # from the password manager
+curl -s https://ai.furchert.ch/v1/models \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+```
+
+- `scripts/smoke-test-litellm.sh` sends the two headers when both variables are set.
+- Python clients: `openai.OpenAI(base_url=..., api_key=..., default_headers={"CF-Access-Client-Id": ..., "CF-Access-Client-Secret": ...})`
+  or the same two entries in an `httpx`/`requests` headers dict.
+- Claude Code (`ANTHROPIC_BASE_URL=https://ai.furchert.ch`): `ANTHROPIC_CUSTOM_HEADERS` with one
+  `Name: Value` per line in the local settings `env`.
+- Rotation: create a new token, update the environments, attach it to the `ai-scripts` policy, then
+  revoke the old one. A leaked token alone gets past Access but still needs a LiteLLM key.
 
 **Verification:**
 
 ```bash
 # expect 302 to <team>.cloudflareaccess.com for each host (no Access session in curl)
-curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://grafana.furchert.ch/
-curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://n8n.furchert.ch/
+for h in grafana n8n club ai; do
+  curl -s -o /dev/null -w "$h %{http_code} %{redirect_url}\n" "https://$h.furchert.ch/"
+done
 curl -s -o /dev/null -w '%{http_code}\n' https://n8n.furchert.ch/rest/settings     # not 200 from n8n
+# ai: a bearer key alone gets the Access response (302 or 403), never LiteLLM's answer
+curl -s -o /dev/null -w '%{http_code}\n' https://ai.furchert.ch/v1/models -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+# ai: with the service-token headers, LiteLLM answers (smoke test: all 5 checks pass)
+LITELLM_MASTER_KEY=sk-... CF_ACCESS_CLIENT_ID=... CF_ACCESS_CLIENT_SECRET=... ./scripts/smoke-test-litellm.sh
 # Telegram path: with the IP-range bypass, a request from the Mac is outside the ranges and gets an
 # Access response (redirect or block page), not n8n; Telegram itself is tested below.
 # With the Everyone bypass, n8n answers 403 (missing Telegram secret-token header).
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -X POST "https://n8n.furchert.ch/webhook/<webhookId>/webhook"
+# n8n's own secret-token check, independent of Access: an in-cluster POST without the header → 403
+kubectl -n apps exec deploy/n8n -- node -e \
+  "fetch('http://localhost:5678/webhook/<webhookId>/webhook',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>console.log(r.status))"
 ```
 
 Then:
-- Browser: both hosts ask for the e-mail PIN once, then show the app login.
+- Browser: every host asks for the e-mail PIN once, then shows the app login.
 - Telegram: send a message to the club bot; `m6_telegram_drafting` shows a new execution (this is the real
   test of the bypass). From the phone, approve one draft and open the edit form once: the PIN page appears
   at most once per session, then the link works.
 - The backup run started by hand in pre-check 1, and the next scheduled run, succeed. "Backup Watchdog"
-  stays silent.
+  stays silent. If pre-check 2 found the raspi5 cron, its next run is green too.
+- club on the phone: open `club.furchert.ch` once from the iOS home-screen web app (standalone mode).
+  If the PIN page does not complete there, use Safari for the first login of each session.
 - Off-LAN `cloudflared access ssh` still works.
 
-**Rollback:** in Zero Trust → Access controls → Applications, delete the application or detach the
-`owner-only` policy from that one application. Do not edit the shared `owner-only` policy itself,
-because ssh uses it too. The tunnel and the apps themselves are unchanged.
+**Expected behaviour:**
+- When the 24 h Access session expires inside an open single-page app (n8n editor, Open WebUI, Grafana,
+  the LiteLLM UI), its background requests get a cross-origin redirect and fail; the app looks broken
+  until a full page reload, which shows the PIN page again.
+- One-time PIN silently sends no code to an address outside the policy. Expect login attempts in the
+  Access logs, but no Allow events for strangers.
 
-**Follow-up (club-assistant repo):**
+**Rollback:** in Zero Trust → Access controls → Applications, delete the application or detach the
+policy from that one application. Do not edit the shared `owner-only` policy itself, because every
+application uses it. The tunnel and the apps themselves are unchanged. For `ai`, scripts keep working
+without Access once the app is gone; the headers are ignored by LiteLLM.
+
+**Follow-ups (club-assistant repo, owner commits):**
 - Its laptop red-team cases against `n8n.furchert.ch` (RT-M05 404 checks, the RT-A webhook probe) now
   meet the Access redirect first.
-- Its docs still call n8n "SSO-protected".
-- Its n8n API scripts should default to the port-forward.
+- Its docs still call n8n "SSO-protected" (`docs/05-security.md`).
+- Its n8n API scripts default to the port-forward (pre-check 3); its ai scripts send the service-token
+  headers or use the port-forward (pre-check 5).
 
 ---
 
@@ -2135,7 +2219,8 @@ the owner as `ADMIN`.
 - **Stale rows:** a user's row changes only at their next SSO login, and users who only own virtual
   keys may never sign in again. After the first apply, open `https://ai.furchert.ch/ui` → Internal
   Users and set every row except the owner's to `internal_user_viewer`.
-- **Break-glass:** the LiteLLM login form (always reachable at `https://ai.furchert.ch/fallback/login`)
+- **Break-glass:** the LiteLLM login form (`https://ai.furchert.ch/fallback/login`, behind the Access
+  application once #121 is applied; in-cluster via `kubectl -n apps port-forward svc/litellm 4000:4000`)
   accepts username `admin` with the master key as password
   (`UI_USERNAME`/`UI_PASSWORD` unset) and grants `proxy_admin`; the master key also works on the API.
   Check that this login works before the first apply.
@@ -2155,9 +2240,14 @@ the owner as `ADMIN`.
 kubectl get pods -n apps -l app=litellm
 kubectl get secret litellm-secrets -n apps
 
-# Full smoke test (requires LITELLM_MASTER_KEY)
+# Full smoke test (requires LITELLM_MASTER_KEY). Through ai.furchert.ch also set the Access
+# service token (see "Cloudflare Access for grafana, n8n, club, ai and ssh (#121)"):
 LITELLM_BASE_URL=https://ai.furchert.ch LITELLM_MASTER_KEY=sk-... \
+  CF_ACCESS_CLIENT_ID=<id>.access CF_ACCESS_CLIENT_SECRET=<secret> \
   ./scripts/smoke-test-litellm.sh
+# Without a service token: through the in-cluster Service
+kubectl -n apps port-forward svc/litellm 4000:4000 &
+LITELLM_BASE_URL=http://localhost:4000 LITELLM_MASTER_KEY=sk-... ./scripts/smoke-test-litellm.sh
 ```
 
 #### Upgrade

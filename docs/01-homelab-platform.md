@@ -352,9 +352,10 @@ Reboots (z.B. nach Kernel-Updates) sind manuell — erfordern drain → reboot �
 ### Cloudflare Access (Zero Trust)
 
 Done for `ssh.furchert.ch`: an Access application sits in front of the SSH proxy. The owner runbook for
-`grafana.furchert.ch` and `n8n.furchert.ch` is DEPLOYMENT.md "Cloudflare Access for grafana, n8n and ssh
-(#121)": an owner-only One-time PIN policy, plus a bypass for the one Telegram webhook path. Codifying the
-applications (an API token with the Access scope) is a follow-up. Short-lived Cloudflare-signed SSH
+`grafana`, `n8n`, `club` and `ai.furchert.ch` is DEPLOYMENT.md "Cloudflare Access for grafana, n8n, club,
+ai and ssh (#121)": an owner-only One-time PIN policy, a bypass for the one Telegram webhook path, and a
+Service Auth policy with a service token for scripts on `ai`. A read-only drift check of the applications
+is a follow-up. Short-lived Cloudflare-signed SSH
 certificates remain an option.
 
 ### Automatisiertes Update-Skript mit Integrationstests + Rollback
