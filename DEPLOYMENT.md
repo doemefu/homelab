@@ -1033,6 +1033,9 @@ These are `path` rules in `cf_ingress_body`, placed before the host's general ru
   stay public. Admin work goes through furchert.ch `/dashboard/auth`. For the raw API or the Swagger UI
   from the Mac use `kubectl -n apps port-forward svc/auth-service 18080:8080` and
   `http://localhost:18080/swagger-ui.html`.
+- `device.furchert.ch` (#121): the REST API `/devices*` and `/schedules*`. furchert-ch calls it
+  in-cluster; the device firmware uses MQTT only. `/ws`, the Swagger UI and `/actuator/health` stay
+  public. For the raw API from the Mac use `kubectl -n apps port-forward svc/device-service 18081:8081`.
 
 A `40_platform.yml` run replaces the whole tunnel configuration with `cf_ingress_body` from the
 checkout. `--check` skips that PUT (the task has `no_log`), so it never shows the new ingress list; it

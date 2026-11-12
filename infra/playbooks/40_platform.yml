@@ -246,6 +246,15 @@
                 service: "http_status:404"
               - hostname: "auth.furchert.ch"
                 service: "http://auth-service.apps.svc.cluster.local:8080"
+              # device-service REST API (/devices/*, /schedules/*) is internal-only (#121): furchert-ch calls it
+              # in-cluster, and no internet client uses it (the device firmware speaks MQTT only), so the public
+              # tunnel answers 404. First match wins, hence this rule stays BEFORE the device entry. Prefix match,
+              # case-insensitive, repeated slashes; /devicesX or /schedules-x do not match. /ws (STOMP), Swagger
+              # and /actuator/health stay routed. Defence in depth only: device-service's own authorization
+              # remains the control.
+              - hostname: "device.furchert.ch"
+                path: "(?i)^/+(devices|schedules)([^a-z0-9_-]|$)"
+                service: "http_status:404"
               - hostname: "device.furchert.ch"
                 service: "http://device-service.apps.svc.cluster.local:8081"
               # club-mcp gateway webhook is internal-only: club-mcp calls it in-cluster (n8n.apps.svc), so the public
