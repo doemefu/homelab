@@ -256,8 +256,8 @@ unimplemented), so these bumps are manual:
 ### Helm Chart Version Tracking (Automated Freshness Check)
 - Container images: Pinned tags for every image; the 9 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch, data-service) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
-- GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql,helm-chart-freshness}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`). The `Check Action Pins` job (`scripts/check-action-pins.sh`) fails on any `uses:` ref that is not a local path, a full commit SHA or a `docker://…@sha256:` digest. Dependabot's `github-actions` entry has a 7-day `cooldown`
-- CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest, promtool in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction. ShellCheck is downloaded by `ludeeus/action-shellcheck`, which has no checksum input: `ci.yml` pins its `version:` and verifies the same release asset against `SHELLCHECK_SHA256` first
+- GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql,helm-chart-freshness}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`). The `Check Action Pins` job (`scripts/check-action-pins.py`, parses the workflow YAML) fails on any `uses:` value that is not a local path, a full commit SHA or a `docker://…@sha256:` digest. Dependabot's `github-actions` entry has a 7-day `cooldown` for version updates (security updates skip it)
+- CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest, promtool in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction. ShellCheck is downloaded by `ludeeus/action-shellcheck`, which has no checksum input: `ci.yml` pins its `version:` and checks the same release asset URL against `SHELLCHECK_SHA256` in a separate download first (the copy the action runs is not itself verified)
 
 ### Digest-Pinned Platform Images
 
@@ -659,9 +659,9 @@ is `success` or `skipped` and fails on any `failure`/`cancelled`.
 | Check | Enforces |
 |---|---|
 | Lint YAML | Repo-wide YAML style (`.yamllint`); `infra/` is excluded (ansible-lint runs its own). |
-| Lint Shell Scripts | `shellcheck` (pinned version, release asset checksum-verified) over `scripts/`. |
+| Lint Shell Scripts | `shellcheck` (pinned version; release asset checked against a pinned sha256) over `scripts/`. |
 | Lint GitHub Workflows | `actionlint` over `.github/workflows/`. |
-| Check Action Pins | `scripts/check-action-pins.sh`: every `uses:` in `.github/workflows/` is a local path, `owner/repo@<40-hex SHA>` or `docker://…@sha256:<digest>`. |
+| Check Action Pins | `scripts/check-action-pins.py`: parses `.github/workflows/`; every `uses` value is a local path, `owner/repo@<40-hex SHA>` or `docker://…@sha256:<digest>`. |
 | Ansible Lint | `ansible-lint` (production profile) over `infra/`. |
 | Validate Kubernetes Manifests | `scripts/validate-manifests.sh`: `kustomize build` for each per-app overlay, validated by `kubeconform` (strict + CRD catalog). Blocking for the live Kubernetes version, taken from `k3s_version` in `infra/roles/k3s/defaults/main.yml`; report-only (warnings and a job summary) for the next two minor versions (`X.Y+1.0`, `X.Y+2.0`). A built-in kind whose apiVersion has no schema for a version counts as invalid (removed API). |
 | Test Prometheus Rules | `scripts/promtool-test-rules.sh`: `promtool check rules` and the unit tests in `cluster/values/tests/*.test.yml` for the custom rules in `cluster/values/kube-prometheus-stack.yaml`. Runs when that file, the tests, the script or `ci.yml` change. |
@@ -685,8 +685,8 @@ echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionli
   && sudo tar -xzf actionlint_1.7.7_linux_amd64.tar.gz -C /usr/local/bin actionlint
 actionlint
 
-# Action pins (allowlist)
-scripts/check-action-pins.sh
+# Action pins (allowlist; needs PyYAML, CI pins pyyaml==6.0.3)
+python3 scripts/check-action-pins.py
 
 # Ansible
 ansible-lint infra/

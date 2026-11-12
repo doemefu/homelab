@@ -91,7 +91,7 @@ jobs:
               - 'scripts/**/*.sh'
             workflows:
               - '.github/workflows/**'
-              - 'scripts/check-action-pins.sh'
+              - 'scripts/check-action-pins.py'
 
   # ---------------------------------------------------------------------------
   # Lint: cheap, fast, parallel. Each is its own status check so PR reviewers
@@ -128,9 +128,12 @@ jobs:
           persist-credentials: false
       # The action downloads the ShellCheck release named by `version` (its
       # default is the floating `stable`) and has no checksum input. Pin the
-      # version and verify the exact release asset the action fetches against
-      # a pinned sha256 first, so a changed asset fails the job
-      # (homelab-device-service#126).
+      # version, and check the same release asset URL against a pinned sha256
+      # in a separate download first (homelab-device-service#126). This
+      # catches a replaced release asset, but it does not verify the copy the
+      # action downloads and runs a moment later: the action accepts no
+      # pre-verified binary. The lint job holds no secrets and only a
+      # read-only token.
       # Bump SHELLCHECK_VERSION and SHELLCHECK_SHA256 together; the digest is
       # the `digest` field of the `linux.x86_64.tar.xz` asset in
       # `gh api repos/koalaman/shellcheck/releases/tags/<version>`.
@@ -174,10 +177,10 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Allowlist gate for `uses:` refs (homelab-device-service#126):
-  # scripts/check-action-pins.sh fails on any ref that is not a local path,
-  # a full 40-hex commit SHA or a docker:// digest. The per-repo GitHub
-  # setting `sha_pinning_required` is the control enforced at run time; this
-  # job is the fast PR check.
+  # scripts/check-action-pins.py parses every workflow file and fails on any
+  # `uses` value that is not a local path, a full 40-hex commit SHA or a
+  # docker:// digest. The per-repo GitHub setting `sha_pinning_required` is
+  # the control enforced at run time; this job is the fast PR check.
   # ---------------------------------------------------------------------------
   check-action-pins:
     name: Check Action Pins
@@ -188,8 +191,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML (pinned)
+        run: pip install "pyyaml==6.0.3"
       - name: Fail on any uses ref that is not pinned to a full commit SHA
-        run: scripts/check-action-pins.sh .github/workflows
+        run: python3 scripts/check-action-pins.py .github/workflows
 
   # ---------------------------------------------------------------------------
   # Ansible lint (migrated from the standalone ansible-lint.yml workflow).
