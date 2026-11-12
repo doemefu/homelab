@@ -4,6 +4,13 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # Wait 7 days after an upstream release before proposing a version
+    # update, so a release that is pulled or found compromised shortly after
+    # publication is less likely to reach a PR (homelab-device-service#126).
+    # Risk reduction, not a guarantee: security updates skip the cooldown,
+    # and every Dependabot PR is still reviewed before merge.
+    cooldown:
+      default-days: 7
     groups:
       codeql:
         patterns: ["github/codeql-action*"]
