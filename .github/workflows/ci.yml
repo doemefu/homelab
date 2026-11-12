@@ -91,6 +91,7 @@ jobs:
               - 'scripts/**/*.sh'
             workflows:
               - '.github/workflows/**'
+              - 'scripts/check-action-pins.sh'
 
   # ---------------------------------------------------------------------------
   # Lint: cheap, fast, parallel. Each is its own status check so PR reviewers
@@ -125,9 +126,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The action downloads the ShellCheck release named by `version` (its
+      # default is the floating `stable`) and has no checksum input. Pin the
+      # version and verify the exact release asset the action fetches against
+      # a pinned sha256 first, so a changed asset fails the job
+      # (homelab-device-service#126).
+      # Bump SHELLCHECK_VERSION and SHELLCHECK_SHA256 together; the digest is
+      # the `digest` field of the `linux.x86_64.tar.xz` asset in
+      # `gh api repos/koalaman/shellcheck/releases/tags/<version>`.
+      - name: Verify the ShellCheck release asset (pinned + checksum-verified)
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          asset="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSLO "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${asset}"
+          echo "${SHELLCHECK_SHA256}  ${asset}" | sha256sum -c -
+          rm -f "${asset}"
       - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           scandir: ./scripts
+          # Keep in sync with SHELLCHECK_VERSION in the step above.
+          version: v0.11.0
 
   lint-workflows:
     name: Lint GitHub Workflows
@@ -150,6 +171,25 @@ jobs:
           rm -f "${asset}"
       - name: Run actionlint
         run: actionlint -color
+
+  # ---------------------------------------------------------------------------
+  # Allowlist gate for `uses:` refs (homelab-device-service#126):
+  # scripts/check-action-pins.sh fails on any ref that is not a local path,
+  # a full 40-hex commit SHA or a docker:// digest. The per-repo GitHub
+  # setting `sha_pinning_required` is the control enforced at run time; this
+  # job is the fast PR check.
+  # ---------------------------------------------------------------------------
+  check-action-pins:
+    name: Check Action Pins
+    needs: detect-changes
+    if: needs.detect-changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fail on any uses ref that is not pinned to a full commit SHA
+        run: scripts/check-action-pins.sh .github/workflows
 
   # ---------------------------------------------------------------------------
   # Ansible lint (migrated from the standalone ansible-lint.yml workflow).
@@ -337,6 +377,7 @@ jobs:
       - lint-yaml
       - lint-shell
       - lint-workflows
+      - check-action-pins
       - ansible-lint
       - validate-kubernetes-manifests
       - test-prometheus-rules
