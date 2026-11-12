@@ -89,6 +89,8 @@ jobs:
               - '!cluster/flux-system/**'
             shell:
               - 'scripts/**/*.sh'
+              # The ShellCheck version and checksum pins live in this file.
+              - '.github/workflows/ci.yml'
             workflows:
               - '.github/workflows/**'
               - 'scripts/check-action-pins.py'
