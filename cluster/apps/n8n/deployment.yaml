@@ -29,7 +29,7 @@ spec:
           # n8n_image_change_ack (PVC backup first, club re-tests) — see DEPLOYMENT.md "n8n → Upgrade".
           # SQLite migrations are forward-only (2.46 adds two irreversible ones): never point an older
           # image at a PVC a newer image has migrated.
-          image: n8nio/n8n:2.46.4@sha256:4384b9ff20a78bc1708c35ce7864f84f724611de7801fb36d715998db7c000f1
+          image: n8nio/n8n:2.47.3@sha256:6723b440354bb8e1395a1ecee12685fe03923f897bf6e4d5bb2c6c2bd2051697
           ports:
             - containerPort: 5678
           env:
