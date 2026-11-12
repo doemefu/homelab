@@ -1940,6 +1940,71 @@ and `TargetDown`.
 
 ---
 
+### Mosquitto broker access (homelab#122)
+
+The broker (playbook 50) still accepts anonymous clients until phase 1 of homelab#122. Phase 0 makes it
+reachable from inside the cluster only:
+
+- The Service `apps/mosquitto` is `ClusterIP` (variable `mosquitto_service_type`, default `ClusterIP`), so k3s
+  ServiceLB no longer publishes 1883 on the node IPs.
+- The hardening role deletes the old UFW rule `allow 1883/tcp from <LAN>` on every node. Removing the port from
+  `hardening_ufw_lan_ports` alone would leave the existing rule in place.
+
+In-cluster clients keep working: device-service and mosquitto-exporter use `mosquitto.apps.svc.cluster.local:1883`,
+and Home Assistant (`hostNetwork: true` with `dnsPolicy: ClusterFirstWithHostNet`) resolves the same name.
+
+#### Phase 0 pre-checks (owner, before the playbook runs)
+
+1. **Home Assistant MQTT integration.** In Home Assistant: Settings → Devices & services. If no MQTT integration
+   exists, nothing to do. If one exists and its broker is a node or LoadBalancer IP (`192.168.1.x`), change the
+   broker to `mosquitto.apps.svc.cluster.local`, port 1883, first; a node IP stops answering after phase 0.
+   Note the result in homelab#122, because phase 1 then needs a `homeassistant` broker user.
+2. **LAN clients of the broker (NM-3).** List the LAN addresses that connected to 1883 in the last 14 days:
+
+   ```bash
+   kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -d data_service -c \
+     "select src_ip, node, max(peak_connections) as peak, max(window_start) as last_seen
+        from netmon.lan_connection_snapshots
+       where dport = 1883 and window_start > now() - interval '14 days'
+       group by 1, 2 order by 1, 2"
+   ```
+
+   `10.42.0.0/16` is in-cluster traffic and stays. Every other `src_ip` loses access with phase 0. Identify
+   each one (the ESP32 terrarium controllers are expected and are offline today; anything else is a consumer
+   to move into the cluster or to cover in a later phase) before running the playbooks.
+
+#### Apply (owner)
+
+```bash
+# 1. Service -> ClusterIP (k3s removes the svclb pods for mosquitto)
+ansible-playbook infra/playbooks/50_apps_infra.yml
+# 2. Delete the UFW rule on every node (one node first if you prefer: add -l raspi5)
+ansible-playbook infra/playbooks/10_base.yml --tags hardening
+```
+
+If step 1 fails because the API server rejects the in-place type change, delete the Service once and re-run:
+`kubectl -n apps delete svc mosquitto && ansible-playbook infra/playbooks/50_apps_infra.yml`.
+A second run of either playbook reports no change for these tasks.
+
+#### Verify
+
+```bash
+kubectl -n apps get svc mosquitto -o jsonpath='{.spec.type}{"\n"}'          # ClusterIP
+kubectl -n kube-system get pods -o name | grep svclb-mosquitto || echo "no svclb pods"
+for n in raspi5 raspi4 mba1 mba2; do ssh "$n" 'sudo ufw status | grep -w 1883 || echo "no 1883 rule"'; done
+kubectl -n apps logs deploy/device-service --tail=200 | grep -i mqtt | tail -5   # still connected
+# from the Mac on the LAN: the broker no longer answers on a node IP
+nc -vz -w 3 192.168.1.61 1883 || echo "closed (expected)"
+```
+
+Prometheus target `serviceMonitor/monitoring/mosquitto` stays up (the exporter connects in-cluster).
+
+#### Rollback
+
+`ansible-playbook infra/playbooks/50_apps_infra.yml -e mosquitto_service_type=LoadBalancer` restores the LAN
+LoadBalancer. The UFW rule is deliberately not restored by the role; re-add it by hand only if a LAN client
+must reach the broker before phase 1: `sudo ufw allow from 192.168.1.0/24 to any port 1883 proto tcp`.
+
 ### Home Assistant
 
 #### Deploy/Redeploy

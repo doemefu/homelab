@@ -441,7 +441,7 @@ Because the barrier relies on library defaults, it MUST be proven by tests that 
 
 - **data-service** (`/api/netmon/**`): cluster-internal, no tunnel route; it validates the issuer and requires scope `netmon:read` and an allowed client `sub`. A hub token carries neither.
 - **The identity provider's userinfo endpoint:** requires the `openid` scope, which the `claude-mcp-hub` client cannot obtain (§4.1, §4.2).
-- **The MQTT broker:** no token authentication; reachable on the LAN only.
+- **The MQTT broker:** no token authentication; reachable from inside the cluster only (ClusterIP, homelab#122).
 - **furchert-ch, Grafana, n8n, LiteLLM, Open WebUI, Home Assistant:** accept no inbound auth-service bearer tokens according to their repositories (they are OIDC relying parties behind their own login). Configuration done only through an app's UI is checked by the owner at go-live for exactly these five apps: Grafana, n8n, LiteLLM, Open WebUI and Home Assistant (O20).
 
 **Production evidence for the barrier.** A production negative test is not possible: a hub token exists only inside claude.ai. The argument is that the deployed services run the same images as the commits whose gate tests passed, and that their decoders depend only on the JWKS source, not on environment-specific validator settings. The go-live therefore checks, before the first login, that the running auth-service and device-service images are built from commits that contain the merged gate tests G1–G5: a read-only comparison of the deployed image tag timestamp with the merge time of `auth-service#107` and of the device-service gate-test pull request.
