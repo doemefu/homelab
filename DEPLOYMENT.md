@@ -2100,7 +2100,7 @@ Playbook 50 runs the broker with `allow_anonymous false`, a `password_file` and 
 
 | User | Client | Password (SOPS) | ACL |
 |---|---|---|---|
-| `backend` | device-service (sends client id `device-service`; the broker uses the username, `use_username_as_clientid`) | `device_service_mqtt_password` (59 writes the same value to `device-service-secrets/mqtt-password`) | read `terra1/#`, `terra2/#`; readwrite `terraGeneral/#`, `javaBackend/mqtt/status`; write `+/+/man` |
+| `backend` | device-service (sends client id `device-service`; the broker uses the username, see below) | `device_service_mqtt_password` (59 writes the same value to `device-service-secrets/mqtt-password`) | read `terra1/#`, `terra2/#`; readwrite `terraGeneral/#`, `javaBackend/mqtt/status`; write `+/+/man` |
 | `exporter` | mosquitto-exporter (env `MQTT_USER`/`MQTT_PASS` from Secret `mosquitto-exporter-mqtt`) | `mosquitto_exporter_mqtt_password` | read `$SYS/#` |
 | `homeassistant` | Home Assistant, only if its MQTT integration is used | `mosquitto_homeassistant_mqtt_password` (optional) | the pattern lines only: `homeassistant/#` (its discovery prefix) and read `terraGeneral/#` |
 | `terra1`, `terra2` (one per entry of `mosquitto_devices`) | the ESP32 terrarium controllers (phase 2, route 2b) | `mosquitto_terra1_mqtt_password`, `mosquitto_terra2_mqtt_password` | the pattern lines only: own `<id>/#`, read `terraGeneral/#` |
@@ -2112,6 +2112,13 @@ topics (`terra1/#`, …) or other prefixes (e.g. `shellies/#`). If it needs more
 `user homeassistant` lines to `mosquitto_acl`. A new device (e.g. `terra3`) needs a `topic read terra3/#`
 line for `backend` and the topic in device-service's `app.mqtt.topics`; phase 2 generates the backend lines
 from `mosquitto_devices`.
+
+The listener sets `use_username_as_clientid true`: the broker uses each client's username as its client id, so
+no client can take over another client's session by sending its id. Each broker user therefore holds one
+connection at a time; a second CONNECT with the same username replaces the first. That matches every client
+(device-service runs one replica with `maxSurge: 0` and clean sessions, device-service#113; one exporter, one
+Home Assistant). Never test with the `backend` or `exporter` credentials while device-service or the exporter
+runs: the test would disconnect them.
 
 How it is built:
 - `files/mosquitto-passwd.py` turns the SOPS passwords into Mosquitto `$7$` lines (PBKDF2-HMAC-SHA512,
@@ -2200,10 +2207,8 @@ only, backoff on refused CONNECT, password in NVS) is spec 053 §4; the firmware
 rotating and revoking a device: spec 053 §5. Each change is one run of playbook 50 (the broker restarts and
 all sessions reconnect). Until the firmware is flashed, the device users exist but nothing connects with them.
 
-Phase 2 also sets `use_username_as_clientid true`: the broker uses each client's username as its client id,
-so no client can take over another client's session by sending its id. Each broker user therefore holds one
-connection at a time; never test with the `backend` or `exporter` credentials while device-service or the
-exporter runs (the test would disconnect them).
+The device users fall under the phase 1 listener option `use_username_as_clientid`: a device's session id is
+always its username, so a device cannot take over another client's session.
 
 ### Home Assistant
 
