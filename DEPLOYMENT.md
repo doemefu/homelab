@@ -2106,12 +2106,18 @@ Playbook 50 runs the broker with `allow_anonymous false`, a `password_file` and 
 
 The pattern lines `readwrite %u/#` and `read terraGeneral/#` give every user its own prefix; they are the
 device contract for per-device users (spec 053, phase 2). The ACL lives in `mosquitto_acl` in the playbook.
+Home Assistant gets only those pattern lines: `homeassistant/#` and read on `terraGeneral/#`, not the device
+topics (`terra1/#`, …) or other prefixes (e.g. `shellies/#`). If it needs more, add explicit
+`user homeassistant` lines to `mosquitto_acl`. A new device (e.g. `terra3`) needs a `topic read terra3/#`
+line for `backend` and the topic in device-service's `app.mqtt.topics`; phase 2 generates the backend lines
+from `mosquitto_devices`.
 
 How it is built:
 - `files/mosquitto-passwd.py` turns the SOPS passwords into Mosquitto `$7$` lines (PBKDF2-HMAC-SHA512,
   100 000 iterations, 64-byte hash). It runs on the controller and reads the passwords on stdin, never in
-  argv. The 12-byte salt is `HMAC-SHA256(password, username)[:12]`, so the same password renders the same
-  line and a second run changes nothing. Mosquitto 2.1 accepts only 12- or 64-byte salts.
+  argv. The 12-byte salt is PBKDF2-HMAC-SHA512 of the password and the username, at the same cost as the
+  hash, so the same password renders the same line and a second run changes nothing, and the salt is no
+  shortcut for testing a password guess. Mosquitto 2.1 accepts only 12- or 64-byte salts.
 - Secret `mosquitto-auth` (key `passwd`) and ConfigMap `mosquitto-acl` (key `acl`) are mounted as one
   projected volume at `/mosquitto/auth`, mode 0440, group 1883 (`fsGroup`). Mosquitto opens both files as
   uid 1883 after reading `mosquitto.conf`.
@@ -2120,6 +2126,20 @@ How it is built:
   seconds; it reconnects by itself.
 
 ##### Phase 1 enable order (owner, own day, not the plan-10 database window)
+
+Pre-check, before step 2: list the clients that use the broker today. Every client without a broker user
+is refused from step 2 on.
+
+```bash
+# one line per client id, with its username if it sent one, e.g.  12 device-service (p2, c1, k60, u'backend').
+kubectl -n apps logs deploy/mosquitto --since=168h | grep "New client connected" | sed -E 's/.* as //' \
+  | sort | uniq -c | sort -rn
+```
+
+Expected: `device-service` (user `backend`), the exporter (anonymous today, `exporter` after step 2) and,
+if its integration is used, Home Assistant. Decide on anything else first (give it a user and ACL lines, or
+accept that it stops). The terrarium ESP32s are offline today and get their own users in phase 2 (spec 053,
+homelab#377); they cannot connect between this phase and their firmware update.
 
 1. SOPS: set a final strong `device_service_mqtt_password` and a new `mosquitto_exporter_mqtt_password`
    (each `openssl rand -base64 32`, different values; the play asserts ≥ 24 characters). Add
@@ -2134,11 +2154,18 @@ How it is built:
 The same order applies to every later password rotation. Between steps 2 and 4 device-service cannot
 connect (no telemetry, no control); the terrarium devices keep their last state.
 
+- Do not change `device_service_mqtt_password` again until the device-service database window (homelab#153)
+  is done: that window runs 59 and restarts device-service, so a vault value that 50 has not applied yet
+  would lock device-service out of the broker. Every later rotation is vault → 50 → 59 → pod delete in one
+  sitting.
+- The first 59 run after homelab#327 also activates homelab#163. Run the #163 verification query ("App
+  database CONNECT restriction") right after step 3 if this is that run.
+
 ##### Phase 1 verify
 
 ```bash
 kubectl -n apps logs deploy/mosquitto --tail=50 | grep -i -E "error|warn|denied|not authorised" || echo "no errors"
-kubectl -n apps exec deploy/mosquitto -- sh -c 'ls -ln /mosquitto/auth/ && grep -c ":\$7\$" /mosquitto/auth/passwd'
+kubectl -n apps exec deploy/mosquitto -- sh -c 'ls -ln /mosquitto/auth/ && grep -cF ":\$7\$" /mosquitto/auth/passwd'
 # anonymous CONNECT is refused (expect "not authorised", rc 5)
 kubectl -n apps exec deploy/mosquitto -- mosquitto_pub -h localhost -t test/anon -m x; echo "rc=$?"
 # device-service is connected again
