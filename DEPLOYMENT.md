@@ -2030,8 +2030,8 @@ and `TargetDown`.
 
 ### Mosquitto broker access (homelab#122)
 
-The broker (playbook 50) still accepts anonymous clients until phase 1 of homelab#122. Phase 0 makes it
-reachable from inside the cluster only:
+Two layers, both in playbook 50: phase 0 makes the broker reachable from inside the cluster only, phase 1
+(below) requires a broker user with a password and enforces per-user topic ACLs. Phase 0:
 
 - The Service `apps/mosquitto` is `ClusterIP` (variable `mosquitto_service_type`, default `ClusterIP`), so k3s
   ServiceLB no longer publishes 1883 on the node IPs.
@@ -2041,7 +2041,7 @@ reachable from inside the cluster only:
 In-cluster clients keep working: device-service and mosquitto-exporter use `mosquitto.apps.svc.cluster.local:1883`,
 and Home Assistant (`hostNetwork: true` with `dnsPolicy: ClusterFirstWithHostNet`) resolves the same name.
 
-#### Phase 0 pre-checks (owner, before the playbook runs)
+#### Phase 0: pre-checks (owner, before the playbook runs)
 
 1. **Home Assistant MQTT integration.** In Home Assistant: Settings → Devices & services. If no MQTT integration
    exists, nothing to do. If one exists and its broker is a node or LoadBalancer IP (`192.168.1.x`), change the
@@ -2061,7 +2061,7 @@ and Home Assistant (`hostNetwork: true` with `dnsPolicy: ClusterFirstWithHostNet
    each one (the ESP32 terrarium controllers are expected and are offline today; anything else is a consumer
    to move into the cluster or to cover in a later phase) before running the playbooks.
 
-#### Apply (owner)
+#### Phase 0: apply (owner)
 
 ```bash
 # 1. Service -> ClusterIP (k3s removes the svclb pods for mosquitto)
@@ -2074,7 +2074,7 @@ If step 1 fails because the API server rejects the in-place type change, delete 
 `kubectl -n apps delete svc mosquitto && ansible-playbook infra/playbooks/50_apps_infra.yml`.
 A second run of either playbook reports no change for these tasks.
 
-#### Verify
+#### Phase 0: verify
 
 ```bash
 kubectl -n apps get svc mosquitto -o jsonpath='{.spec.type}{"\n"}'          # ClusterIP
@@ -2087,11 +2087,116 @@ nc -vz -w 3 192.168.1.61 1883 || echo "closed (expected)"
 
 Prometheus target `serviceMonitor/monitoring/mosquitto` stays up (the exporter connects in-cluster).
 
-#### Rollback
+#### Phase 0: rollback
 
 `ansible-playbook infra/playbooks/50_apps_infra.yml -e mosquitto_service_type=LoadBalancer` restores the LAN
 LoadBalancer. The UFW rule is deliberately not restored by the role; re-add it by hand only if a LAN client
 must reach the broker before phase 1: `sudo ufw allow from 192.168.1.0/24 to any port 1883 proto tcp`.
+
+#### Phase 1: broker authentication
+
+Playbook 50 runs the broker with `allow_anonymous false`, a `password_file` and an `acl_file` on the official
+`eclipse-mosquitto` image (no plugin). Broker users:
+
+| User | Client | Password (SOPS) | ACL |
+|---|---|---|---|
+| `backend` | device-service (sends client id `device-service`; the broker uses the username, see below) | `device_service_mqtt_password` (59 writes the same value to `device-service-secrets/mqtt-password`) | read `terra1/#`, `terra2/#`; readwrite `terraGeneral/#`, `javaBackend/mqtt/status`; write `+/+/man` |
+| `exporter` | mosquitto-exporter (env `MQTT_USER`/`MQTT_PASS` from Secret `mosquitto-exporter-mqtt`) | `mosquitto_exporter_mqtt_password` | read `$SYS/#` |
+| `homeassistant` | Home Assistant, only if its MQTT integration is used | `mosquitto_homeassistant_mqtt_password` (optional) | the pattern lines only: `homeassistant/#` (its discovery prefix) and read `terraGeneral/#` |
+
+The pattern lines `readwrite %u/#` and `read terraGeneral/#` give every user its own prefix; they are the
+device contract for per-device users (spec 053, phase 2). The ACL lives in `mosquitto_acl` in the playbook.
+Home Assistant gets only those pattern lines: `homeassistant/#` and read on `terraGeneral/#`, not the device
+topics (`terra1/#`, …) or other prefixes (e.g. `shellies/#`). If it needs more, add explicit
+`user homeassistant` lines to `mosquitto_acl`. A new device (e.g. `terra3`) needs a `topic read terra3/#`
+line for `backend` and the topic in device-service's `app.mqtt.topics`; phase 2 generates the backend lines
+from `mosquitto_devices`.
+
+The listener sets `use_username_as_clientid true`: the broker uses each client's username as its client id, so
+no client can take over another client's session by sending its id. Each broker user therefore holds one
+connection at a time; a second CONNECT with the same username replaces the first. That matches every client
+(device-service runs one replica with `maxSurge: 0` and clean sessions, device-service#113; one exporter, one
+Home Assistant). Never test with the `backend` or `exporter` credentials while device-service or the exporter
+runs: the test would disconnect them.
+
+How it is built:
+- `files/mosquitto-passwd.py` turns the SOPS passwords into Mosquitto `$7$` lines (PBKDF2-HMAC-SHA512,
+  100 000 iterations, 64-byte hash). It runs on the controller and reads the passwords on stdin, never in
+  argv. The 12-byte salt is PBKDF2-HMAC-SHA512 of the password and the username, at the same cost as the
+  hash, so the same password renders the same line and a second run changes nothing, and the salt is no
+  shortcut for testing a password guess. Mosquitto 2.1 accepts only 12- or 64-byte salts.
+- Secret `mosquitto-auth` (key `passwd`) and ConfigMap `mosquitto-acl` (key `acl`) are mounted as one
+  projected volume at `/mosquitto/auth`, mode 0440, group 1883 (`fsGroup`). Mosquitto opens both files as
+  uid 1883 after reading `mosquitto.conf`.
+- The pod annotation `checksum/config` rolls the broker when the config, a password or the ACL changes; the
+  exporter has its own `checksum/credentials`. Each rollout drops device-service's MQTT connection for a few
+  seconds; it reconnects by itself.
+
+##### Phase 1 enable order (owner, own day, not the plan-10 database window)
+
+Pre-check, before step 2: list the clients that use the broker today. Every client without a broker user
+is refused from step 2 on. The broker's current config logs errors only (a multi-value `log_type` line in
+2.1 applies just its first value), so read the open connections instead and map them to pods:
+
+```bash
+# peer IPs with an established connection to 1883, then the pod behind each IP
+kubectl -n apps exec deploy/mosquitto -- netstat -tn \
+  | awk '$4 ~ /:1883$/ && $6 == "ESTABLISHED" {sub(/:[0-9]+$/, "", $5); print $5}' | sort | uniq -c
+kubectl get pods -A -o wide --request-timeout=10s | grep -wF -e <ip1> -e <ip2>
+```
+
+This sees only clients connected at that moment; the NM-3 query in "Phase 0: pre-checks" covers LAN sources
+over 14 days. After step 2 the new config logs every connection: `kubectl -n apps logs deploy/mosquitto |
+grep "New client connected"` (refused clients show up as "not authorised").
+
+Expected: `device-service` (user `backend`), the exporter (anonymous today, `exporter` after step 2) and,
+if its integration is used, Home Assistant. Decide on anything else first (give it a user and ACL lines, or
+accept that it stops). The terrarium ESP32s are offline today and get their own users in phase 2 (spec 053,
+homelab#377); they cannot connect between this phase and their firmware update.
+
+1. SOPS: set a final strong `device_service_mqtt_password` and a new `mosquitto_exporter_mqtt_password`
+   (each `openssl rand -base64 32`, different values; the play asserts ≥ 24 characters). Add
+   `mosquitto_homeassistant_mqtt_password` only if Home Assistant uses MQTT, and then set the same user and
+   password in its MQTT integration.
+2. `ansible-playbook infra/playbooks/50_apps_infra.yml` — the broker restarts with authentication.
+3. `ansible-playbook infra/playbooks/59_app_services.yml` — device-service's Secret gets the vault value.
+4. `kubectl -n apps delete pod -l app=device-service` — device-service reads the password only at start.
+   If the vault value did not change in step 1, steps 3 and 4 can be skipped: Paho reconnects with the
+   unchanged password.
+
+The same order applies to every later password rotation. Between steps 2 and 4 device-service cannot
+connect (no telemetry, no control); the terrarium devices keep their last state.
+
+- Do not change `device_service_mqtt_password` again until the device-service database window (homelab#153)
+  is done: that window runs 59 and restarts device-service, so a vault value that 50 has not applied yet
+  would lock device-service out of the broker. Every later rotation is vault → 50 → 59 → pod delete in one
+  sitting.
+- The first 59 run after homelab#327 also activates homelab#163. Run the #163 verification query ("App
+  database CONNECT restriction") right after step 3 if this is that run.
+
+##### Phase 1 verify
+
+```bash
+kubectl -n apps logs deploy/mosquitto --tail=50 | grep -i -E "error|warn|denied|not authorised" || echo "no errors"
+kubectl -n apps exec deploy/mosquitto -- sh -c 'ls -ln /mosquitto/auth/ && grep -cF ":\$7\$" /mosquitto/auth/passwd'
+# anonymous CONNECT is refused (expect "not authorised", rc 5)
+kubectl -n apps exec deploy/mosquitto -- mosquitto_pub -h localhost -t test/anon -m x; echo "rc=$?"
+# device-service is connected again
+kubectl -n apps logs deploy/device-service --tail=200 | grep -i mqtt | tail -5
+# exporter: broker_connection_up 1 (Prometheus target serviceMonitor/monitoring/mosquitto up)
+kubectl -n apps port-forward svc/mosquitto-metrics 9234:9234 & sleep 2; curl -s localhost:9234/metrics | grep -E "^broker_(connection_up|uptime)"; kill %1
+```
+
+A second run of playbook 50 reports no change for the Mosquitto tasks (deterministic hashes, unchanged
+checksum annotation).
+
+##### Phase 1 rollback
+
+`ansible-playbook infra/playbooks/50_apps_infra.yml -e mqtt_auth_enabled=false` restores anonymous access
+(`allow_anonymous true`, no password or ACL file) on the same image. The `mosquitto-auth` and
+`mosquitto-exporter-mqtt` objects, the volume and the exporter env stay; they are unused in this mode and
+the clients keep working (credentials are accepted without a password file). The next normal run of 50
+re-enables authentication.
 
 ### Home Assistant
 

@@ -6,6 +6,15 @@
 # Voraussetzung: all.sops.yml enthält postgresql_password, postgresql_replication_password,
 #                influxdb_admin_password, influxdb_admin_token
 #
+# Mosquitto broker authentication (homelab#122 phase 1), SOPS variables:
+#   device_service_mqtt_password:     <openssl rand -base64 32>  broker user `backend`; 59 writes the
+#                                     same value to device-service-secrets/mqtt-password
+#   mosquitto_exporter_mqtt_password: <openssl rand -base64 32>  broker user `exporter` ($SYS read-only)
+#   mosquitto_homeassistant_mqtt_password: optional, only if Home Assistant's MQTT integration is used
+#   Each at least 24 characters, single line. Rotation order: vault -> 50 -> 59 ->
+#   kubectl -n apps delete pod -l app=device-service (DEPLOYMENT.md "Mosquitto broker access").
+#   Rollback to anonymous access: -e mqtt_auth_enabled=false
+#
 # Ausführen: ansible-playbook infra/playbooks/50_apps_infra.yml
 - name: App Infrastructure — PostgreSQL, InfluxDB 2, Mosquitto
   hosts: k3s_server
@@ -19,11 +28,81 @@
     # value on a live cluster without the runbook DEPLOYMENT.md "Growing the PostgreSQL volume"; the
     # drift check before the expansion runs with -e postgresql_storage_size=5Gi.
     postgresql_storage_size: 10Gi
+    # Mosquitto broker authentication (homelab#122 phase 1). false = anonymous broker (rollback).
+    mqtt_auth_enabled: true
+    # Broker ACL (Mosquitto acl_file syntax). `backend` = device-service, `exporter` = mosquitto-exporter.
+    # The two pattern lines give every user its own `<username>/#` (read/write) plus read on
+    # terraGeneral/#: the device contract of spec 053 (devices are broker users named like their
+    # device id). `backend` and `exporter` also get an unused `<username>/#`.
+    mosquitto_acl: |
+      user backend
+      topic read terra1/#
+      topic read terra2/#
+      topic readwrite terraGeneral/#
+      topic write +/+/man
+      topic readwrite javaBackend/mqtt/status
+
+      user exporter
+      topic read $SYS/#
+
+      pattern readwrite %u/#
+      pattern read terraGeneral/#
+    mosquitto_conf: |
+      listener 1883
+      {% if mqtt_auth_enabled | bool %}
+      # The broker uses the username as client id, so no client can take over another client's session
+      # by connecting with its id (spec 053 §4). Per listener, so it stays right below `listener`.
+      use_username_as_clientid true
+      allow_anonymous false
+      password_file /mosquitto/auth/passwd
+      acl_file /mosquitto/auth/acl
+      {% else %}
+      # Rollback mode (mqtt_auth_enabled=false): anonymous access. Do NOT expose port 1883 outside the
+      # cluster in this mode.
+      allow_anonymous true
+      {% endif %}
+      persistence true
+      persistence_location /mosquitto/data/
+      log_dest stdout
+      # One type per line: Mosquitto 2.1 applies only the first value of a multi-value log_type line
+      # (the old one-line form logged errors only). notice carries the client connect/disconnect lines.
+      log_type error
+      log_type warning
+      log_type notice
+      log_type information
 
   pre_tasks:
     - name: Check that helm_binary is Helm 3 (#36)
       ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
       tags: [always]
+
+    # Fails before any PostgreSQL or InfluxDB task runs (homelab#122 phase 1).
+    - name: Mosquitto auth — assert that the broker passwords are set (homelab#122)
+      ansible.builtin.assert:
+        that:
+          - device_service_mqtt_password is defined
+          - device_service_mqtt_password is string
+          - device_service_mqtt_password | length >= 24
+          - device_service_mqtt_password is not search('[\r\n]')
+          - mosquitto_exporter_mqtt_password is defined
+          - mosquitto_exporter_mqtt_password is string
+          - mosquitto_exporter_mqtt_password | length >= 24
+          - mosquitto_exporter_mqtt_password is not search('[\r\n]')
+          - mosquitto_exporter_mqtt_password != device_service_mqtt_password
+          - >-
+            mosquitto_homeassistant_mqtt_password is not defined or
+            (mosquitto_homeassistant_mqtt_password is string and
+             mosquitto_homeassistant_mqtt_password | length >= 24 and
+             mosquitto_homeassistant_mqtt_password is not search('[\r\n]'))
+        fail_msg: >-
+          Mosquitto broker authentication needs device_service_mqtt_password and
+          mosquitto_exporter_mqtt_password in the SOPS inventory: different values, at least 24
+          characters, single line (e.g. openssl rand -base64 32). mosquitto_homeassistant_mqtt_password
+          is optional with the same rules. See the header comment of this playbook; rollback:
+          -e mqtt_auth_enabled=false.
+        quiet: true
+      when: mqtt_auth_enabled | bool
+      delegate_to: localhost
 
   tasks:
     # --- Namespace ---
@@ -245,6 +324,82 @@
       delegate_to: localhost
 
     # --- Mosquitto (raw manifests — kein Helm, k8s-at-home chart archiviert) ---
+    # Broker authentication (homelab#122 phase 1): password_file with $7$ (PBKDF2-SHA512) hashes and an
+    # acl_file, on the official image (no plugin). The hashes are computed on the controller by
+    # files/mosquitto-passwd.py (password on stdin, never in argv). The salt is derived from user and
+    # password with PBKDF2 at the same cost as the hash, so a second run renders the same Secret and the
+    # salt is no shortcut for testing a guess.
+    - name: Mosquitto auth — broker users
+      ansible.builtin.set_fact:
+        mosquitto_auth_users: >-
+          {{ [{'name': 'backend', 'password': device_service_mqtt_password},
+              {'name': 'exporter', 'password': mosquitto_exporter_mqtt_password}]
+             + ([{'name': 'homeassistant', 'password': mosquitto_homeassistant_mqtt_password}]
+                if mosquitto_homeassistant_mqtt_password is defined else []) }}
+      no_log: true
+      when: mqtt_auth_enabled | bool
+
+    - name: Mosquitto auth — render the password file ($7$ hashes on the controller)
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "-I"
+          - "{{ playbook_dir }}/files/mosquitto-passwd.py"
+        stdin: "{{ mosquitto_auth_users | to_json }}"
+      register: mosquitto_passwd_render
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: mqtt_auth_enabled | bool
+      delegate_to: localhost
+
+    - name: Mosquitto auth — password file Secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: mosquitto-auth
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            passwd: "{{ mosquitto_passwd_render.stdout }}\n"
+      no_log: true
+      when: mqtt_auth_enabled | bool
+      delegate_to: localhost
+
+    - name: Mosquitto auth — ACL ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: mosquitto-acl
+            namespace: "{{ apps_namespace }}"
+          data:
+            acl: "{{ mosquitto_acl }}"
+      when: mqtt_auth_enabled | bool
+      delegate_to: localhost
+
+    - name: Mosquitto auth — exporter credentials Secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: mosquitto-exporter-mqtt
+            namespace: "{{ apps_namespace }}"
+          type: Opaque
+          stringData:
+            username: exporter
+            password: "{{ mosquitto_exporter_mqtt_password }}"
+      no_log: true
+      when: mqtt_auth_enabled | bool
+      delegate_to: localhost
+
     - name: Mosquitto ConfigMap anlegen
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -255,17 +410,7 @@
             name: mosquitto-config
             namespace: "{{ apps_namespace }}"
           data:
-            mosquitto.conf: |
-              listener 1883
-              # SECURITY: anonymous access is still enabled; broker authentication is
-              # homelab#122 phase 1. The Service is ClusterIP-only (phase 0), so only
-              # in-cluster clients reach the broker. Do NOT expose port 1883 outside the
-              # cluster without authentication.
-              allow_anonymous true
-              persistence true
-              persistence_location /mosquitto/data/
-              log_dest stdout
-              log_type error warning notice information
+            mosquitto.conf: "{{ mosquitto_conf }}"
       delegate_to: localhost
 
     - name: Mosquitto PVC anlegen
@@ -305,7 +450,18 @@
               metadata:
                 labels:
                   app: mosquitto
+                annotations:
+                  # The broker reads its config, password and ACL files only at start: a change in any
+                  # of them rolls the pod. The password part hashes the $7$ lines, not plaintext.
+                  checksum/config: >-
+                    {{ (mosquitto_conf ~ (mosquitto_passwd_render.stdout | default(''))
+                        ~ (mosquitto_acl if mqtt_auth_enabled | bool else '')) | hash('sha256') }}
               spec:
+                # Mosquitto drops to uid/gid 1883 after reading mosquitto.conf and opens the password and
+                # ACL files as that user: the projected files are root:1883, mode 0440.
+                securityContext:
+                  fsGroup: 1883
+                  fsGroupChangePolicy: OnRootMismatch
                 containers:
                   - name: mosquitto
                     # Pinned 2.1.2-alpine (2026-06-22). The bare tag 2.1.2 does not exist on
@@ -320,6 +476,9 @@
                     volumeMounts:
                       - name: config
                         mountPath: /mosquitto/config
+                      - name: auth
+                        mountPath: /mosquitto/auth
+                        readOnly: true
                       - name: data
                         mountPath: /mosquitto/data
                     resources:
@@ -333,6 +492,25 @@
                   - name: config
                     configMap:
                       name: mosquitto-config
+                  # Password file (Secret mosquitto-auth) and ACL (ConfigMap mosquitto-acl) in one
+                  # directory. optional: the pod also starts in rollback mode, where the config does
+                  # not reference these files and the objects may not exist yet.
+                  - name: auth
+                    projected:
+                      defaultMode: 0440
+                      sources:
+                        - secret:
+                            name: mosquitto-auth
+                            optional: true
+                            items:
+                              - key: passwd
+                                path: passwd
+                        - configMap:
+                            name: mosquitto-acl
+                            optional: true
+                            items:
+                              - key: acl
+                                path: acl
                   - name: data
                     persistentVolumeClaim:
                       claimName: mosquitto-data
@@ -382,6 +560,9 @@
               metadata:
                 labels:
                   app: mosquitto-exporter
+                annotations:
+                  # Env is read only at start: roll the exporter when a broker password changes.
+                  checksum/credentials: "{{ (mosquitto_passwd_render.stdout | default('')) | hash('sha256') }}"
               spec:
                 containers:
                   - name: mosquitto-exporter
@@ -391,6 +572,21 @@
                     args:
                       - "--endpoint"
                       - "tcp://mosquitto.{{ apps_namespace }}.svc.cluster.local:1883"
+                    # Broker user `exporter` ($SYS read-only, homelab#122). optional: in rollback mode
+                    # without the Secret the exporter connects anonymously.
+                    env:
+                      - name: MQTT_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: mosquitto-exporter-mqtt
+                            key: username
+                            optional: true
+                      - name: MQTT_PASS
+                        valueFrom:
+                          secretKeyRef:
+                            name: mosquitto-exporter-mqtt
+                            key: password
+                            optional: true
                     ports:
                       - containerPort: 9234
                     resources:
