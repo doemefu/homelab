@@ -35,7 +35,7 @@
     mqtt_auth_enabled: true
     # Device broker users (homelab#122 phase 2, route 2b, docs/053-mqtt-device-authentication.md): one
     # user per device id, password from mosquitto_<id>_mqtt_password. Adding a device: add the id here,
-    # add the SOPS key, add the id to device-service's app.mqtt.topics, run 50 (spec 053 §6).
+    # add the SOPS key, add the id to device-service's app.mqtt.topics, run 50 (spec 053 §5).
     mosquitto_devices:
       - terra1
       - terra2
@@ -60,6 +60,9 @@
     mosquitto_conf: |
       listener 1883
       {% if mqtt_auth_enabled | bool %}
+      # The broker uses the username as client id, so no client can take over another client's session
+      # by connecting with its id (spec 053 §4). Per listener, so it stays right below `listener`.
+      use_username_as_clientid true
       allow_anonymous false
       password_file /mosquitto/auth/passwd
       acl_file /mosquitto/auth/acl
@@ -369,8 +372,9 @@
     - name: Mosquitto auth — device users (route 2b)
       ansible.builtin.set_fact:
         mosquitto_auth_users: >-
-          {{ mosquitto_auth_users
-             + [{'name': item, 'password': vars['mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password']}] }}
+          {{ mosquitto_auth_users + [{'name': item, 'password': lookup('ansible.builtin.vars', device_secret_var)}] }}
+      vars:
+        device_secret_var: "mosquitto_{{ item | replace('-', '_') }}_mqtt_password"
       loop: "{{ mosquitto_devices }}"
       no_log: true
       when: mqtt_auth_enabled | bool

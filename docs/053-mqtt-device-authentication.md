@@ -8,8 +8,7 @@ authentication through the `mosquitto-go-auth` plugin; it is superseded (see "De
 **Tracking:** homelab#122 (broker, phases 0–3) · homelab#377 (firmware, Terra1/Terra2) · homelab#378 (TLS on
 8883) · homelab#379 (IoT network segmentation) · homelab#380 (archived mosquitto-exporter)
 **Implementation:** `infra/playbooks/50_apps_infra.yml` (Mosquitto section), `infra/playbooks/files/mosquitto-passwd.py`
-**Runbooks:** `DEPLOYMENT.md` "Mosquitto broker access (homelab#122)" and "Mosquitto broker authentication
-(homelab#122 phase 1)"
+**Runbook:** `DEPLOYMENT.md` "Mosquitto broker access (homelab#122)"
 
 ---
 
@@ -60,14 +59,28 @@ Consequences of 2b:
 
 ```conf
 listener 1883
+use_username_as_clientid true
 allow_anonymous false
 password_file /mosquitto/auth/passwd
 acl_file /mosquitto/auth/acl
 persistence true
 persistence_location /mosquitto/data/
 log_dest stdout
-log_type error warning notice information
+log_type error
+log_type warning
+log_type notice
+log_type information
 ```
+
+- `use_username_as_clientid true` (per listener): the broker replaces every client's id with its username, so
+  a client cannot take over another client's session by reusing its id. `backend` therefore runs as client
+  `backend`, whatever id device-service sends; device-service uses clean sessions, so nothing depends on it.
+  Consequence: each broker user holds at most one connection; a second CONNECT with the same username
+  replaces the first. That matches every client today (device-service runs one replica with `maxSurge: 0`,
+  device-service#113; one exporter, one Home Assistant, one ESP32 per device). Never use the `backend` or
+  `exporter` credentials for manual tests while those clients run: the test would disconnect them.
+- One `log_type` per line: Mosquitto 2.1 applies only the first value of a multi-value `log_type` line.
+  `notice` carries the connect, disconnect and "not authorised" lines.
 
 `password_file` and `acl_file` are deprecated in Mosquitto 2.1 in favour of the `password-file` and
 `acl-file` plugins, and remain supported until 3.0. Moving to the plugins is a follow-up before any 3.x
@@ -75,11 +88,11 @@ upgrade.
 
 ### 3.2 Users
 
-| User | Client | Client id | SOPS variable |
+| User | Client | Session id (= username, §3.1) | SOPS variable |
 |---|---|---|---|
-| `backend` | device-service | `device-service` | `device_service_mqtt_password` (also written to `device-service-secrets/mqtt-password` by playbook 59) |
-| `exporter` | mosquitto-exporter | exporter default | `mosquitto_exporter_mqtt_password` |
-| `homeassistant` | Home Assistant (optional, only if its MQTT integration is used) | HA default | `mosquitto_homeassistant_mqtt_password` |
+| `backend` | device-service (sends client id `device-service`) | `backend` | `device_service_mqtt_password` (also written to `device-service-secrets/mqtt-password` by playbook 59) |
+| `exporter` | mosquitto-exporter | `exporter` | `mosquitto_exporter_mqtt_password` |
+| `homeassistant` | Home Assistant (optional, only if its MQTT integration is used) | `homeassistant` | `mosquitto_homeassistant_mqtt_password` |
 | `<device id>` (`terra1`, `terra2`) | one ESP32 each | the device id | `mosquitto_<id>_mqtt_password` (`-` in the id becomes `_`) |
 
 Device ids come from the playbook list `mosquitto_devices` and must match `[a-z0-9-]{3,32}`, the
@@ -139,8 +152,8 @@ Applies to every device, Terra1 and Terra2 first.
 
 - **Protocol:** MQTT 3.1.1 to `mqtt://<broker LB IP>:1883`. Keep host, port and an optional CA certificate
   configurable for the later TLS listener (8883).
-- **Identity:** username = client id = the device id, exactly as registered (e.g. `terra1`). Never reuse
-  another client's id. The broker drops an existing session when a new CONNECT uses the same client id.
+- **Identity:** username = client id = the device id, exactly as registered (e.g. `terra1`). The broker
+  enforces this (`use_username_as_clientid`, §3.1): whatever id the device sends, its session is `<id>`.
 - **Password:** the device's own password from §3.2, provisioned at flash time and stored in NVS. Never in
   source code, the repository, logs or serial output.
 - **Publish only under `<id>/`:**
@@ -173,7 +186,8 @@ Applies to every device, Terra1 and Terra2 first.
 working when the broker restarts.
 
 **Revoke a device:** remove the id from `mosquitto_devices` (or rotate its password without reflashing),
-then run playbook 50. Effective immediately.
+then run playbook 50. Effective immediately. The id may stay in device-service's `app.mqtt.topics` and its
+device row; that is harmless, since no client can publish under it any more.
 
 **Rotate `backend`:** vault → playbook 50 → playbook 59 → `kubectl -n apps delete pod -l app=device-service`
 (device-service reads the password only at start).
@@ -214,6 +228,6 @@ Tested before rollout against a local `eclipse-mosquitto:2.1.2-alpine` container
 |---|---|---|---|
 | Passwords readable on the LAN (no TLS yet) | medium | medium | Phase 3 `/32` source ranges; TLS (homelab#378); IoT network (homelab#379) |
 | A device password leaks from flash | low | low–medium | ACL limits it to the device's own subtree; revoke by rotating (§5) |
-| A misconfigured client id kicks another session | low | medium | Client id = username contract (§4); `backend` uses `device-service`, which no device uses |
+| A client reuses another client's id to kick its session (e.g. with a password leaked from a device) | low | medium | `use_username_as_clientid true` (§3.1): the broker sets every client id to the username, so a device user can only replace its own session; revoke the device (§5) |
 | Wrong vault value locks device-service out | low | medium | Rotation order in §5; rollback with `mqtt_auth_enabled=false` |
 | Mosquitto 3.0 removes `password_file` / `acl_file` | certain on 3.0 | medium | Move to the `password-file` / `acl-file` plugins before upgrading |

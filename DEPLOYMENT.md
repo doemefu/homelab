@@ -2100,7 +2100,7 @@ Playbook 50 runs the broker with `allow_anonymous false`, a `password_file` and 
 
 | User | Client | Password (SOPS) | ACL |
 |---|---|---|---|
-| `backend` | device-service (client id `device-service`) | `device_service_mqtt_password` (59 writes the same value to `device-service-secrets/mqtt-password`) | read `terra1/#`, `terra2/#`; readwrite `terraGeneral/#`, `javaBackend/mqtt/status`; write `+/+/man` |
+| `backend` | device-service (sends client id `device-service`; the broker uses the username, `use_username_as_clientid`) | `device_service_mqtt_password` (59 writes the same value to `device-service-secrets/mqtt-password`) | read `terra1/#`, `terra2/#`; readwrite `terraGeneral/#`, `javaBackend/mqtt/status`; write `+/+/man` |
 | `exporter` | mosquitto-exporter (env `MQTT_USER`/`MQTT_PASS` from Secret `mosquitto-exporter-mqtt`) | `mosquitto_exporter_mqtt_password` | read `$SYS/#` |
 | `homeassistant` | Home Assistant, only if its MQTT integration is used | `mosquitto_homeassistant_mqtt_password` (optional) | the pattern lines only: `homeassistant/#` (its discovery prefix) and read `terraGeneral/#` |
 | `terra1`, `terra2` (one per entry of `mosquitto_devices`) | the ESP32 terrarium controllers (phase 2, route 2b) | `mosquitto_terra1_mqtt_password`, `mosquitto_terra2_mqtt_password` | the pattern lines only: own `<id>/#`, read `terraGeneral/#` |
@@ -2199,6 +2199,11 @@ Each device in `mosquitto_devices` is a broker user with its own SOPS password; 
 only, backoff on refused CONNECT, password in NVS) is spec 053 §4; the firmware work is homelab#377. Adding,
 rotating and revoking a device: spec 053 §5. Each change is one run of playbook 50 (the broker restarts and
 all sessions reconnect). Until the firmware is flashed, the device users exist but nothing connects with them.
+
+Phase 2 also sets `use_username_as_clientid true`: the broker uses each client's username as its client id,
+so no client can take over another client's session by sending its id. Each broker user therefore holds one
+connection at a time; never test with the `backend` or `exporter` credentials while device-service or the
+exporter runs (the test would disconnect them).
 
 ### Home Assistant
 
