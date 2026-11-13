@@ -1953,6 +1953,7 @@ Playbook 50 runs the broker with `allow_anonymous false`, a `password_file` and 
 | `backend` | device-service (client id `device-service`) | `device_service_mqtt_password` (59 writes the same value to `device-service-secrets/mqtt-password`) | read `terra1/#`, `terra2/#`; readwrite `terraGeneral/#`, `javaBackend/mqtt/status`; write `+/+/man` |
 | `exporter` | mosquitto-exporter (env `MQTT_USER`/`MQTT_PASS` from Secret `mosquitto-exporter-mqtt`) | `mosquitto_exporter_mqtt_password` | read `$SYS/#` |
 | `homeassistant` | Home Assistant, only if its MQTT integration is used | `mosquitto_homeassistant_mqtt_password` (optional) | the pattern lines only: `homeassistant/#` (its discovery prefix) and read `terraGeneral/#` |
+| `terra1`, `terra2` (one per entry of `mosquitto_devices`) | the ESP32 terrarium controllers (phase 2, route 2b) | `mosquitto_terra1_mqtt_password`, `mosquitto_terra2_mqtt_password` | the pattern lines only: own `<id>/#`, read `terraGeneral/#` |
 
 The pattern lines `readwrite %u/#` and `read terraGeneral/#` give every user its own prefix; they are the
 device contract for per-device users (spec 053, phase 2). The ACL lives in `mosquitto_acl` in the playbook.
@@ -1983,6 +1984,14 @@ How it is built:
 
 The same order applies to every later password rotation. Between steps 2 and 4 device-service cannot
 connect (no telemetry, no control); the terrarium devices keep their last state.
+
+#### Phase 2: device users (route 2b, spec 053)
+
+Each device in `mosquitto_devices` is a broker user with its own SOPS password; the play asserts every key
+(`openssl rand -base64 32`, unique). The device contract (client id = username = device id, own subtree
+only, backoff on refused CONNECT, password in NVS) is spec 053 §4; the firmware work is homelab#377. Adding,
+rotating and revoking a device: spec 053 §5. Each change is one run of playbook 50 (the broker restarts and
+all sessions reconnect). Until the firmware is flashed, the device users exist but nothing connects with them.
 
 #### Verify
 
