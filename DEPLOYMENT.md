@@ -1943,6 +1943,71 @@ and `TargetDown`.
 
 ---
 
+### Mosquitto broker authentication (homelab#122 phase 1)
+
+Playbook 50 runs the broker with `allow_anonymous false`, a `password_file` and an `acl_file` on the official
+`eclipse-mosquitto` image (no plugin). Broker users:
+
+| User | Client | Password (SOPS) | ACL |
+|---|---|---|---|
+| `backend` | device-service (client id `device-service`) | `device_service_mqtt_password` (59 writes the same value to `device-service-secrets/mqtt-password`) | read `terra1/#`, `terra2/#`; readwrite `terraGeneral/#`, `javaBackend/mqtt/status`; write `+/+/man` |
+| `exporter` | mosquitto-exporter (env `MQTT_USER`/`MQTT_PASS` from Secret `mosquitto-exporter-mqtt`) | `mosquitto_exporter_mqtt_password` | read `$SYS/#` |
+| `homeassistant` | Home Assistant, only if its MQTT integration is used | `mosquitto_homeassistant_mqtt_password` (optional) | the pattern lines only: `homeassistant/#` (its discovery prefix) and read `terraGeneral/#` |
+
+The pattern lines `readwrite %u/#` and `read terraGeneral/#` give every user its own prefix; they are the
+device contract for per-device users (spec 053, phase 2). The ACL lives in `mosquitto_acl` in the playbook.
+
+How it is built:
+- `files/mosquitto-passwd.py` turns the SOPS passwords into Mosquitto `$7$` lines (PBKDF2-HMAC-SHA512,
+  100 000 iterations, 64-byte hash). It runs on the controller and reads the passwords on stdin, never in
+  argv. The 12-byte salt is `HMAC-SHA256(password, username)[:12]`, so the same password renders the same
+  line and a second run changes nothing. Mosquitto 2.1 accepts only 12- or 64-byte salts.
+- Secret `mosquitto-auth` (key `passwd`) and ConfigMap `mosquitto-acl` (key `acl`) are mounted as one
+  projected volume at `/mosquitto/auth`, mode 0440, group 1883 (`fsGroup`). Mosquitto opens both files as
+  uid 1883 after reading `mosquitto.conf`.
+- The pod annotation `checksum/config` rolls the broker when the config, a password or the ACL changes; the
+  exporter has its own `checksum/credentials`. Each rollout drops device-service's MQTT connection for a few
+  seconds; it reconnects by itself.
+
+#### Phase 1 enable order (owner, own day, not the plan-10 database window)
+
+1. SOPS: set a final strong `device_service_mqtt_password` and a new `mosquitto_exporter_mqtt_password`
+   (each `openssl rand -base64 32`, different values; the play asserts ≥ 24 characters). Add
+   `mosquitto_homeassistant_mqtt_password` only if Home Assistant uses MQTT, and then set the same user and
+   password in its MQTT integration.
+2. `ansible-playbook infra/playbooks/50_apps_infra.yml` — the broker restarts with authentication.
+3. `ansible-playbook infra/playbooks/59_app_services.yml` — device-service's Secret gets the vault value.
+4. `kubectl -n apps delete pod -l app=device-service` — device-service reads the password only at start.
+   If the vault value did not change in step 1, steps 3 and 4 can be skipped: Paho reconnects with the
+   unchanged password.
+
+The same order applies to every later password rotation. Between steps 2 and 4 device-service cannot
+connect (no telemetry, no control); the terrarium devices keep their last state.
+
+#### Verify
+
+```bash
+kubectl -n apps logs deploy/mosquitto --tail=50 | grep -i -E "error|warn|denied|not authorised" || echo "no errors"
+kubectl -n apps exec deploy/mosquitto -- sh -c 'ls -ln /mosquitto/auth/ && grep -c ":\$7\$" /mosquitto/auth/passwd'
+# anonymous CONNECT is refused (expect "not authorised", rc 5)
+kubectl -n apps exec deploy/mosquitto -- mosquitto_pub -h localhost -t test/anon -m x; echo "rc=$?"
+# device-service is connected again
+kubectl -n apps logs deploy/device-service --tail=200 | grep -i mqtt | tail -5
+# exporter: broker_connection_up 1 (Prometheus target serviceMonitor/monitoring/mosquitto up)
+kubectl -n apps port-forward svc/mosquitto-metrics 9234:9234 & sleep 2; curl -s localhost:9234/metrics | grep -E "^broker_(connection_up|uptime)"; kill %1
+```
+
+A second run of playbook 50 reports no change for the Mosquitto tasks (deterministic hashes, unchanged
+checksum annotation).
+
+#### Rollback
+
+`ansible-playbook infra/playbooks/50_apps_infra.yml -e mqtt_auth_enabled=false` restores anonymous access
+(`allow_anonymous true`, no password or ACL file) on the same image. The `mosquitto-auth` and
+`mosquitto-exporter-mqtt` objects, the volume and the exporter env stay; they are unused in this mode and
+the clients keep working (credentials are accepted without a password file). The next normal run of 50
+re-enables authentication.
+
 ### Home Assistant
 
 #### Deploy/Redeploy
