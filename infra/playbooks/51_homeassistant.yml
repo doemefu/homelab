@@ -6,7 +6,7 @@
 # Voraussetzung: 50_apps_infra.yml ausgeführt (Mosquitto läuft in apps namespace)
 #
 # Zugriff: http://<node-ip>:8123 (LAN only, hostNetwork)
-# MQTT: mosquitto.apps.svc.cluster.local:1883 (anonym, in-cluster)
+# MQTT: mosquitto.apps.svc.cluster.local:1883 (ClusterIP, in-cluster only; homelab#122)
 #
 # Ausführen: ansible-playbook infra/playbooks/51_homeassistant.yml
 - name: Home Assistant
