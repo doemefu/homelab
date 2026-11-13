@@ -7,16 +7,18 @@ name: CI
 # (workflow already runs with `permissions: contents: read`, so this is
 # defense-in-depth, not a fix for an active gap); every binary downloaded via
 # `curl | tar` is checksum-verified against the upstream release's own
-# published checksums file before extraction (all binary steps assume the
+# published checksums before extraction (all binary steps assume the
 # `ubuntu-latest` runner's linux/amd64 architecture, matching every asset
-# filename below — e.g. `_linux_amd64`/`-linux-amd64`). Re-pinning the 6 actions:
+# filename below — e.g. `_linux_amd64`/`-linux-amd64`). Re-pinning the 5 actions:
 # `.github/dependabot.yml`'s `github-actions` ecosystem entry already tracks these and
 # opens a PR with the new SHA on a version bump — review and merge that PR rather than
 # hand-resolving (hand-resolving is only for sanity-checking an already-open Dependabot PR,
 # or a bump outside its weekly schedule): `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`
-# (dereference an annotated tag via `git/tags/<sha>` -> `object.sha`). Re-pinning the 5
-# curl-downloaded binaries is fully manual — Dependabot doesn't track them at all — just
-# re-fetch the matching checksums file for the new version. This same convention applies to
+# (dereference an annotated tag via `git/tags/<sha>` -> `object.sha`). Re-pinning the 6
+# curl-downloaded binaries is fully manual — Dependabot doesn't track them at all —
+# just re-fetch the matching checksums for the new version (ShellCheck publishes no
+# checksums file: its digest is the asset's `digest` field via `gh api`, see the
+# lint-shell job). This same convention applies to
 # `codeql.yml` and `helm-chart-freshness.yml` in this directory (see their header comments)
 # and should be applied to any future workflow file added here.
 
@@ -128,32 +130,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The action downloads the ShellCheck release named by `version` (its
-      # default is the floating `stable`) and has no checksum input. Pin the
-      # version, and check the same release asset URL against a pinned sha256
-      # in a separate download first (homelab-device-service#126). This
-      # catches a replaced release asset, but it does not verify the copy the
-      # action downloads and runs a moment later: the action accepts no
-      # pre-verified binary. The lint job holds no secrets and only a
-      # read-only token.
+      # No third-party action involved: the ShellCheck binary is downloaded,
+      # checksum-verified and executed in one step, so the verified copy is
+      # exactly the one that runs (homelab-device-service#126).
       # Bump SHELLCHECK_VERSION and SHELLCHECK_SHA256 together; the digest is
       # the `digest` field of the `linux.x86_64.tar.xz` asset in
       # `gh api repos/koalaman/shellcheck/releases/tags/<version>`.
-      - name: Verify the ShellCheck release asset (pinned + checksum-verified)
+      - name: Install and run ShellCheck (pinned + checksum-verified)
         env:
           SHELLCHECK_VERSION: v0.11.0
           SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         run: |
           set -euo pipefail
           asset="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          dir="${RUNNER_TEMP}/shellcheck"
           curl -fsSLO "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${asset}"
           echo "${SHELLCHECK_SHA256}  ${asset}" | sha256sum -c -
+          mkdir -p "${dir}"
+          tar -xJf "${asset}" -C "${dir}"
           rm -f "${asset}"
-      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
-        with:
-          scandir: ./scripts
-          # Keep in sync with SHELLCHECK_VERSION in the step above.
-          version: v0.11.0
+          "${dir}/shellcheck-${SHELLCHECK_VERSION}/shellcheck" --version
+          find ./scripts -type f -name '*.sh' -print0 | xargs -0 -r "${dir}/shellcheck-${SHELLCHECK_VERSION}/shellcheck"
 
   lint-workflows:
     name: Lint GitHub Workflows

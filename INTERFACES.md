@@ -320,7 +320,6 @@ From `59_app_services.yml` (app secrets):
 - `homelab_db_username`, `homelab_db_password`
 - `device_service_mqtt_password`
 - `influxdb_admin_token`
-- `auth_service_grafana_client_secret`, `auth_service_ha_client_secret`
 - `auth_service_device_service_client_secret`, `auth_service_n8n_client_secret`
 - `furchert_ch_auth_secret`
 - `auth_service_furchert_ch_client_secret`
