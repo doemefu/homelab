@@ -257,9 +257,10 @@
           data:
             mosquitto.conf: |
               listener 1883
-              # SECURITY: Anonymous access intentionally enabled for homelab M6 setup.
-              # Post-M6 task: add password_file + auth config (see .claude/memory/project_post_m6_items.md).
-              # Do NOT expose port 1883 externally without authentication.
+              # SECURITY: anonymous access is still enabled; broker authentication is
+              # homelab#122 phase 1. The Service is ClusterIP-only (phase 0), so only
+              # in-cluster clients reach the broker. Do NOT expose port 1883 outside the
+              # cluster without authentication.
               allow_anonymous true
               persistence true
               persistence_location /mosquitto/data/
@@ -347,7 +348,12 @@
             name: mosquitto
             namespace: "{{ apps_namespace }}"
           spec:
-            type: LoadBalancer
+            # ClusterIP by default (homelab#122 phase 0): the broker is reachable only from
+            # inside the cluster (device-service, mosquitto-exporter, Home Assistant via
+            # cluster DNS). Rollback: -e mosquitto_service_type=LoadBalancer. If the API
+            # server rejects the in-place type change, delete the Service once
+            # (kubectl -n apps delete svc mosquitto) and re-run this playbook.
+            type: "{{ mosquitto_service_type | default('ClusterIP') }}"
             selector:
               app: mosquitto
             ports:

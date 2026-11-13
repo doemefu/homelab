@@ -37,10 +37,10 @@ The following **shared services** run in the `apps` namespace and are available 
 |---------|---------------|------|-----------------|----------------|-------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | `:9187/metrics` (sidecar) | Single replica | Password from SOPS `postgresql_password` |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | `/metrics` (same port; container listens on 8086) | Token-based | Org: `homelab`, Bucket: `default`, 30d retention |
-| Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | **Anonymous** (LAN-only) | Also exposed via LoadBalancer on port 1883 |
+| Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | **Anonymous** (in-cluster only) | ClusterIP; not exposed on the LAN (homelab#122) |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | `:9234/metrics` | - | Prometheus exporter for Mosquitto |
 
-> **Important**: Mosquitto is currently configured without authentication (`allow_anonymous true`) and is LAN-oriented. Do **not** expose it externally without `password_file` configuration.
+> **Important**: Mosquitto is currently configured without authentication (`allow_anonymous true`) and is reachable only inside the cluster (ClusterIP, homelab#122 phase 0). Do **not** expose it outside the cluster without `password_file` configuration (homelab#122 phase 1).
 
 ---
 
