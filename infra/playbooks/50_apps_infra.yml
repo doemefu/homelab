@@ -565,7 +565,12 @@
             name: mosquitto
             namespace: "{{ apps_namespace }}"
           spec:
-            type: LoadBalancer
+            # ClusterIP by default (homelab#122 phase 0): the broker is reachable only from
+            # inside the cluster (device-service, mosquitto-exporter, Home Assistant via
+            # cluster DNS). Rollback: -e mosquitto_service_type=LoadBalancer. If the API
+            # server rejects the in-place type change, delete the Service once
+            # (kubectl -n apps delete svc mosquitto) and re-run this playbook.
+            type: "{{ mosquitto_service_type | default('ClusterIP') }}"
             selector:
               app: mosquitto
             ports:

@@ -90,7 +90,7 @@ Running AI workloads (Claude Code subagents, future microservice features) curre
 #### Must-Have (P0)
 
 - LiteLLM deployed to `litellm` namespace (technically `apps` namespace in current k3s) with a dedicated Postgres database.
-- Cloudflare Tunnel exposes LiteLLM at `https://ai.furchert.ch` (HTTPS, authenticated).
+- Cloudflare Tunnel exposes LiteLLM at `https://ai.furchert.ch` (HTTPS, authenticated). The whole host sits behind a Cloudflare Access application (#121): browsers pass the owner-only policy, scripts a Service Auth policy with an Access service token (`CF-Access-Client-Id` / `CF-Access-Client-Secret` headers). No path bypasses Access, `/v1/*` included.
 - LiteLLM model routing configured for: `mistral-large-latest` and `mistral-small-latest` (Mistral API). Anthropic routes intentionally disabled.
 - Smoke test confirms `/health` and `/models` return expected responses; a sample chat completion succeeds for each configured model.
 - All secrets (API keys, DB password, tunnel token) stored in a k8s Secret, never in ConfigMap or committed plaintext.
@@ -125,7 +125,7 @@ Running AI workloads (Claude Code subagents, future microservice features) curre
 | Does LiteLLM transparently proxy Anthropic beta headers that Claude Code relies on? | Dominic — validate in smoke test | Yes (Phase 1 completion) |
 | Should auth-service issue LiteLLM virtual keys, or should LiteLLM consume auth-service JWTs directly via a custom auth handler? | Dominic + auth-service design | Yes (Phase 2 design) |
 | What Postgres version / resource limits are appropriate for LiteLLM's usage volume? | Dominic | No |
-| Should `ai.furchert.ch` be accessible from the public internet, or restricted via Cloudflare Access to known IPs/users? | Dominic | No (default: locked behind Cloudflare Access) |
+| Should `ai.furchert.ch` be accessible from the public internet, or restricted via Cloudflare Access to known IPs/users? | Dominic | Resolved (security review follow-up, #121): whole-host Access app with two policies, owner-only (browser, e-mail one-time PIN) and Service Auth (an Access service token for scripts). No `/v1/*` bypass: it would leave the master key usable as an internet-facing admin credential. Until the owner creates the app, the host is protected only by LiteLLM's own login and keys (runbook: `DEPLOYMENT.md` § "Cloudflare Access for grafana, n8n, club, ai and ssh (#121)") |
 
 ### Timeline
 
@@ -253,7 +253,7 @@ The Postgres dependency is real but low-cost — the homelab already runs a Post
 │  Cloudflare Edge                                              │
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │  ai.furchert.ch  (Cloudflare Tunnel)                    │  │
-│  │  → optional: Cloudflare Access policy for authz         │  │
+│  │  → Cloudflare Access app (owner-only + service token)   │  │
 │  └─────────────────────────────────────────────────────────┘  │
 └───────────────────────────────┬───────────────────────────────┘
                                 │ Tunnel (encrypted)
@@ -373,7 +373,7 @@ general_settings:
 
 ### Smoke Test Plan
 
-Automated smoke tests run in `scripts/smoke-test-litellm.sh`:
+Automated smoke tests run in `scripts/smoke-test-litellm.sh`. Through `ai.furchert.ch`, every request also needs the Access service-token headers (the script sends them when `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are set); the plain `curl` lines below omit them. Without a service token, use `kubectl -n apps port-forward svc/litellm 4000:4000` and `http://localhost:4000`.
 
 ```bash
 # 1. Health check
@@ -653,6 +653,7 @@ Update `~/.claude/settings.json` on the development Mac to set:
 }
 ```
 Also configure subagent model override: `CLAUDE_CODE_SUBAGENT_MODEL=mistral-small`.
+Since `ai.furchert.ch` sits behind Cloudflare Access (#121), the client must also send the Access service-token headers, for Claude Code via `"ANTHROPIC_CUSTOM_HEADERS": "CF-Access-Client-Id: <id>\nCF-Access-Client-Secret: <secret>"` in the same `env` block (the values stay in the local settings file, never in a repo).
 Document the config in `OPERATIONS.md` under an "AI Gateway" section.
 
 ### Done when

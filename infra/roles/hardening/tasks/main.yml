@@ -25,6 +25,17 @@
     comment: "{{ item.comment }}"
   loop: "{{ hardening_ufw_lan_ports }}"
 
+# Removing 1883 from hardening_ufw_lan_ports does not remove the rule that earlier runs
+# created on the nodes, so delete it explicitly (homelab#122 phase 0). Once the rule is
+# gone this task reports no change.
+- name: UFW — remove the retired Mosquitto LAN rule (1883/tcp)
+  community.general.ufw:
+    rule: allow
+    port: "1883"
+    proto: tcp
+    src: "{{ hardening_lan_subnet }}"
+    delete: true
+
 - name: UFW — Pod CIDR freigeben (k3s cross-node Traffic)
   community.general.ufw:
     rule: allow
