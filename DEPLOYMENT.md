@@ -4089,21 +4089,128 @@ it removed first.
 
 #### App database CONNECT restriction (#163)
 
-`59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service` and
-`mcp_hub` (task "App databases — revoke CONNECT from PUBLIC (#163)"). The owning role and superusers
-can still connect; every other role gets `permission denied`. The task fails if one of these databases
-is owned by a superuser: a database recreated without `OWNER <role>` would otherwise lock its app out.
-Sessions that were already open stay connected, so restart the clients after the first run.
+`59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service`,
+`device_service` and `mcp_hub` (task "App databases — revoke CONNECT from PUBLIC (#163)"). The
+owning role and superusers can still connect; every other role gets `permission denied`. The task
+fails if one of these databases is owned by a superuser: a database recreated without `OWNER <role>`
+would otherwise lock its app out. Sessions that were already open stay connected, so restart the
+clients after the first run.
 
 ```bash
 # expect t only for each role on its own database
-kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -tAc "SELECT r.rolname, d.datname, has_database_privilege(r.rolname, d.datname, 'CONNECT') FROM pg_roles r CROSS JOIN pg_database d WHERE r.rolname IN ('homelab','litellm','data_service','mcp_hub','club_assistant') AND d.datname IN ('homelabdb','litellm','data_service','mcp_hub') ORDER BY 1,2"
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -tAc "SELECT r.rolname, d.datname, has_database_privilege(r.rolname, d.datname, 'CONNECT') FROM pg_roles r CROSS JOIN pg_database d WHERE r.rolname IN ('homelab','litellm','data_service','device_service','mcp_hub','club_assistant') AND d.datname IN ('homelabdb','litellm','data_service','device_service','mcp_hub') ORDER BY 1,2"
 # a real cross-database attempt must fail with "permission denied for database"
 kubectl -n apps exec postgresql-0 -c postgresql -- psql -U litellm -d homelabdb -c 'select 1'
 ```
 
 Rollback: revert the change in `59_app_services.yml` first, otherwise the next run revokes again. Then
 run `GRANT CONNECT ON DATABASE <db> TO PUBLIC` as `postgres` for each database.
+
+#### device-service database separation (#153)
+
+**Overview:** the separation lands in two steps; only step B needs the downtime window.
+
+- **Step A — homelab#392 (safe at any time):** playbook `59_app_services.yml` creates the
+  `device_service` role and the empty `device_service` database, already covered by the #163
+  CONNECT revoke above. Nothing consumes the role or the database yet, so step A can be merged
+  and run at any time.
+- **Step B — the cutover (the window below):** `device-service-secrets` is switched to the new
+  `device_service` role (step B, homelab#393) and merged inside the window, together with device-service's
+  `DB_URL` change (doemefu/homelab-device-service#131). Step B must not merge early: with the
+  secret switched but `DB_URL` still on `homelabdb`, device-service would come back up against
+  `homelabdb`, authenticated as `device_service` — a role with no CONNECT there since the #163
+  revoke — and crash-loop on its next restart.
+
+**Preconditions:**
+
+- Step A (homelab#392) is merged and playbook 59 has run — the `device_service` role and the empty
+  `device_service` database exist, and the #163 revoke is live.
+- Step B (homelab#393, the `device-service-secrets` repoint) and the device-service `DB_URL` PR
+  (doemefu/homelab-device-service#131) are reviewed but not merged.
+- No other device-service image change is pending.
+- `flux suspend image update device-service` is mandatory for the window: no device-service
+  merge of any kind from window start until the `DB_URL` change is applied. device-service's read
+  authorization and audience check (doemefu/homelab-device-service#130) landed and soaked
+  before step A.
+- The final `device_service_mqtt_password` (and the Influx token, if done) is in the vault
+  before the window. Once Mosquitto phase 1 (#122) is live, the window's playbook-59 run must
+  not carry a changed MQTT value — a rotation is vault → playbook 50 → playbook 59 →
+  device-service pod delete — and do not rotate `device_service_mqtt_password` between the
+  window and Mosquitto phase 1.
+- Do not swap the ssh Cloudflare Access policy that day (off-LAN kubectl runs through
+  `ssh.furchert.ch`): run the window on the LAN, or keep ssh Access unchanged.
+- Check `devices` for junk `terraN` rows and decide what happens to them before the dump.
+
+**Window steps:** device-service stays scaled down for the whole block, so nothing writes to
+`homelabdb` while the copy runs; `<ts>` is the `backups/<YYYY-MM-DD_HHMMSS>/` directory created
+for this window.
+
+```bash
+K="kubectl -n apps"; PG="$K exec postgresql-0 -c postgresql --"
+flux suspend kustomization device-service && flux suspend image update device-service
+flux get kustomization device-service                       # SUSPENDED True
+$K scale deploy/device-service --replicas=0
+$K wait --for=delete pod -l app=device-service --timeout=120s
+$PG psql -U postgres -d homelabdb -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # record the source row
+$PG psql -U postgres -c '\du homelab'   # expect no Superuser, Create role, Create DB or Bypass RLS attributes
+# while the session is open: run the password-hash census (auth-service DEPLOYMENT.md "Password policy and hashing cost")
+# merge step B (homelab#393, Secret repoint), then the owner runs playbook 59
+$PG pg_dump -U postgres -Fc -d homelabdb -t public.devices -t public.schedules -t public.flyway_schema_history_device -f /tmp/device.dump
+$PG pg_restore -U postgres --role=device_service --no-owner --no-acl --single-transaction --exit-on-error -d device_service /tmp/device.dump
+$PG psql -U postgres -d device_service -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # must equal the source row
+$PG psql -U postgres -d device_service -c '\dt' -c '\ds'    # owner device_service; sequences present
+$K exec postgresql-0 -c postgresql -- cat /tmp/device.dump > ~/informatik/homelab/backups/<ts>/device-cutover.dump && $PG rm /tmp/device.dump
+# merge the device-service DB_URL PR (doemefu/homelab-device-service#131)
+flux resume kustomization device-service && flux reconcile kustomization device-service --with-source
+$K get deploy device-service -o jsonpath='{.spec.replicas} {.spec.template.spec.containers[0].env[?(@.name=="DB_URL")].value}'   # expect restored replicas and the new DB_URL
+flux resume image update device-service
+```
+
+**Verification:** with device-service back up:
+
+- Counts and max ids equal the source row: the select against `device_service` returns the same
+  row that was recorded from `homelabdb` before the copy.
+- `flyway_schema_history_device` shows the three migrations V1–V3 (max `version` 3) — nothing
+  newer ran.
+- `\dt` and `\ds` show the tables and sequences owned by `device_service`, and the sequences
+  are present.
+- The dashboard device page loads and a light toggle works.
+
+**Rollback:**
+
+1. Suspend Flux and scale device-service down as in the window ($K and $PG as defined at the
+   top of the window block):
+
+   ```bash
+   flux suspend kustomization device-service && flux suspend image update device-service
+   $K scale deploy/device-service --replicas=0
+   $K wait --for=delete pod -l app=device-service --timeout=120s
+   ```
+
+2. Write the post-cutover rows back into `homelabdb`. First check the Flyway history; abort the
+   rollback if `device_service` holds a version newer than V3 (the copy-back presumes the V1–V3
+   schema). The data-only dump's SEQUENCE SET entries carry the sequence values:
+
+   ```bash
+   $PG psql -U postgres -d device_service -tAc "select max(version::int) from flyway_schema_history_device"   # must be 3
+   $PG pg_dump -U postgres -Fc --data-only -d device_service -t public.devices -t public.schedules -f /tmp/device-back.dump
+   $PG psql -U postgres -d homelabdb -v ON_ERROR_STOP=1 -c 'TRUNCATE devices, schedules'
+   $PG pg_restore -U postgres --role=homelab --data-only --single-transaction --exit-on-error -d homelabdb /tmp/device-back.dump
+   $PG rm /tmp/device-back.dump
+   ```
+
+3. Revert step B (homelab#393); the owner runs playbook 59.
+4. Revert the device-service `DB_URL` PR.
+5. Resume and reconcile, then lift the image-automation freeze: `flux resume kustomization device-service && flux reconcile kustomization device-service --with-source && flux resume image update device-service`.
+
+**Afterwards:**
+
+- Rotate `homelab_db_password` after the cutover: vault → playbook 59 → `kubectl -n apps delete
+  pod -l app=auth-service` right away, since Hikari's 30-minute `maxLifetime` would otherwise
+  fail new connections. Batch the rotation with the next auth-service rollout, as the restart
+  clears the login throttle's known-good list.
+- Keep the old `devices`, `schedules` and `flyway_schema_history_device` tables in `homelabdb`
+  until the owner confirms the cleanup.
 
 #### LiteLLM (Postgres `litellm` database)
 
@@ -4286,7 +4393,7 @@ backups and for every restore.
 
 | Component | Artifacts | Consistency |
 |-----------|-----------|-------------|
-| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)). `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run (m) (playbook 59, then the login) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
+| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`, `data_service`, `device_service`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)). `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run (m) (playbook 59, then the login) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
 | `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`); the run fails if a shard directory on disk has no matching shard archive |
 | `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
 | `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
