@@ -411,8 +411,8 @@
             namespace: "{{ apps_namespace }}"
           type: Opaque
           stringData:
-            db-username: "{{ homelab_db_username }}"
-            db-password: "{{ homelab_db_password }}"
+            db-username: device_service
+            db-password: "{{ device_service_db_password }}"
             mqtt-password: "{{ device_service_mqtt_password }}"
             influx-token: "{{ influxdb_admin_token }}"
             device-service-client-secret: "{{ auth_service_device_service_client_secret }}"
