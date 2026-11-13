@@ -165,7 +165,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 |---------|------|------|-------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | Metrics: `:9187/metrics` (postgres-exporter) |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | Metrics: `/metrics` (same port; container listens on 8086) |
-| Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | MQTT broker, anonymous (LAN-only) |
+| Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | MQTT broker, ClusterIP (in-cluster only); broker users with passwords and per-user ACLs (homelab#122) |
 | Mosquitto Exporter | `mosquitto-metrics.apps.svc.cluster.local` | 9234 | Prometheus metrics endpoint |
 | LiteLLM | `litellm.apps.svc.cluster.local` | 4000 | AI gateway |
 | n8n | `n8n.apps.svc.cluster.local` | 80 | Workflow automation (container: 5678) |
@@ -221,7 +221,7 @@ Services available for in-cluster consumption via Kubernetes DNS.
 | Area | Configuration |
 |------|---------------|
 | **SSH** | Keys only, `PasswordAuthentication no`, `PermitRootLogin no`, `MaxAuthTries 3` |
-| **Firewall (UFW)** | Default deny incoming; LAN-only rules for k3s, Longhorn, Node Exporter, Mosquitto ports |
+| **Firewall (UFW)** | Default deny incoming; LAN-only rules for k3s, Longhorn, Node Exporter ports |
 | **Secrets** | SOPS + age encryption; no plaintext in git; age key stored outside repo |
 | **Container Images** | No `:latest` tags anywhere; the 8 platform images (open-webui, litellm, n8n, cloudflared, pgvector, postgres-exporter, mosquitto, mosquitto-exporter) are pinned by tag **and** SHA-256 digest (`repo:tag@sha256:...`, #57) — see CONTRIBUTING.md § "Digest-Pinned Platform Images" |
 | **External Exposure** | Exclusively via Cloudflare Tunnel (no public IPs, no port forwarding) |
@@ -325,6 +325,7 @@ docs/                        # Architecture and planning documents
   080-mcp-hub.md              # MCP hub cross-repo contract (canonical)
   100-web-analytics.md        # Web analytics cross-repo contract (canonical)
   090-disaster-recovery.md    # Rebuild order from git + backups, scenarios, RTO/RPO, gaps (draft)
+  fleet-invariants.md         # Rules every service keeps across repos (INV-LOGOUT-1: ID tokens are never bearers)
   adr/                        # ADRs (0002 network telemetry ownership, 0003 MCP hub authorization, 0004 k3s datastore (accepted); 0001 in the parent workspace)
   plans/                      # Feature plans
   specs/                      # Architecture specifications

@@ -110,7 +110,7 @@ All services are discoverable via Kubernetes internal DNS.
 |---------|------|------|---------------|----------------|-------|
 | PostgreSQL 17 | `postgresql.apps.svc.cluster.local` | 5432 | 9187 | SOPS: `postgresql_password` | Single replica; metrics via postgres-exporter sidecar. Per-app DBs: `homelabdb` (auth/device), `litellm`, `club_assistant` (54), `data_service` (role `data_service`, schema `netmon`, created by `59_app_services.yml`), `mcp_hub` (role `mcp_hub`, schema `mcp_hub`, created by `59_app_services.yml` when the token-store variables are set, #171; excluded from the app-data dumps by design). `59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service` and `mcp_hub` (#163): only the owning role (and superusers) can connect; a new app database must be added to that task |
 | InfluxDB 2 | `influxdb2.apps.svc.cluster.local` | 80 | - (same port, `/metrics`) | SOPS: `influxdb_admin_token` | Org: `homelab`, Bucket: `default`, 30d retention; container listens on 8086 |
-| Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Anonymous | LAN-only MQTT; also exposed via LoadBalancer on 1883 |
+| Mosquitto 2 | `mosquitto.apps.svc.cluster.local` | 1883 | - | Broker user + password, per-user topic ACL (homelab#122 phase 1; spec `docs/053-mqtt-device-authentication.md`) | ClusterIP only, in-cluster clients only (homelab#122 phase 0); no LAN exposure |
 | mosquitto-metrics | `mosquitto-metrics.apps.svc.cluster.local` | - | 9234 | - | Prometheus exporter for Mosquitto |
 | LiteLLM | `litellm.apps.svc.cluster.local` | 4000 | - | Bearer `LITELLM_MASTER_KEY` | OpenAI-compatible AI gateway |
 | n8n | `n8n.apps.svc.cluster.local` | 80 | - | OIDC via auth-service | Workflow automation platform (container: 5678) |
@@ -564,7 +564,7 @@ All incoming connections are **denied by default**. Only LAN-originating traffic
 | 2379-2380 | TCP | etcd | LAN only | Control-Plane only |
 | 9100 | TCP | Node Exporter | LAN only | Prometheus scraping |
 | 9500-9502 | TCP | Longhorn | LAN only | Storage replication |
-| 1883 | TCP | Mosquitto MQTT | LAN only | MQTT broker (LoadBalancer) |
+| 1883 | TCP | Mosquitto MQTT | In-cluster only | MQTT broker (ClusterIP; no UFW rule, no LoadBalancer since homelab#122 phase 0) |
 
 **Internal Cluster Ports** (no UFW entry needed — reachable via CNI):
 - 9101 (Traefik metrics)
