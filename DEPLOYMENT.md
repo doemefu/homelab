@@ -2969,7 +2969,7 @@ Backups: the token-store database `mcp_hub` (#171) is excluded from `scripts/bac
 
 #### Cloudflare rules (owner, dashboard; recreate from these settings)
 
-**Edge rate-limit rule on the login service** (docs/080 §4.7, D32) — create before the first production login; remove or relax once homelab-auth-service#104 lands. Dashboard: `furchert.ch` → Security → WAF → Rate limiting rules → Create rule. Action **Block**, never a challenge (Claude cannot solve one); never block the whole Anthropic range.
+**Edge rate-limit rule on the login service** (docs/080 §4.7, D32) — create before the first production login and keep it permanently. homelab-auth-service#104 shipped on 2026-11-03 (in-app throttle, auth-service#132 and #134), but it does not bound the bcrypt work one source address can trigger; this rule is that bound, so never remove it or raise its thresholds (switching to the other column of the table below after a plan change is fine). On the Free plan it is path-only and counts `/login` and `/oauth2/token` on every hostname of the zone. Dashboard: `furchert.ch` → Security → WAF → Rate limiting rules → Create rule. Action **Block**, never a challenge (Claude cannot solve one); never block the whole Anthropic range.
 
 | Setting | Business plan or higher (preferred) | Free plan (fields limited to Path, period and block fixed at 10 s) |
 |---------|--------------------------------|---------------------------------------------------------------------|
