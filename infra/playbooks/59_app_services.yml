@@ -12,8 +12,6 @@
 #   homelab_db_password:       <generated password>
 #   device_service_mqtt_password: <placeholder until MQTT auth is enabled post-M6>
 #   influxdb_admin_token:      <InfluxDB admin token (generated on first InfluxDB startup)>
-#   auth_service_grafana_client_secret:       <from Grafana → Administration → Authentication → Generic OAuth>
-#   auth_service_ha_client_secret:            <from Home Assistant → Settings → OAuth Clients>
 #   auth_service_device_service_client_secret: <choose a random secret (plain, no {noop} prefix)>
 #   auth_service_n8n_client_secret:           <choose a random secret for n8n OIDC client>
 #   auth_service_furchert_ch_client_secret:   <random secret for furchert-ch OIDC client (plain, no {noop}); auth-service gets "{noop}<value>", furchert-ch gets "<value>">
@@ -172,8 +170,6 @@
           - homelab_db_password is defined and homelab_db_password | length > 0
           - device_service_mqtt_password is defined and device_service_mqtt_password | length > 0
           - influxdb_admin_token is defined and influxdb_admin_token | length > 0
-          - auth_service_grafana_client_secret is defined and auth_service_grafana_client_secret | length > 0
-          - auth_service_ha_client_secret is defined and auth_service_ha_client_secret | length > 0
           - auth_service_device_service_client_secret is defined and auth_service_device_service_client_secret | length > 0
           - auth_service_n8n_client_secret is defined and auth_service_n8n_client_secret | length > 0
           - n8n_encryption_key is defined and n8n_encryption_key | length > 0
@@ -445,8 +441,6 @@
             namespace: "{{ apps_namespace }}"
           type: Opaque
           stringData:
-            grafana-client-secret: "{{ auth_service_grafana_client_secret }}"
-            ha-client-secret: "{{ auth_service_ha_client_secret }}"
             device-service-client-secret: "{noop}{{ auth_service_device_service_client_secret }}"
             n8n-client-secret-authservice: "{noop}{{ auth_service_n8n_client_secret }}"
             n8n-client-secret: "{{ auth_service_n8n_client_secret }}"
