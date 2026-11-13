@@ -50,7 +50,7 @@ All external access goes through Cloudflare Tunnel. Public hostnames are **centr
 | `ssh.furchert.ch` | `ssh://192.168.1.61:22` | SSH | raspi5 node | Cloudflare Access SSH proxy |
 | `grafana.furchert.ch` | `http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80` | HTTP | Grafana | Dashboard UI |
 | `auth.furchert.ch` | `http://auth-service.apps.svc.cluster.local:8080` | HTTP | auth-service | JWT auth service |
-| `device.furchert.ch` | `http://device-service.apps.svc.cluster.local:8081` | HTTP | device-service | IoT device management |
+| `device.furchert.ch` | `http://device-service.apps.svc.cluster.local:8081` | HTTP | device-service | IoT device management; the REST API `/devices*` and `/schedules*` answers `404` at the tunnel (internal-only, #121); `/ws` stays public |
 | `n8n.furchert.ch` | `http://n8n.apps.svc.cluster.local:80` | HTTP | n8n | Workflow automation (container: 5678) |
 | `ai.furchert.ch` | `http://litellm.apps.svc.cluster.local:4000` | HTTP | LiteLLM | AI gateway, OpenAI-compatible |
 | `club.furchert.ch` | `http://open-webui.apps.svc.cluster.local:80` | HTTP | Open WebUI (Club Assistant) | Chat UI (container: 8080) |

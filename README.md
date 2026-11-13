@@ -325,6 +325,7 @@ docs/                        # Architecture and planning documents
   080-mcp-hub.md              # MCP hub cross-repo contract (canonical)
   100-web-analytics.md        # Web analytics cross-repo contract (canonical)
   090-disaster-recovery.md    # Rebuild order from git + backups, scenarios, RTO/RPO, gaps (draft)
+  fleet-invariants.md         # Rules every service keeps across repos (INV-LOGOUT-1: ID tokens are never bearers)
   adr/                        # ADRs (0002 network telemetry ownership, 0003 MCP hub authorization, 0004 k3s datastore (accepted); 0001 in the parent workspace)
   plans/                      # Feature plans
   specs/                      # Architecture specifications
