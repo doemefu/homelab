@@ -11,6 +11,7 @@
 #   homelab_db_username:       homelab
 #   homelab_db_password:       <generated password>
 #   device_service_mqtt_password: <placeholder until MQTT auth is enabled post-M6>
+#   device_service_db_password: <openssl rand -hex 24>   # Postgres password for the device_service role (homelab#153)
 #   influxdb_admin_token:      <InfluxDB admin token (generated on first InfluxDB startup)>
 #   auth_service_grafana_client_secret:       <from Grafana → Administration → Authentication → Generic OAuth>
 #   auth_service_ha_client_secret:            <from Home Assistant → Settings → OAuth Clients>
@@ -753,6 +754,91 @@
       register: pg_data_service_create_db
       changed_when: "'CREATE DATABASE' in pg_data_service_create_db.stdout"
 
+    # --- device-service: dedicated PostgreSQL database + role (homelab#153) ---
+    # DB name = role name = device_service, like data_service. device-service keeps using homelabdb
+    # until device-service-secrets switches to this role — a separate change, inside a maintenance window.
+
+    - name: Device-service — assert that the dedicated DB password is set
+      ansible.builtin.assert:
+        that:
+          - device_service_db_password is defined and device_service_db_password | length > 0
+        fail_msg: >-
+          The device-service SOPS variable device_service_db_password is missing or empty.
+          Add it to infra/inventory/group_vars/all.sops.yml — see all.sops.yml.example for the command.
+      delegate_to: localhost
+
+    - name: Device-service — create PostgreSQL role (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_roles WHERE rolname='device_service'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE ROLE device_service WITH LOGIN"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_device_service_create_user
+      changed_when: "'CREATE ROLE' in pg_device_service_create_user.stdout"
+
+    - name: Device-service — set/update PostgreSQL role password
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - psql
+          - -U
+          - postgres
+        stdin: |
+          SELECT format(
+            'ALTER ROLE %I WITH PASSWORD %L',
+            convert_from(decode('{{ 'device_service' | b64encode }}', 'base64'), 'UTF8'),
+            convert_from(decode('{{ device_service_db_password | b64encode }}', 'base64'), 'UTF8')
+          ) \gexec
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      no_log: true
+      delegate_to: localhost
+      # Password rotation is intentionally always enforced; SQL output is not a reliable change signal here.
+      changed_when: false
+
+    - name: Device-service — create PostgreSQL database (if missing)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -n
+          - "{{ apps_namespace }}"
+          - "{{ postgresql_pod }}"
+          - --
+          - sh
+          - -c
+          - >-
+            psql -U postgres -tc
+            "SELECT 1 FROM pg_database WHERE datname='device_service'"
+            | grep -q 1
+            || psql -U postgres -c
+            "CREATE DATABASE device_service OWNER device_service"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      delegate_to: localhost
+      register: pg_device_service_create_db
+      changed_when: "'CREATE DATABASE' in pg_device_service_create_db.stdout"
+
     - name: Data-service — create data-service-secrets (DB credentials, Cloudflare API)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -1105,11 +1191,13 @@
 
     # #163: by default PUBLIC holds CONNECT on every database, so any login role could connect to any
     # app database. Revoke it on the databases this playbook creates. The owning role keeps CONNECT through
-    # its owner privileges; device-service shares the homelabdb owner role until #153. Databases that do
-    # not exist yet (mcp_hub before its token store is configured) are skipped. club_assistant (54) and n8n
-    # are a follow-up (#320). Fail-closed: ON_ERROR_STOP + a single transaction, so any psql error fails
-    # the task; it also fails if a database is owned by a superuser (its app would be locked out). A
-    # restore that recreates one of these databases brings PUBLIC CONNECT back: re-run this playbook
+    # its owner privileges; device-service gets its own device_service database (homelab#153). The switch of
+    # device-service-secrets to it follows in a separate change inside a maintenance window, so until then
+    # device-service still writes homelabdb. Databases that do not exist yet (mcp_hub before its token
+    # store is configured) are skipped. club_assistant (54) and n8n are a follow-up (#320). Fail-closed:
+    # ON_ERROR_STOP + a single transaction, so any psql error fails the task; it also fails if a database
+    # is owned by a superuser (its app would be locked out). A restore that recreates one of these
+    # databases brings PUBLIC CONNECT back: re-run this playbook
     # (DEPLOYMENT.md "App database CONNECT restriction (#163)").
     - name: App databases — revoke CONNECT from PUBLIC (#163)
       ansible.builtin.command:
@@ -1135,14 +1223,14 @@
           DO $$
           BEGIN
             IF EXISTS (SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba
-                       WHERE d.datname IN ('homelabdb', 'litellm', 'data_service', 'mcp_hub') AND r.rolsuper) THEN
+                       WHERE d.datname IN ('homelabdb', 'litellm', 'data_service', 'device_service', 'mcp_hub') AND r.rolsuper) THEN
               RAISE EXCEPTION 'an app database is owned by a superuser; recreate it with OWNER <app role> first (#163)';
             END IF;
           END
           $$;
           SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', d.datname)
           FROM pg_database d
-          WHERE d.datname IN ('homelabdb', 'litellm', 'data_service', 'mcp_hub')
+          WHERE d.datname IN ('homelabdb', 'litellm', 'data_service', 'device_service', 'mcp_hub')
             AND has_database_privilege('public', d.datname, 'CONNECT')
           ORDER BY d.datname \gexec
       environment:

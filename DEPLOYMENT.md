@@ -4089,15 +4089,16 @@ it removed first.
 
 #### App database CONNECT restriction (#163)
 
-`59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service` and
-`mcp_hub` (task "App databases — revoke CONNECT from PUBLIC (#163)"). The owning role and superusers
-can still connect; every other role gets `permission denied`. The task fails if one of these databases
-is owned by a superuser: a database recreated without `OWNER <role>` would otherwise lock its app out.
-Sessions that were already open stay connected, so restart the clients after the first run.
+`59_app_services.yml` revokes CONNECT from PUBLIC on `homelabdb`, `litellm`, `data_service`,
+`device_service` and `mcp_hub` (task "App databases — revoke CONNECT from PUBLIC (#163)"). The
+owning role and superusers can still connect; every other role gets `permission denied`. The task
+fails if one of these databases is owned by a superuser: a database recreated without `OWNER <role>`
+would otherwise lock its app out. Sessions that were already open stay connected, so restart the
+clients after the first run.
 
 ```bash
 # expect t only for each role on its own database
-kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -tAc "SELECT r.rolname, d.datname, has_database_privilege(r.rolname, d.datname, 'CONNECT') FROM pg_roles r CROSS JOIN pg_database d WHERE r.rolname IN ('homelab','litellm','data_service','mcp_hub','club_assistant') AND d.datname IN ('homelabdb','litellm','data_service','mcp_hub') ORDER BY 1,2"
+kubectl -n apps exec postgresql-0 -c postgresql -- psql -U postgres -tAc "SELECT r.rolname, d.datname, has_database_privilege(r.rolname, d.datname, 'CONNECT') FROM pg_roles r CROSS JOIN pg_database d WHERE r.rolname IN ('homelab','litellm','data_service','device_service','mcp_hub','club_assistant') AND d.datname IN ('homelabdb','litellm','data_service','device_service','mcp_hub') ORDER BY 1,2"
 # a real cross-database attempt must fail with "permission denied for database"
 kubectl -n apps exec postgresql-0 -c postgresql -- psql -U litellm -d homelabdb -c 'select 1'
 ```
@@ -4286,7 +4287,7 @@ backups and for every restore.
 
 | Component | Artifacts | Consistency |
 |-----------|-----------|-------------|
-| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)). `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run (m) (playbook 59, then the login) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
+| `postgresql` | `pg-dumpall.sql.gz` plus one `pg-<db>.dump` per database — the list comes from the server at run time (today: `homelabdb`, `n8n`, `litellm`, `club_assistant`, `data_service`, `device_service`; `mcp_hub` excluded by design, #171: restore = playbook 59 + `mcp-hub login`, see "mcp-hub token store and the Outlook account" (m)). `pg-dumpall.sql.gz` is written with `--clean`; PostgreSQL 17 still emits `DROP DATABASE IF EXISTS mcp_hub` for the excluded database, so restoring it onto a running instance deletes the token store — afterwards run (m) (playbook 59, then the login) | application-consistent (`pg_dumpall --clean --if-exists --exclude-database=mcp_hub`, `pg_dump -Fc`) |
 | `influxdb2` | `influxdb2-backup.tgz` | application-consistent (`influx backup`); the run fails if a shard directory on disk has no matching shard archive |
 | `n8n` | `n8n-workflows.json`, `n8n-credentials.json`, `n8n-data.tgz` | exports application-consistent; PVC archive crash-consistent unless `--quiesce` |
 | `open-webui` | `open-webui-data.tgz` | crash-consistent unless `--quiesce` |
