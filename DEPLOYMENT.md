@@ -4152,6 +4152,8 @@ flux get kustomization device-service                       # SUSPENDED True
 $K scale deploy/device-service --replicas=0
 $K wait --for=delete pod -l app=device-service --timeout=120s
 $PG psql -U postgres -d homelabdb -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # record the source row
+$PG psql -U postgres -c '\du homelab'   # expect no Superuser, Create role, Create DB or Bypass RLS attributes
+# while the session is open: run the plan-05 hash census (auth-service DEPLOYMENT.md "Password policy and hashing cost")
 # merge step B (homelab#393, Secret repoint), then the owner runs playbook 59
 $PG pg_dump -U postgres -Fc -d homelabdb -t public.devices -t public.schedules -t public.flyway_schema_history_device -f /tmp/device.dump
 $PG pg_restore -U postgres --role=device_service --no-owner --no-acl --single-transaction --exit-on-error -d device_service /tmp/device.dump
@@ -4199,7 +4201,7 @@ flux resume image update device-service
 
 3. Revert step B (homelab#393); the owner runs playbook 59.
 4. Revert the device-service `DB_URL` PR.
-5. Resume and reconcile: `flux resume kustomization device-service && flux reconcile kustomization device-service --with-source`.
+5. Resume and reconcile, then lift the image-automation freeze: `flux resume kustomization device-service && flux reconcile kustomization device-service --with-source && flux resume image update device-service`.
 
 **Afterwards:**
 
