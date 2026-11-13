@@ -113,7 +113,7 @@ The six options come from report 01. Where report 04 corrected report 01, the co
 - First production login (spec 080 WP7): confirm the owner-only check, the consent page and the stored consent row, the exact `resource` value (O3), the production tunnel and zone settings (O8, O9).
 - `auth-service#101`: audience allowlists and issuer validation on auth-service `/api/v1/**`; `role` only for first-party clients; `at+jwt` for all tokens — in the order spec 080 §4.5 requires.
 - `device-service#81` / `#83`: issuer, audience and type validation and authorization on `/devices/**`.
-- `auth-service#104`: rate limiting and lockout, not keyed on source IP alone; the edge rate limit of spec 080 §4.7 bridges the time until then.
+- `auth-service#104`: rate limiting and lockout, not keyed on source IP alone. Shipped on 2026-11-03 (`auth-service#132`, `#134`). The edge rate limit of spec 080 §4.7 stays in place permanently as the per-source bound on bcrypt work (spec 080 revision 4.18, D32).
 - `auth-service#108`: a second factor for IdP logins.
 - Consent decisions and revocations as audit events in the login-event outbox (`homelab-auth-service#109`, spec 080 §11.4).
 - Per-tool scope enforcement when a second tool group arrives, including Claude's reaction to a 403 `insufficient_scope` (spec 080 §4.8, O24, O25).
