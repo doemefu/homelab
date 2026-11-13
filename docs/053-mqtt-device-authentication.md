@@ -93,9 +93,11 @@ all of this.
 
 `password_file` lines use Mosquitto's `$7$` format: `<user>:$7$<iterations>$<base64 salt>$<base64 hash>`,
 PBKDF2-HMAC-SHA512 with 100 000 iterations and a 64-byte hash. `files/mosquitto-passwd.py` computes them
-on the Ansible controller. It reads the passwords on stdin, never from argv. The salt is
-`HMAC-SHA256(password, username)[:12]`. That makes it deterministic, so a second playbook run renders the
-same file and changes nothing. Mosquitto 2.1 accepts only 12- or 64-byte salts. Built-in
+on the Ansible controller. It reads the passwords on stdin, never from argv. The 12-byte salt is
+PBKDF2-HMAC-SHA512 of the password and `"mosquitto-passwd-salt:" + username`, at the same 100 000
+iterations. That makes it deterministic, so a second playbook run renders the same file and changes
+nothing, and because the salt costs as much as the hash, it is no shortcut for testing a password guess.
+Mosquitto 2.1 accepts only 12- or 64-byte salts. Built-in
 `password_file` does not accept bcrypt or crypt `$6$` hashes.
 
 ### 3.4 ACL

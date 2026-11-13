@@ -78,6 +78,54 @@
       ansible.builtin.import_tasks: tasks/helm-v3-preflight.yml
       tags: [always]
 
+    # Fails before any PostgreSQL or InfluxDB task runs (homelab#122 phase 1).
+    - name: Mosquitto auth — assert that the broker passwords are set (homelab#122)
+      ansible.builtin.assert:
+        that:
+          - device_service_mqtt_password is defined
+          - device_service_mqtt_password is string
+          - device_service_mqtt_password | length >= 24
+          - device_service_mqtt_password is not search('[\r\n]')
+          - mosquitto_exporter_mqtt_password is defined
+          - mosquitto_exporter_mqtt_password is string
+          - mosquitto_exporter_mqtt_password | length >= 24
+          - mosquitto_exporter_mqtt_password is not search('[\r\n]')
+          - mosquitto_exporter_mqtt_password != device_service_mqtt_password
+          - >-
+            mosquitto_homeassistant_mqtt_password is not defined or
+            (mosquitto_homeassistant_mqtt_password is string and
+             mosquitto_homeassistant_mqtt_password | length >= 24 and
+             mosquitto_homeassistant_mqtt_password is not search('[\r\n]'))
+          - mosquitto_devices | length == mosquitto_devices | unique | length
+        fail_msg: >-
+          Mosquitto broker authentication needs device_service_mqtt_password and
+          mosquitto_exporter_mqtt_password in the SOPS inventory: different values, at least 24
+          characters, single line (e.g. openssl rand -base64 32). mosquitto_homeassistant_mqtt_password
+          is optional with the same rules. See the header comment of this playbook; rollback:
+          -e mqtt_auth_enabled=false.
+        quiet: true
+      when: mqtt_auth_enabled | bool
+      delegate_to: localhost
+
+    - name: Mosquitto auth — assert the device users (homelab#122 phase 2, spec 053)
+      ansible.builtin.assert:
+        that:
+          - item is match('^[a-z0-9-]{3,32}$')
+          - item not in ['backend', 'exporter', 'homeassistant']
+          - ('mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password') in vars
+          - vars['mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password'] is string
+          - vars['mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password'] | length >= 24
+          - vars['mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password'] is not search('[\r\n]')
+        fail_msg: >-
+          Device {{ item }}: the id must match [a-z0-9-]{3,32} and must not be backend, exporter or
+          homeassistant, and mosquitto_{{ item | replace('-', '_') }}_mqtt_password must be set in the
+          SOPS inventory (at least 24 characters, single line, e.g. openssl rand -base64 32).
+          See docs/053-mqtt-device-authentication.md.
+        quiet: true
+      loop: "{{ mosquitto_devices }}"
+      when: mqtt_auth_enabled | bool
+      delegate_to: localhost
+
   tasks:
     # --- Namespace ---
     - name: Apps Namespace anlegen
@@ -300,55 +348,9 @@
     # --- Mosquitto (raw manifests — kein Helm, k8s-at-home chart archiviert) ---
     # Broker authentication (homelab#122 phase 1): password_file with $7$ (PBKDF2-SHA512) hashes and an
     # acl_file, on the official image (no plugin). The hashes are computed on the controller by
-    # files/mosquitto-passwd.py (password on stdin, never in argv) with a salt derived from user and
-    # password, so a second run renders the same Secret.
-    - name: Mosquitto auth — assert that the broker passwords are set (homelab#122)
-      ansible.builtin.assert:
-        that:
-          - device_service_mqtt_password is defined
-          - device_service_mqtt_password is string
-          - device_service_mqtt_password | length >= 24
-          - device_service_mqtt_password is not search('[\r\n]')
-          - mosquitto_exporter_mqtt_password is defined
-          - mosquitto_exporter_mqtt_password is string
-          - mosquitto_exporter_mqtt_password | length >= 24
-          - mosquitto_exporter_mqtt_password is not search('[\r\n]')
-          - mosquitto_exporter_mqtt_password != device_service_mqtt_password
-          - >-
-            mosquitto_homeassistant_mqtt_password is not defined or
-            (mosquitto_homeassistant_mqtt_password is string and
-             mosquitto_homeassistant_mqtt_password | length >= 24 and
-             mosquitto_homeassistant_mqtt_password is not search('[\r\n]'))
-          - mosquitto_devices | length == mosquitto_devices | unique | length
-        fail_msg: >-
-          Mosquitto broker authentication needs device_service_mqtt_password and
-          mosquitto_exporter_mqtt_password in the SOPS inventory: different values, at least 24
-          characters, single line (e.g. openssl rand -base64 32). mosquitto_homeassistant_mqtt_password
-          is optional with the same rules. See the header comment of this playbook; rollback:
-          -e mqtt_auth_enabled=false.
-        quiet: true
-      when: mqtt_auth_enabled | bool
-      delegate_to: localhost
-
-    - name: Mosquitto auth — assert the device users (homelab#122 phase 2, spec 053)
-      ansible.builtin.assert:
-        that:
-          - item is match('^[a-z0-9-]{3,32}$')
-          - item not in ['backend', 'exporter', 'homeassistant']
-          - ('mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password') in vars
-          - vars['mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password'] is string
-          - vars['mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password'] | length >= 24
-          - vars['mosquitto_' ~ (item | replace('-', '_')) ~ '_mqtt_password'] is not search('[\r\n]')
-        fail_msg: >-
-          Device {{ item }}: the id must match [a-z0-9-]{3,32} and must not be backend, exporter or
-          homeassistant, and mosquitto_{{ item | replace('-', '_') }}_mqtt_password must be set in the
-          SOPS inventory (at least 24 characters, single line, e.g. openssl rand -base64 32).
-          See docs/053-mqtt-device-authentication.md.
-        quiet: true
-      loop: "{{ mosquitto_devices }}"
-      when: mqtt_auth_enabled | bool
-      delegate_to: localhost
-
+    # files/mosquitto-passwd.py (password on stdin, never in argv). The salt is derived from user and
+    # password with PBKDF2 at the same cost as the hash, so a second run renders the same Secret and the
+    # salt is no shortcut for testing a guess.
     - name: Mosquitto auth — broker users
       ansible.builtin.set_fact:
         mosquitto_auth_users: >-

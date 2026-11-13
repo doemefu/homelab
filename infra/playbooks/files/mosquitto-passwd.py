@@ -9,9 +9,13 @@ Output (stdout): one line per user, in input order:
 `$7$` is Mosquitto's PBKDF2-HMAC-SHA512 format with a 64-byte derived key.
 Mosquitto 2.1 accepts a salt of exactly 12 or 64 bytes
 (libcommon/password_common.c, pw__decode_sha512_pbkdf2). The salt here is
-HMAC-SHA256(key=password, msg=username)[:12]: deterministic, so a second
-playbook run renders the same file and Ansible reports no change, while
-different users or passwords still get different salts.
+PBKDF2-HMAC-SHA512(password, "mosquitto-passwd-salt:" + username) with the
+same 100 000 iterations, truncated to 12 bytes. It is deterministic, so a
+second playbook run renders the same file and Ansible reports no change, and
+different users or passwords still get different salts. Because the salt
+costs as much to compute as the hash, the published salt is no faster to
+test a password guess against than the hash itself (a single fast keyed hash
+of the password as salt would let an attacker skip the work factor).
 
 Passwords are read from stdin only, never from argv or the environment, and
 are never printed. Standard library only.
@@ -19,7 +23,6 @@ are never printed. Standard library only.
 
 import base64
 import hashlib
-import hmac
 import json
 import re
 import sys
@@ -28,11 +31,12 @@ ITERATIONS = 100_000
 SALT_BYTES = 12
 HASH_BYTES = 64
 USERNAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+SALT_CONTEXT = b"mosquitto-passwd-salt:"
 
 
 def hash_line(name, password):
     pw = password.encode("utf-8")
-    salt = hmac.new(pw, name.encode("utf-8"), hashlib.sha256).digest()[:SALT_BYTES]
+    salt = hashlib.pbkdf2_hmac("sha512", pw, SALT_CONTEXT + name.encode("utf-8"), ITERATIONS, SALT_BYTES)
     derived = hashlib.pbkdf2_hmac("sha512", pw, salt, ITERATIONS, HASH_BYTES)
     salt64 = base64.b64encode(salt).decode("ascii")
     hash64 = base64.b64encode(derived).decode("ascii")
