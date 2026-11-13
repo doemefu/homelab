@@ -2128,13 +2128,19 @@ How it is built:
 ##### Phase 1 enable order (owner, own day, not the plan-10 database window)
 
 Pre-check, before step 2: list the clients that use the broker today. Every client without a broker user
-is refused from step 2 on.
+is refused from step 2 on. The broker's current config logs errors only (a multi-value `log_type` line in
+2.1 applies just its first value), so read the open connections instead and map them to pods:
 
 ```bash
-# one line per client id, with its username if it sent one, e.g.  12 device-service (p2, c1, k60, u'backend').
-kubectl -n apps logs deploy/mosquitto --since=168h | grep "New client connected" | sed -E 's/.* as //' \
-  | sort | uniq -c | sort -rn
+# peer IPs with an established connection to 1883, then the pod behind each IP
+kubectl -n apps exec deploy/mosquitto -- netstat -tn \
+  | awk '$4 ~ /:1883$/ && $6 == "ESTABLISHED" {sub(/:[0-9]+$/, "", $5); print $5}' | sort | uniq -c
+kubectl get pods -A -o wide --request-timeout=10s | grep -wF -e <ip1> -e <ip2>
 ```
+
+This sees only clients connected at that moment; the NM-3 query in "Phase 0: pre-checks" covers LAN sources
+over 14 days. After step 2 the new config logs every connection: `kubectl -n apps logs deploy/mosquitto |
+grep "New client connected"` (refused clients show up as "not authorised").
 
 Expected: `device-service` (user `backend`), the exporter (anonymous today, `exporter` after step 2) and,
 if its integration is used, Home Assistant. Decide on anything else first (give it a user and ACL lines, or

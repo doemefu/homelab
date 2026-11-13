@@ -61,7 +61,12 @@
       persistence true
       persistence_location /mosquitto/data/
       log_dest stdout
-      log_type error warning notice information
+      # One type per line: Mosquitto 2.1 applies only the first value of a multi-value log_type line
+      # (the old one-line form logged errors only). notice carries the client connect/disconnect lines.
+      log_type error
+      log_type warning
+      log_type notice
+      log_type information
 
   pre_tasks:
     - name: Check that helm_binary is Helm 3 (#36)
