@@ -50,6 +50,9 @@
     mosquitto_conf: |
       listener 1883
       {% if mqtt_auth_enabled | bool %}
+      # The broker uses the username as client id, so no client can take over another client's session
+      # by connecting with its id (spec 053 §4). Per listener, so it stays right below `listener`.
+      use_username_as_clientid true
       allow_anonymous false
       password_file /mosquitto/auth/passwd
       acl_file /mosquitto/auth/acl
