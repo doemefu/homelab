@@ -1304,7 +1304,7 @@ protected only by each app's own login:
 
 This runbook puts all four behind Access with the same owner-only policy. For `ai`, a second policy lets
 scripts in with an Access service token. It is done in the Cloudflare dashboard. A read-only drift check
-of the result is a follow-up (#121).
+of the result is a follow-up (#121; run from the Mac with a read-only token, never in CI).
 
 `auth`, `mcp`, `club-mcp`, `device` and the apex stay without Access: they serve public OIDC/OAuth flows,
 the claude.ai connectors (protected by the Anthropic-range WAF rule) or the public site. `device` gets
@@ -1339,9 +1339,10 @@ affected.
    needed). If it is `https://n8n.furchert.ch/api/v1`, the backup request leaves the pod, comes back
    through Access and fails. Change it first, then run the backup workflow once by hand from the UI.
 2. raspi5 crontab: `ssh raspi5 'crontab -l; sudo crontab -l' 2>/dev/null | grep -n backup.sh`. If the
-   club-assistant `backup.sh` runs there with `N8N_API_KEY` set, point its `N8N_BASE_URL` at an
-   in-cluster URL (`http://n8n.apps.svc.cluster.local`) or drop the export step before step 2, and
-   confirm the next nightly run is green.
+   club-assistant `backup.sh` runs there with `N8N_API_KEY` set, point its `N8N_BASE_URL` at the n8n
+   Service's ClusterIP, which a k3s node can reach
+   (`N8N_BASE_URL=http://$(kubectl -n apps get svc n8n -o jsonpath='{.spec.clusterIP}')`), or drop
+   the export step before step 2, and confirm the next nightly run is green.
 3. club-assistant scripts that default to `N8N_BASE_URL=https://n8n.furchert.ch` (`n8n_import.py`,
    `n8n_put.py`, `seed_*_datatable.py`, `verify_eval_run.py`, `export_workflows.sh`): change their
    default to the port-forward URL `http://localhost:5678` (owner commit in the club-assistant repo).
