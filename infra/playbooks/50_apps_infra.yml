@@ -64,8 +64,8 @@
       # by connecting with its id (spec 053 §4). Per listener, so it stays right below `listener`.
       use_username_as_clientid true
       allow_anonymous false
-      password_file /mosquitto/auth/passwd
-      acl_file /mosquitto/auth/acl
+      password_file /mosquitto/secrets/passwd
+      acl_file /mosquitto/secrets/acl
       {% else %}
       # Rollback mode (mqtt_auth_enabled=false): anonymous access. Do NOT expose port 1883 outside the
       # cluster in this mode.
@@ -531,12 +531,16 @@
                       # (passwd -> ..data/passwd), so a directory mount fails with "Unable to open
                       # pwfile". A subPath mount is a bind mount of the resolved file. subPath
                       # files do not update in place; the checksum annotations restart the pod.
+                      # The path is /mosquitto/secrets, not the former /mosquitto/auth directory
+                      # mount: the Deployment task patches (strategic merge by mountPath), so that
+                      # old directory mount can survive on a live Deployment and would shadow
+                      # file mounts placed inside it.
                       - name: auth
-                        mountPath: /mosquitto/auth/passwd
+                        mountPath: /mosquitto/secrets/passwd
                         subPath: passwd
                         readOnly: true
                       - name: auth
-                        mountPath: /mosquitto/auth/acl
+                        mountPath: /mosquitto/secrets/acl
                         subPath: acl
                         readOnly: true
                       - name: data
