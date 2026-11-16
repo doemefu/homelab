@@ -526,8 +526,18 @@
                     volumeMounts:
                       - name: config
                         mountPath: /mosquitto/config
+                      # subPath, not a directory mount: Mosquitto 2.1 opens password_file and
+                      # acl_file with O_NOFOLLOW, and Secret/ConfigMap volume files are symlinks
+                      # (passwd -> ..data/passwd), so a directory mount fails with "Unable to open
+                      # pwfile". A subPath mount is a bind mount of the resolved file. subPath
+                      # files do not update in place; the checksum annotations restart the pod.
                       - name: auth
-                        mountPath: /mosquitto/auth
+                        mountPath: /mosquitto/auth/passwd
+                        subPath: passwd
+                        readOnly: true
+                      - name: auth
+                        mountPath: /mosquitto/auth/acl
+                        subPath: acl
                         readOnly: true
                       - name: data
                         mountPath: /mosquitto/data
@@ -543,8 +553,10 @@
                     configMap:
                       name: mosquitto-config
                   # Password file (Secret mosquitto-auth) and ACL (ConfigMap mosquitto-acl) in one
-                  # directory. optional: the pod also starts in rollback mode, where the config does
-                  # not reference these files and the objects may not exist yet.
+                  # directory. optional: the volume itself tolerates missing objects, but the subPath
+                  # mounts above need both files. Both objects are created by the auth tasks when
+                  # mqtt_auth_enabled is true and are not deleted in rollback mode, so a rollback on
+                  # this cluster keeps starting; a cluster that never ran with auth enabled would not.
                   - name: auth
                     projected:
                       defaultMode: 0440
