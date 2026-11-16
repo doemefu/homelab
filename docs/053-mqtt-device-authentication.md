@@ -61,8 +61,8 @@ Consequences of 2b:
 listener 1883
 use_username_as_clientid true
 allow_anonymous false
-password_file /mosquitto/auth/passwd
-acl_file /mosquitto/auth/acl
+password_file /mosquitto/secrets/passwd
+acl_file /mosquitto/secrets/acl
 persistence true
 persistence_location /mosquitto/data/
 log_dest stdout

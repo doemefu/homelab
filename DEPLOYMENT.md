@@ -2126,9 +2126,14 @@ How it is built:
   argv. The 12-byte salt is PBKDF2-HMAC-SHA512 of the password and the username, at the same cost as the
   hash, so the same password renders the same line and a second run changes nothing, and the salt is no
   shortcut for testing a password guess. Mosquitto 2.1 accepts only 12- or 64-byte salts.
-- Secret `mosquitto-auth` (key `passwd`) and ConfigMap `mosquitto-acl` (key `acl`) are mounted as one
-  projected volume at `/mosquitto/auth`, mode 0440, group 1883 (`fsGroup`). Mosquitto opens both files as
-  uid 1883 after reading `mosquitto.conf`.
+- Secret `mosquitto-auth` (key `passwd`) and ConfigMap `mosquitto-acl` (key `acl`) come from one projected
+  volume, mounted file by file with `subPath` at `/mosquitto/secrets/passwd` and `/mosquitto/secrets/acl`,
+  mode 0440, group 1883 (`fsGroup`). Mosquitto opens both files as uid 1883 after reading `mosquitto.conf`.
+  Mosquitto 2.1 opens them with `O_NOFOLLOW`, and Secret/ConfigMap volume files are symlinks
+  (`..data/…`), so a plain directory mount fails with `Unable to open pwfile`; `subPath` bind-mounts the
+  resolved file. Deployments rolled out before this change keep an unused `/mosquitto/auth` directory
+  mount (the playbook patches, it does not replace); remove it once with
+  `kubectl -n apps delete deployment mosquitto` followed by a playbook-50 run (PVC, Service and Secrets stay).
 - The pod annotation `checksum/config` rolls the broker when the config, a password or the ACL changes; the
   exporter has its own `checksum/credentials`. Each rollout drops device-service's MQTT connection for a few
   seconds; it reconnects by itself.
@@ -2179,7 +2184,7 @@ connect (no telemetry, no control); the terrarium devices keep their last state.
 
 ```bash
 kubectl -n apps logs deploy/mosquitto --tail=50 | grep -i -E "error|warn|denied|not authorised" || echo "no errors"
-kubectl -n apps exec deploy/mosquitto -- sh -c 'ls -ln /mosquitto/auth/ && grep -cF ":\$7\$" /mosquitto/auth/passwd'
+kubectl -n apps exec deploy/mosquitto -- sh -c 'stat -c "%F %U:%G %a %n" /mosquitto/secrets/passwd /mosquitto/secrets/acl && grep -cF ":\$7\$" /mosquitto/secrets/passwd'   # expect "regular file", not "symbolic link"
 # anonymous CONNECT is refused (expect "not authorised", rc 5)
 kubectl -n apps exec deploy/mosquitto -- mosquitto_pub -h localhost -t test/anon -m x; echo "rc=$?"
 # device-service is connected again
