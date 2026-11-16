@@ -4268,23 +4268,23 @@ run `GRANT CONNECT ON DATABASE <db> TO PUBLIC` as `postgres` for each database.
 for this window.
 
 ```bash
-K="kubectl -n apps"; PG="$K exec postgresql-0 -c postgresql --"
+k() { kubectl -n apps "$@"; }; pg() { k exec postgresql-0 -c postgresql -- "$@"; }   # functions, not variables: zsh does not word-split $VAR
 flux suspend kustomization device-service && flux suspend image update device-service
 flux get kustomization device-service                       # SUSPENDED True
-$K scale deploy/device-service --replicas=0
-$K wait --for=delete pod -l app=device-service --timeout=120s
-$PG psql -U postgres -d homelabdb -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # record the source row
-$PG psql -U postgres -c '\du homelab'   # expect no Superuser, Create role, Create DB or Bypass RLS attributes
+k scale deploy/device-service --replicas=0
+k wait --for=delete pod -l app=device-service --timeout=120s
+pg psql -U postgres -d homelabdb -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # record the source row
+pg psql -U postgres -tAc "select rolname, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls from pg_roles where oid = (select datdba from pg_database where datname = 'homelabdb')"   # the homelab_db_username role; expect f|f|f|f
 # while the session is open: run the password-hash census (auth-service DEPLOYMENT.md "Password policy and hashing cost")
 # merge step B (homelab#393, Secret repoint), then the owner runs playbook 59
-$PG pg_dump -U postgres -Fc -d homelabdb -t public.devices -t public.schedules -t public.flyway_schema_history_device -f /tmp/device.dump
-$PG pg_restore -U postgres --role=device_service --no-owner --no-acl --single-transaction --exit-on-error -d device_service /tmp/device.dump
-$PG psql -U postgres -d device_service -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # must equal the source row
-$PG psql -U postgres -d device_service -c '\dt' -c '\ds'    # owner device_service; sequences present
-$K exec postgresql-0 -c postgresql -- cat /tmp/device.dump > ~/informatik/homelab/backups/<ts>/device-cutover.dump && $PG rm /tmp/device.dump
+pg pg_dump -U postgres -Fc -d homelabdb -t public.devices -t public.schedules -t public.flyway_schema_history_device -f /tmp/device.dump
+pg pg_restore -U postgres --role=device_service --no-owner --no-acl --single-transaction --exit-on-error -d device_service /tmp/device.dump
+pg psql -U postgres -d device_service -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # must equal the source row
+pg psql -U postgres -d device_service -c '\dt' -c '\ds'    # owner device_service; sequences present
+k exec postgresql-0 -c postgresql -- cat /tmp/device.dump > ~/informatik/homelab/backups/<ts>/device-cutover.dump && pg rm /tmp/device.dump
 # merge the device-service DB_URL PR (doemefu/homelab-device-service#131)
 flux resume kustomization device-service && flux reconcile kustomization device-service --with-source
-$K get deploy device-service -o jsonpath='{.spec.replicas} {.spec.template.spec.containers[0].env[?(@.name=="DB_URL")].value}'   # expect restored replicas and the new DB_URL
+k get deploy device-service -o jsonpath='{.spec.replicas} {.spec.template.spec.containers[0].env[?(@.name=="DB_URL")].value}'   # expect restored replicas and the new DB_URL
 flux resume image update device-service
 ```
 
@@ -4300,13 +4300,13 @@ flux resume image update device-service
 
 **Rollback:**
 
-1. Suspend Flux and scale device-service down as in the window ($K and $PG as defined at the
+1. Suspend Flux and scale device-service down as in the window (k and pg as defined at the
    top of the window block):
 
    ```bash
    flux suspend kustomization device-service && flux suspend image update device-service
-   $K scale deploy/device-service --replicas=0
-   $K wait --for=delete pod -l app=device-service --timeout=120s
+   k scale deploy/device-service --replicas=0
+   k wait --for=delete pod -l app=device-service --timeout=120s
    ```
 
 2. Write the post-cutover rows back into `homelabdb`. First check the Flyway history; abort the
@@ -4314,11 +4314,12 @@ flux resume image update device-service
    schema). The data-only dump's SEQUENCE SET entries carry the sequence values:
 
    ```bash
-   $PG psql -U postgres -d device_service -tAc "select max(version::int) from flyway_schema_history_device"   # must be 3
-   $PG pg_dump -U postgres -Fc --data-only -d device_service -t public.devices -t public.schedules -f /tmp/device-back.dump
-   $PG psql -U postgres -d homelabdb -v ON_ERROR_STOP=1 -c 'TRUNCATE devices, schedules'
-   $PG pg_restore -U postgres --role=homelab --data-only --single-transaction --exit-on-error -d homelabdb /tmp/device-back.dump
-   $PG rm /tmp/device-back.dump
+   pg psql -U postgres -d device_service -tAc "select max(version::int) from flyway_schema_history_device"   # must be 3
+   pg pg_dump -U postgres -Fc --data-only -d device_service -t public.devices -t public.schedules -f /tmp/device-back.dump
+   pg psql -U postgres -d homelabdb -v ON_ERROR_STOP=1 -c 'TRUNCATE devices, schedules'
+   HL_OWNER=$(pg psql -U postgres -tAc "select pg_get_userbyid(datdba) from pg_database where datname = 'homelabdb'")   # the homelab_db_username role
+   pg pg_restore -U postgres --role="$HL_OWNER" --data-only --single-transaction --exit-on-error -d homelabdb /tmp/device-back.dump
+   pg rm /tmp/device-back.dump
    ```
 
 3. Revert step B (homelab#393); the owner runs playbook 59.
