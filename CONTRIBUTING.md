@@ -257,7 +257,7 @@ unimplemented), so these bumps are manual:
 - Container images: Pinned tags for every image; the 9 platform images listed in "Digest-Pinned Platform Images" below also carry a digest (`repo:tag@sha256:...`) — Flux-managed app images (auth-service, device-service, furchert-ch, data-service) stay tag-pinned via `ImagePolicy`/Flux image automation instead
 - Python packages: `infra/requirements.yml`
 - GitHub Actions `uses:` steps: full commit SHA with a `# vX.Y.Z` comment in `.github/workflows/{ci,codeql,helm-chart-freshness}.yml` — see the header comment in `ci.yml` for the re-pinning procedure (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`). The `Check Action Pins` job (`scripts/check-action-pins.py`, parses the workflow YAML) fails on any `uses:` value that is not a local path, a full commit SHA or a `docker://…@sha256:` digest. Dependabot's `github-actions` entry has a 7-day `cooldown` for version updates (security updates skip it)
-- CI-downloaded binaries (actionlint, kustomize, kubeconform, conftest, promtool in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction. ShellCheck is downloaded by `ludeeus/action-shellcheck`, which has no checksum input: `ci.yml` pins its `version:` and checks the same release asset URL against `SHELLCHECK_SHA256` in a separate download first (the copy the action runs is not itself verified)
+- CI-downloaded binaries (shellcheck, actionlint, kustomize, kubeconform, conftest, promtool in `ci.yml`): sha256-verified against the upstream release's own checksum before extraction, and the verified binary itself is the one that runs — ShellCheck in a single step with no third-party action (homelab-device-service#126)
 
 ### Digest-Pinned Platform Images
 
@@ -674,7 +674,7 @@ is `success` or `skipped` and fails on any `failure`/`cancelled`.
 pip install "yamllint==1.35.1"
 yamllint -c .yamllint .
 
-# Shell — CI runs shellcheck over the whole scripts/ dir (scandir: ./scripts)
+# Shell — CI runs shellcheck over the whole scripts/ dir
 find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
 
 # GitHub Actions workflows (checksum from the upstream release, same as CI — see .github/workflows/ci.yml)
