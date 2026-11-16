@@ -4261,6 +4261,11 @@ run `GRANT CONNECT ON DATABASE <db> TO PUBLIC` as `postgres` for each database.
   window and Mosquitto phase 1.
 - Do not swap the ssh Cloudflare Access policy that day (off-LAN kubectl runs through
   `ssh.furchert.ch`): run the window on the LAN, or keep ssh Access unchanged.
+- Off-LAN: open the SSH forward ("Off-LAN kubectl / Ansible Access"), then
+  `export KUBECONFIG=$HOME/.kube/config` and `kubectl config use-context tunnel`, so `k`, `pg`
+  and `flux` all reach the cluster through it; run playbook 59 with
+  `-e kubeconfig="$HOME/.kube/config"`. If the forward drops mid-window, nothing is lost:
+  device-service stays at 0 replicas and Flux stays suspended until you reconnect and continue.
 - Check `devices` for junk `terraN` rows and decide what happens to them before the dump.
 
 **Window steps:** device-service stays scaled down for the whole block, so nothing writes to
