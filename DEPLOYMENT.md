@@ -4264,8 +4264,10 @@ run `GRANT CONNECT ON DATABASE <db> TO PUBLIC` as `postgres` for each database.
 - Off-LAN: open the SSH forward ("Off-LAN kubectl / Ansible Access"), then
   `export KUBECONFIG=$HOME/.kube/config` and `kubectl config use-context tunnel`, so `k`, `pg`
   and `flux` all reach the cluster through it; run playbook 59 with
-  `-e kubeconfig="$HOME/.kube/config"`. If the forward drops mid-window, nothing is lost:
-  device-service stays at 0 replicas and Flux stays suspended until you reconnect and continue.
+  `-e kubeconfig="$HOME/.kube/config"`. If the forward drops mid-window, nothing is lost, but do
+  not assume the window state: after reconnecting, check that `flux get kustomization device-service`
+  shows `SUSPENDED True` and `k get deploy device-service -o jsonpath='{.spec.replicas}'` prints
+  `0`, and rerun any step that did not complete before continuing with the dump.
 - Check `devices` for junk `terraN` rows and decide what happens to them before the dump.
 
 **Window steps:** device-service stays scaled down for the whole block, so nothing writes to
@@ -4279,7 +4281,7 @@ flux get kustomization device-service                       # SUSPENDED True
 k scale deploy/device-service --replicas=0
 k wait --for=delete pod -l app=device-service --timeout=120s
 pg psql -U postgres -d homelabdb -tAc "select (select count(*) from devices),(select max(id) from devices),(select count(*) from schedules),(select max(id) from schedules),(select max(version) from flyway_schema_history_device)"   # record the source row
-pg psql -U postgres -tAc "select rolname, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls from pg_roles where oid = (select datdba from pg_database where datname = 'homelabdb')"   # the homelab_db_username role; expect f|f|f|f
+pg psql -U postgres -tAc "select rolname, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, oid = (select datdba from pg_database where datname = 'homelabdb') from pg_roles where rolcanlogin and rolname <> 'postgres' and has_database_privilege(oid, 'homelabdb', 'CONNECT')"   # expect one row, the homelab_db_username login: f|f|f|f|t (not superuser, owns homelabdb)
 # while the session is open: run the password-hash census (auth-service DEPLOYMENT.md "Password policy and hashing cost")
 # merge step B (homelab#393, Secret repoint), then the owner runs playbook 59
 pg pg_dump -U postgres -Fc -d homelabdb -t public.devices -t public.schedules -t public.flyway_schema_history_device -f /tmp/device.dump
@@ -4322,7 +4324,7 @@ flux resume image update device-service
    pg psql -U postgres -d device_service -tAc "select max(version::int) from flyway_schema_history_device"   # must be 3
    pg pg_dump -U postgres -Fc --data-only -d device_service -t public.devices -t public.schedules -f /tmp/device-back.dump
    pg psql -U postgres -d homelabdb -v ON_ERROR_STOP=1 -c 'TRUNCATE devices, schedules'
-   HL_OWNER=$(pg psql -U postgres -tAc "select pg_get_userbyid(datdba) from pg_database where datname = 'homelabdb'")   # the homelab_db_username role
+   HL_OWNER=$(pg psql -U postgres -d homelabdb -tAc "select tableowner from pg_tables where schemaname = 'public' and tablename = 'devices'")   # the homelab_db_username role
    pg pg_restore -U postgres --role="$HL_OWNER" --data-only --single-transaction --exit-on-error -d homelabdb /tmp/device-back.dump
    pg rm /tmp/device-back.dump
    ```
